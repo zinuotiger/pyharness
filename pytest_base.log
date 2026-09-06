@@ -1,0 +1,14 @@
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 91%]
+...................................                                      [100%]
+============================== warnings summary ===============================
+tests/invariants/test_inv_bus.py::test_register_type_then_emit_ok
+  C:\Users\LENOVO\Desktop\mini-harness\tests\invariants\test_inv_bus.py:25: RuntimeWarning: coroutine 'EventBus._dispatch' was never awaited
+    bus.emit("user.message", {"text": "hi"})
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html

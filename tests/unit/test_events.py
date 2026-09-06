@@ -1,9 +1,10 @@
 """events 模块单测 — 契约:specs/events.py.md + EVENT-SCHEMA.md §3
 
-覆盖面:词表完整(57 名全量核对)、Envelope 三要素(seq/type/ts UTC)、
-seq 连续性(EVT-101)、非法输入抛码(EVT-100/102/106)、payload 二次强校验、
-SeqState 分配器、check_seq_gap 空洞自检。
-说明:词表完整性断言必须位于本文件最前(见 test_vocab_full_57),其后注册类
+覆盖面:词表完整(64 名全量核对:57 词表 + §7 词表外扩展 llm.retry/plan.done/
+plan.aborted/schedule.registered/updated/removed/blocked/missed)、Envelope 三要素
+(seq/type/ts UTC)、seq 连续性(EVT-101)、非法输入抛码(EVT-100/102/106)、payload
+二次强校验、SeqState 分配器、check_seq_gap 空洞自检。
+说明:词表完整性断言必须位于本文件最前(见 test_vocab_full_64),其后注册类
 测试会向运行期注册表追加合成类型(只增不改,无注销 API)。
 """
 import re
@@ -18,8 +19,10 @@ from pyharness.events import (Envelope, EVENT_TYPES, SeqState, check_seq_gap,
                               validate_payload)
 from pyharness.errors import PyHError
 
-# EVENT-SCHEMA §3 词汇总表 57 名(A-E 分组,权威顺序) — PARAMETER-ANCHOR 锁定 57
-EXPECTED_57 = (
+# EVENT-SCHEMA §3 词汇总表 57 名 + §7 词表外扩展 7 名(llm.retry 同款先例:
+# plan.done/plan.aborted 由 specs/plan_mode.py.md F046 登记;schedule.registered/
+# updated/removed/blocked/missed 由 specs/schedule.py.md F048 登记;A-E 分组,权威顺序)
+EXPECTED_ALL = (
     # A 会话(4)
     "session.created", "session.renamed", "session.finished", "session.recovered",
     # B 用户输入侧(5)
@@ -36,8 +39,11 @@ EXPECTED_57 = (
     "task.enqueued", "task.started", "task.completed", "task.failed",
     "segment.start", "segment.end",
     "plan.proposed", "plan.approved", "plan.rejected", "plan.exec.step",
+    "plan.done", "plan.aborted",          # §7 词表外扩展(F046 终态事件)
     "goal.created", "goal.updated", "goal.completed",
-    "schedule.trigger", "job.started", "job.completed", "job.failed",
+    "schedule.trigger", "schedule.registered", "schedule.updated",
+    "schedule.removed", "schedule.blocked", "schedule.missed",  # §7 扩展(F048)
+    "job.started", "job.completed", "job.failed",
     "subagent.spawned", "subagent.joined", "subagent.failed",
     "workflow.step", "queue.suspended", "queue.resumed",
     # E 系统侧(9)
@@ -45,7 +51,7 @@ EXPECTED_57 = (
     "plugin.installed", "plugin.uninstalled", "bus.backpressure",
     "system.cancelled", "system.error", "todo.updated", "syscheck.fail",
 )
-assert len(EXPECTED_57) == 57, "测试词表清单必须恰为 57 名"
+assert len(EXPECTED_ALL) == 64, "测试词表清单必须恰为 64 名(57 + §7 扩展 7)"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -60,10 +66,10 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 # =====================================================================
 # 词表完整
 # =====================================================================
-def test_vocab_full_57():
-    """词表 57 名与 EVENT-SCHEMA §3 权威清单完全一致(不多不少)。"""
-    assert len(EVENT_TYPES) == 57
-    assert set(EVENT_TYPES) == set(EXPECTED_57)
+def test_vocab_full_64():
+    """词表 64 名(57 核心 + §7 扩展 7)与权威清单完全一致(不多不少)。"""
+    assert len(EVENT_TYPES) == 64
+    assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 
 def test_strong_sync_families_present():
@@ -81,7 +87,7 @@ def test_transient_types_constants():
     assert EV.TRANSIENT_TYPES == frozenset({"llm.chunk", "registry.updated"})
     assert payload_model_for("llm.chunk") is not None
     assert EV.is_transient("llm.chunk") is True
-    assert "registry.updated" not in EVENT_TYPES      # 无 §3 字段表,不入 57
+    assert "registry.updated" not in EVENT_TYPES      # 无 §3 字段表,不入词表
     assert EV.is_transient("user.message") is False
 
 

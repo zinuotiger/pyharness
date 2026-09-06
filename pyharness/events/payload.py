@@ -251,10 +251,15 @@ class PlanStep(_PayloadBase):
 
 
 class PlanProposedPayload(_PayloadBase):
-    """plan.proposed:goal + steps ≤8 步;危险步标"审批点"(risk 语义由编排层解释)。"""
+    """plan.proposed:goal + steps ≤8 步;危险步标"审批点"(risk 语义由编排层解释)。
+
+    expires_at = 方案 24h 作废截止(ISO8601 UTC;specs/plan_mode.py.md F045 边界,
+    伪码载荷字段,§7 只加可选——rebuild 后过期判定仍需该值)。
+    """
     goal: str = Field(min_length=1)
     steps: list[PlanStep] = Field(min_length=1, max_length=8)
     selfcheck_ok: Optional[bool] = None
+    expires_at: Optional[str] = None        # 24h TTL 截止;缺省(旧日志)由 ts+24h 兜底
 
 
 class PlanApprovedPayload(_PayloadBase):
@@ -264,9 +269,14 @@ class PlanApprovedPayload(_PayloadBase):
 
 
 class PlanRejectedPayload(_PayloadBase):
-    """plan.rejected:拒绝后不再推进。"""
+    """plan.rejected:拒绝后不再推进。
+
+    reason = 拒绝原因载体(修订意见/expired/revised:step:N;specs/plan_mode.py.md
+    伪码载荷,§7 只加可选——rejected 回修订对话的可审计修订意见)。
+    """
     plan_id: int = Field(ge=1)
     who: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class PlanExecStepPayload(_PayloadBase):
@@ -276,18 +286,44 @@ class PlanExecStepPayload(_PayloadBase):
     action: str = Field(min_length=1)
 
 
+class PlanDonePayload(_PayloadBase):
+    """plan.done:方案全部步骤成功(词表外扩展,§7 规则登记;specs/plan_mode.py.md)。
+
+    终态只认事件(S-1):done/aborted 触发者恒 system,由执行器/过期清理写入。
+    """
+    plan_id: int = Field(ge=1)
+
+
+class PlanAbortedPayload(_PayloadBase):
+    """plan.aborted:执行中止(重试耗尽/用户中止/headless 安全默认),step=中止步(0 起)。
+
+    词表外扩展(§7 规则登记;PRD F046 验收伪代码使用的终态事件)。
+    """
+    plan_id: int = Field(ge=1)
+    step: int = Field(ge=0)
+
+
 class GoalCreatedPayload(_PayloadBase):
-    """goal.created:goal_id + 可选描述;updated/completed 前必有本事件。"""
+    """goal.created:goal_id + 可选描述;updated/completed 前必有本事件。
+
+    task_id = F044 关联任务(目标可绑定产生它的任务,specs/goal.py.md 伪码载荷)。
+    """
     goal_id: str = Field(min_length=1)
     desc: Optional[str] = None
+    task_id: Optional[str] = None
 
 
 class GoalUpdatedPayload(_PayloadBase):
-    """goal.updated:status 四枚举(active/paused/done/abandoned)。"""
+    """goal.updated:status 四枚举(active/paused/done/abandoned)。
+
+    progress = 0..1 进度上报(specs/goal.py.md 核对/重建契约:rebuild 需从事件
+    payload 还原 progress,故事件必须携带该字段;goal.py.md 伪码载荷同款)。
+    """
     goal_id: str = Field(min_length=1)
     status: str = Field(pattern=r"^(active|paused|done|abandoned)$")
     desc: Optional[str] = None
     note: Optional[str] = None
+    progress: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class GoalCompletedPayload(_PayloadBase):
@@ -301,6 +337,61 @@ class ScheduleTriggerPayload(_PayloadBase):
     job: str = Field(min_length=1)
     cron: str = Field(min_length=1)
     fired_at: str = Field(min_length=1, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+# =====================================================================
+# schedule.* 词表外扩展(specs/schedule.py.md F048;EVENT-SCHEMA §7 规则登记,
+# llm.retry 同款先例)——schedule.trigger 之外 5 个调度生命周期事件:
+# 定义注册/暂停恢复/移除/深夜禁触发/宕机错过,全部普通落盘(§8.1)。
+# =====================================================================
+class ScheduleRegisteredPayload(_PayloadBase):
+    """schedule.registered:job 定义 + 首次触发窗快照(事件 = 注册表唯一真源,INV-01)。
+
+    template 只持久化 intent(spec 伪码契约;meta 不入事件——可能含敏感编排信息,
+    且 rebuild 仅需 intent 即可到点 submit,INV-09 外松内紧)。
+    """
+    name: str = Field(min_length=1)
+    kind: str = Field(pattern=r"^(cron|interval|at)$")
+    expr: str = Field(min_length=1)
+    template: dict = Field(min_length=1)
+    is_risky: bool
+    paused: bool
+    next_fire_at: Optional[str] = Field(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+    # None = cron 在扫描上限内无匹配(如 2/30):可注册但不触发(数据表 datetime|None)
+
+
+class ScheduleUpdatedPayload(_PayloadBase):
+    """schedule.updated:暂停/恢复状态迁移;resume 附带重臂后的 next_fire_at。"""
+    name: str = Field(min_length=1)
+    paused: bool
+    next_fire_at: Optional[str] = Field(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+class ScheduleRemovedPayload(_PayloadBase):
+    """schedule.removed:job 移除留痕(重建时该名不再出现)。"""
+    name: str = Field(min_length=1)
+
+
+class ScheduleBlockedPayload(_PayloadBase):
+    """schedule.blocked:深夜窗(23:00-7:00)禁触危险类模板——blocked 留痕零入队。"""
+    job: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class ScheduleMissedPayload(_PayloadBase):
+    """schedule.missed:宕机期错过的触发机会,只留痕不补跑(PRD F048 边界)。
+
+    missed = 错过触发机会数(合并计数);since/until = 错过窗口 [持久化 next_fire_at,
+    now],ISO8601。
+    """
+    job: str = Field(min_length=1)
+    missed: int = Field(ge=1)
+    since: str = Field(min_length=1,
+                       pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+    until: str = Field(min_length=1,
+                       pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 class JobStartedPayload(_PayloadBase):

@@ -31,5 +31,11 @@
 | approval.py | approval.py.md | ✅ | ~15 | 743 行,TTL 120s + 防轰炸合并(120 次压力复跑稳定) |
 | tools_executor.py | tools_executor.py.md | 🔴 | - | 依赖 guard/approval 齐后派 |
 
-## 阶段 2-6
-(待阶段 1 完成后续填)
+## 阶段 3(工具域:4 模块)⏳ 3.5/4
+
+| 模块 | spec | 状态 | 单测 | 备注 |
+|------|------|:---:|-----:|------|
+| spill.py | spill.py.md | ✅ | ~63 | F039 输出溢出,原子落盘 + 600 权限 |
+| tool_fs.py | tool_fs.py.md | ✅ | 44 | fs.* 四工具,83% 覆盖 |
+| tool_web.py | tool_web.py.md | ⏳ | - | 实现完成,测试补写中 |
+| commands.py | commands.py.md | ✅ | 27 | 斜杠命令总闸,100% 覆盖 |

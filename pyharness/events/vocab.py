@@ -1,8 +1,10 @@
 """pyharness/events/vocab.py — 事件词表注册 (specs/events.py.md)
 
 _EVENT_REGISTRY 类型 → payload 模型注册表;register_event_type/payload_model_for/
-validate_payload 三函数 = 校验链第 2、3 步。57 个核心类型在模块导入期一次性注册
-(框架"启动期注册");插件运行时以 plugin.<id>.<name> 命名空间注册,只增不改。
+validate_payload 三函数 = 校验链第 2、3 步。64 个核心类型在模块导入期一次性注册
+(EVENT-SCHEMA §3 的 57 基线 + 词表外扩展:llm.retry/plan.done/plan.aborted/
+schedule.registered/updated/removed/blocked/missed,按 §7 规则登记);
+插件运行时以 plugin.<id>.<name> 命名空间注册,只增不改。
 
 抛错一律 raise_code(EVT-1xx),禁裸 raise str。
 """
@@ -35,6 +37,8 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     LlmRetryPayload,
     LlmUsagePayload,
     PlanApprovedPayload,
+    PlanAbortedPayload,
+    PlanDonePayload,
     PlanExecStepPayload,
     PlanProposedPayload,
     PlanRejectedPayload,
@@ -42,7 +46,12 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     PluginUninstalledPayload,
     QueueResumedPayload,
     QueueSuspendedPayload,
+    ScheduleBlockedPayload,
+    ScheduleMissedPayload,
+    ScheduleRegisteredPayload,
+    ScheduleRemovedPayload,
     ScheduleTriggerPayload,
+    ScheduleUpdatedPayload,
     SegmentEndPayload,
     SegmentStartPayload,
     SessionCreatedPayload,
@@ -91,7 +100,7 @@ _TRANSIENT: set[str] = set(TRANSIENT_TYPES)
 
 def register_event_type(type_: str, model: type[BaseModel], *,
                         transient: bool = False) -> None:
-    """词表注册(框架 57 类型启动期注册;插件运行时注册 plugin.<id>.<name>)。
+    """词表注册(框架 64 类型启动期注册;插件运行时注册 plugin.<id>.<name>)。
 
     重复注册拒绝(EVT-102,§3.8 只增不改):破坏性变更 = 新类型名,旧类型冻结。
     """
@@ -155,7 +164,9 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 57 事件类型全量入册(EVENT-SCHEMA §3 A-E 分组权威;PARAMETER-ANCHOR 锁定 57)。
+# 64 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 7 项
+# 按 §7 登记:llm.retry F028 / plan.done·plan.aborted F046 / schedule.registered·
+# updated·removed·blocked·missed F048;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
 _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # ---- A 会话生命周期(§3.1)
@@ -198,10 +209,20 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     ("plan.approved", PlanApprovedPayload, False),
     ("plan.rejected", PlanRejectedPayload, False),
     ("plan.exec.step", PlanExecStepPayload, False),
+    # 词表外扩展(§7 规则登记;specs/plan_mode.py.md F046 终态事件,PRD 伪代码用词)
+    ("plan.done", PlanDonePayload, False),
+    ("plan.aborted", PlanAbortedPayload, False),
     ("goal.created", GoalCreatedPayload, False),
     ("goal.updated", GoalUpdatedPayload, False),
     ("goal.completed", GoalCompletedPayload, False),
     ("schedule.trigger", ScheduleTriggerPayload, False),
+    # schedule.* 词表外扩展(specs/schedule.py.md F048,EVENT-SCHEMA §7 登记,
+    # llm.retry 同款先例;§3.5.3 字段表待文档管线同步——见规格"词表外新增")
+    ("schedule.registered", ScheduleRegisteredPayload, False),
+    ("schedule.updated", ScheduleUpdatedPayload, False),
+    ("schedule.removed", ScheduleRemovedPayload, False),
+    ("schedule.blocked", ScheduleBlockedPayload, False),
+    ("schedule.missed", ScheduleMissedPayload, False),
     ("job.started", JobStartedPayload, False),
     ("job.completed", JobCompletedPayload, False),
     ("job.failed", JobFailedPayload, False),
@@ -225,7 +246,7 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
 
 
 def _install_core_vocabulary() -> None:
-    """框架 57 类型启动期注册(模块导入即完成;只增不改)。"""
+    """框架 64 类型启动期注册(模块导入即完成;只增不改)。"""
     for type_, model, transient in _CORE_EVENT_TYPES:
         register_event_type(type_, model, transient=transient)
 

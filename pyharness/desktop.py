@@ -79,7 +79,7 @@ from typing import Any, Iterable, Optional, Union
 
 import uvicorn
 from fastapi import Body, FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from pyharness.core.approval import ApprovalProvider
 from pyharness.core.session import SessionLog, open_session
@@ -756,15 +756,18 @@ class DesktopApp:
     def mount_api(self) -> None:
         """注册全部端点(只读投影 + 引擎门面写 + SSE)+ PyHError 统一错误体(ADR-011)。"""
         a = self.api
+        a.add_api_route("/", self._index_page, methods=["GET"])
+        a.add_api_route("/api/sessions", self.create_session, methods=["POST"])
         a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"])
         a.add_api_route("/api/sessions/{sid}/messages", self.session_messages,
                         methods=["GET"])
+        a.add_api_route("/api/sessions/{sid}/messages", self.create_message,
+                        methods=["POST"])
         a.add_api_route("/api/sessions/{sid}/timeline", self.session_timeline,
                         methods=["GET"])                            # 轨迹(核心)
         a.add_api_route("/api/sessions/{sid}/event/{seq}", self.event_detail,
                         methods=["GET"])
         a.add_api_route("/api/stream", self.stream_sse, methods=["GET"])  # SSE
-        a.add_api_route("/api/sessions", self.create_message, methods=["POST"])
         a.add_api_route("/api/approvals/pending", self.pending_approvals,
                         methods=["GET"])
         a.add_api_route("/api/approvals/{aid}", self.decide_approval,
@@ -798,6 +801,31 @@ class DesktopApp:
                             content={"code": "CYC-999",
                                      "advice": "引擎内部错误(见本地日志)",
                                      "detail": {"type": type(exc).__name__}})
+
+    # ------------------------------------------------ 页面(前端入口)
+    @staticmethod
+    def _index_page() -> HTMLResponse:
+        """根路由:加载内嵌前端页(会话列表/对话/轨迹时间线/审批/预算)。
+
+        前端文件打包为 data 资源:源码运行读 pyharness/ui/index.html;PyInstaller
+        打包时 --add-data 携带同相对路径(_MEIPASS 下亦命中)。缺失 → 兜底提示页。
+        """
+        try:
+            import importlib.resources as _ir
+            html = _ir.files("pyharness.ui").joinpath("index.html").read_text(
+                encoding="utf-8")
+        except Exception:                       # noqa: BLE001 资源缺失兜底
+            from pathlib import Path as _P
+            p = _P(__file__).resolve().parent / "ui" / "index.html"
+            try:
+                html = p.read_text(encoding="utf-8")
+            except Exception:                   # noqa: BLE001
+                html = ("<html><body style='background:#0f1420;color:#dbe4f5;"
+                        "font-family:sans-serif;display:flex;align-items:center;"
+                        "justify-content:center;height:100vh'>"
+                        "<div><h2>PyHarness Desktop</h2>"
+                        "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
+        return HTMLResponse(html)
 
     # ------------------------------------------------ 会话解析(端点共用)
     async def _require_session(self, sid: str) -> Any:
@@ -859,6 +887,20 @@ class DesktopApp:
         self.stopping.set()
 
     # ============================================================ 端点实现
+    async def create_session(self) -> dict:
+        """新建会话(前端 + 按钮):门面 create → 新 sid(created seq=1 已落盘)。"""
+        mgr = self._surface_mgr()
+        fn = getattr(mgr, "create", None)
+        if not callable(fn):
+            raise_code("CYC-999", hint="会话门面未实现 create(缺 DesktopSessionManager)")
+        sid = fn()
+        if hasattr(sid, "__await__"):
+            sid = await sid
+        # 新会话立即登记进同柄缓存(避免首条消息再走 open_session)
+        log_ = await self._require_session(sid)
+        self._logs[sid] = log_
+        return {"sid": str(sid)}
+
     async def list_sessions(self) -> dict:
         """会话列表投影:门面 list(自装配管理器扫目录;绑定日志单条)。"""
         lst = self._surface_mgr().list()

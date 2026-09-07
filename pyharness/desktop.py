@@ -867,6 +867,12 @@ class DesktopApp:
                 sessions_dir=_sessions_dir_of(self.ctx), store=store,
                 attach_persistence=False)   # manager 已订阅落盘;重复订=双写卡死
             self._engines[sid] = spine
+            # 审批接线:engine ApprovalProvider → ctx.approval(桌面裁决端点
+            # _provider_owning 经 ctx.approval 兜底定位;否则弹窗 A/B 打来 APR-503)
+            if getattr(self.ctx, "approval", None) is None:
+                self.ctx.approval = spine.approval
+            if getattr(self.ctx, "guard", None) is None:
+                self.ctx.guard = spine.guard
         return _eng_make_runner(spine)
 
     def _runner_seam(self) -> Any:

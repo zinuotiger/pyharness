@@ -83,7 +83,7 @@ logger = logging.getLogger("pyharness.approval")
 
 # ====================================================================== 常量
 # 交互裁决通道(外壳装配注入:交互 CLI/Web/ACP);headless/管道/后台 job 无通道
-CHANNELS: tuple[str, ...] = ("cli", "web", "acp")
+CHANNELS: tuple[str, ...] = ("cli", "web", "acp", "desktop")
 
 # 三结果字面量(request 返回值/终态;超时=denied 安全默认但结果字面量仍为 timeout)
 VERDICTS: tuple[str, ...] = ("granted", "denied", "timeout")

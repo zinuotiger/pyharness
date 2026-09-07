@@ -194,16 +194,30 @@ class SessionLog:
                 sources.append(ev.seq)
             elif t == "llm.response":
                 c = p.get("content") or ""
-                if c:
-                    msgs.append({"role": "assistant", "content": c})
+                calls = p.get("tool_calls") or []
+                if c or calls:
+                    # 工具轮必须重建 assistant.tool_calls(OpenAI/DeepSeek 协议:
+                    # tool 消息前须有含同 id 的 assistant,否则端点 400——真链实测)
+                    am: dict = {"role": "assistant", "content": c or None}
+                    if calls:
+                        am["tool_calls"] = []
+                        for tc in calls:
+                            fn = tc.get("function") or {}   # 兼容扁平/嵌套两种 wire
+                            am["tool_calls"].append({
+                                "id": tc.get("id") or fn.get("id") or "",
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("name") or fn.get("name", ""),
+                                    "arguments": tc.get("arguments")
+                                                 or fn.get("arguments") or ""}})
+                    msgs.append(am)
                     sources.append(ev.seq)
-                else:
-                    pending = ev.seq           # 空 content = 工具调用轮,等配对
-            elif t == "tool.result" and pending is not None:
-                msgs.append({"role": "tool", "content": p["summary"],
-                             "name": p["name"]})
+            elif t == "tool.result":
+                msgs.append({"role": "tool",
+                             "tool_call_id": p.get("call_id") or "",
+                             "content": p.get("summary") or "",
+                             "name": p.get("name")})
                 sources.append(ev.seq)
-                pending = None
             # guard.*/agent.message/tool.error/其余 llm.*/E 组:审计流或派生外,
             # 不进 LLM 上下文(§4.2 映射表);llm.chunk 为瞬时事件,日志中天然不存在
         return msgs

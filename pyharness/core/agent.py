@@ -467,6 +467,8 @@ def create_agent(session_id: str, spine: Any, cfg: Any) -> Agent:
     ag.ctx.bus = spine.bus                       # 事件总线(留痕/订阅出口)
     ag.ctx.registry = spine.registry             # 注册表(F003 寻址)
     ag.ctx.config = cfg
+    ag.ctx.guard = getattr(spine, "guard", None)      # guard 链(executor 关3,F031 兜底)
+    ag.ctx.approval = getattr(spine, "approval", None)  # 审批(executor 转审批 F015)
     ag.ctx.host = _CapabilityHost(ag)            # 关闭时逆序 detach 全部 caps
     ag._spine = spine                            # 释放占位需回写装配束
     aa[session_id] = ag                          # 占位登记(enter 失败回滚释放)

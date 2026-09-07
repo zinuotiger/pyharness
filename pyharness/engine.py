@@ -127,10 +127,39 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     scope = Scope(policy, limits, session_id=str(getattr(log_, "session_id", "")),
                   session=log_, bus=bus)
 
-    # Registry(空工具表;纯聊装配,见偏离 1)
+    # Registry(能力三类索引,agent 装配用)
     registry = Registry(bus)
+
+    # ---- 工具链(F008/F014/F015 真装配):fs.* 4 工具 + 四关执行器 + guard + 审批
     from pyharness.core.tools_registry import ToolRegistry
-    tools = ToolRegistry()                   # 空注册表:schemas_for → [],零 Provider
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core import tool_fs
+
+    tool_reg = ToolRegistry()
+    tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
+    tools = ToolExecutor(tool_reg)             # ctx.tools: schemas_for + execute(四关管道)
+    guard = GuardChain(session=log_, bus=bus)  # 内置 g1-g7(单调,事件落 session)
+    approval = ApprovalProvider(session=log_, bus=bus, config=cfg,
+                                channel="desktop")   # 审批请求入 pending,桌面轮询
+
+    # danger 分级同源装配(F023):注册表 defn.danger → policy.danger_marks,
+    # scope.can_use 据此拦 critical、schemas_for 据此过滤不可见工具
+    marks = []
+    for d in tool_reg.iter_definitions():
+        lv = str(getattr(d, "danger", "none") or "none")
+        if lv != "none":
+            marks.append({"pattern": str(d.name), "level": lv})
+    if marks:
+        policy.danger_marks = marks
+    # workspace 根(F055):scope.policy.workspace_root,未设则 fs.* 全部 fail-closed
+    ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
+                   ).expanduser()
+    ws_root.mkdir(parents=True, exist_ok=True)
+    policy.workspace_root = str(ws_root)
+    # storage.spill 留 None:executor 超长输出(>2KB)报 PERS-221 回喂 LLM,
+    # 不崩;演示文件 <2KB 不触发(SpillProvider 装配待 spill 模块接线)
 
     # LLM 门面(会话级;适配器须先 register_default_llm)
     llm_client = llm_mod.LLMClient(cfg)
@@ -146,9 +175,10 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
 
     spine = SimpleNamespace(
         session=log_, bus=bus, registry=registry, persistence=store,
-        scope=scope, llm=llm_client, tools=tools,  # 空 ToolRegistry(schemas_for 可调)
+        scope=scope, llm=llm_client, tools=tools,  # ToolsExecutor(四关管道)
+        guard=guard, approval=approval,
         loop=loop, sys=None, settings=cfg,
-        storage=SimpleNamespace(sessions_dir=sessions_dir),
+        storage=SimpleNamespace(sessions_dir=sessions_dir, spill=None),
         active_agents={}, headless=False)
     return spine
 
@@ -253,8 +283,9 @@ async def assemble_real_engine(cfg: Any, *, sid: str,
         settings=cfg, bus=spine.bus, session=spine.session,
         llm=spine.llm, scope=spine.scope, loop=spine.loop,
         tools=spine.tools, registry=spine.registry,
+        guard=spine.guard, approval=spine.approval,
         agent=None, task_runner=make_runner(spine),
         make_runner=lambda: make_runner(spine),
-        storage=SimpleNamespace(sessions_dir=sessions_dir),
+        storage=SimpleNamespace(sessions_dir=sessions_dir, spill=None),
         engine_spine=spine)
     return ctx

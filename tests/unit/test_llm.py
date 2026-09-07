@@ -432,9 +432,24 @@ class TestChat:
         tools = [{"type": "function", "function": {"name": "fs.read_file"}}]
         ctx = _ctx(s)
         resp = await adp.chat([{"role": "user", "content": "hi"}], tools=tools, ctx=ctx)
-        assert adp._transport.requests[0]["tools"] == tools   # 有工具照传
+        # DeepSeek 禁点号工具名:传输层收清洗名,响应 tool_calls 还原原名
+        sent = adp._transport.requests[0]["tools"]
+        assert sent[0]["function"]["name"] == "fs_read_file"
         assert _event(s, "llm.request").payload["n_tools"] == 1
         assert resp.content == "用工具"
+
+    async def test_tool_calls_name_restored_after_sanitize(self) -> None:
+        """DeepSeek 禁点号:响应 tool_calls 名 fs_read_file → 还原 fs.read_file。"""
+        s = await _session()
+        raw = _raw(content=None, finish="tool_calls", usage=_usage(prompt=5, out=3),
+                   tool_calls=[_tc("call_1", "fs_read_file", '{"path": "a.txt"}')])
+        adp = _adapter(result=raw)
+        ctx = _ctx(s)
+        resp = await adp.chat([{"role": "user", "content": "hi"}],
+                              tools=[{"type": "function",
+                                      "function": {"name": "fs.read_file"}}],
+                              ctx=ctx)
+        assert resp.tool_calls and resp.tool_calls[0].name == "fs.read_file"
 
     async def test_tool_round_content_null_normalized(self) -> None:
         """工具轮:content=null → 归一 "";llm.response.tool_calls arguments 原文回填。"""

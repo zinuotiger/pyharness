@@ -250,19 +250,21 @@ async def _conversation(log: SessionLog) -> list[int]:
 
 
 async def test_derive_mapping_user_assistant_tool_pair_gwt_s3_02():
-    """reducer:user→user、有 content 的 response→assistant、空 content 轮 + 
-    tool.result→tool 配对消息;guard.rejected 只留审计不进 LLM 上下文。"""
+    """reducer:user→user、有 content 的 response→assistant、工具轮重建
+    assistant.tool_calls + tool 配对(协议要求:tool 前须有含同 id 的
+    assistant,否则端点 400——真链实测);guard.rejected 只留审计不进上下文。"""
     log = SessionLog(sid=SID)
     await _conversation(log)
     msgs = log.derive_messages()
     assert msgs == [
         {"role": "user", "content": "帮我整理 D:/work"},
         {"role": "assistant", "content": "好的,开始整理"},
-        {"role": "tool", "content": "42 项:3 文件夹,39 文件", "name": "list_dir"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "call_1", "type": "function",
+                         "function": {"name": "list_dir", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1",
+         "content": "42 项:3 文件夹,39 文件", "name": "list_dir"},
     ], f"GWT-S3-02 配对投影不符: {msgs}"
-    # 空 content 的 response 本身不产生 assistant 消息(§4.2 置 pending)
-    assert not any(m["role"] == "assistant" and not m.get("content")
-                   for m in msgs)
     # guard.rejected 不在结果;session.created 也不映射
     assert not any("guard" in str(m) for m in msgs)
 

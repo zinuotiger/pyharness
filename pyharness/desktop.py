@@ -423,9 +423,14 @@ def run_uvicorn(app: "DesktopApp", port: int) -> None:
 
     偏离 5:手工持 loop(server.serve 在自建 loop 上运行)并把 app.loop 暴露给
     DesktopBridge._run 跨线程投递;线程收尾复位 app.server/app.loop。
+    PyInstaller --windowed 打包:进程无 console 句柄 → sys.stderr 为 None,
+    uvicorn 默认 formatter 调 isatty() 崩(AttributeError)→ 无 stderr 时
+    log_config=None 跳过 dictConfig(用标准 logging,日志进兜底 handler)。
     """
-    config = uvicorn.Config(app.api, host=HOST, port=port,
-                            log_level="warning", workers=1)
+    kw: dict = dict(log_level="warning", workers=1)
+    if sys.stderr is None:                    # windowed/frozen 无 stderr:禁用 uvicorn 自配日志
+        kw["log_config"] = None
+    config = uvicorn.Config(app.api, host=HOST, port=port, **kw)
     server = uvicorn.Server(config)
     app.server = server
     loop = asyncio.new_event_loop()

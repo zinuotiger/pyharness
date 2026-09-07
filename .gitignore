@@ -4,3 +4,8 @@ __pycache__/
 docs/docs_html/
 docs/specs/*.part*
 .pytest_cache/
+
+# PyInstaller 产物(不入库,面试打包时本地生成)
+build/
+dist/
+*.spec

@@ -225,7 +225,8 @@ class AgentLoop:
         由 llm 内部消化;llm.request/usage 事件由 llm 层落日志,本函数不越权。
         """
         hist = ctx.session.derive_messages(ctx.scope.window_tokens)  # 日志现派生(INV-01)
-        resp = await ctx.llm.chat(hist, tools=ctx.tools.schemas_for(ctx.scope))
+        resp = await ctx.llm.chat(hist, tools=ctx.tools.schemas_for(ctx.scope),
+                                  ctx=ctx)          # llm.chat 须 ctx(落 request/usage 事件)
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""
             if not content:                           # llm 双空响应:模型域未预期

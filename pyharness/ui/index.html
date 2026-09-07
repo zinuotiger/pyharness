@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PyHarness Desktop</title>
+<style>
+:root {
+  --bg: #0f1420; --panel: #171e2e; --panel2: #1d2637; --border: #2a3550;
+  --text: #dbe4f5; --muted: #8b98b5; --accent: #4f8cff; --accent2: #6ea8ff;
+  --ok: #3ddc97; --warn: #ffb84d; --danger: #ff5d5d; --user: #2b3a5e;
+  --mono: "Cascadia Code", Consolas, monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { height:100%; }
+body { background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI", system-ui, sans-serif; display:flex; flex-direction:column; overflow:hidden; }
+
+/* ===== 顶栏 ===== */
+header { display:flex; align-items:center; gap:12px; padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border); }
+header .logo { font-weight:700; font-size:15px; letter-spacing:.5px; }
+header .logo b { color:var(--accent); }
+header .sub { color:var(--muted); font-size:12px; }
+#budget-chip { margin-left:auto; font-size:12px; color:var(--muted); background:var(--panel2); border:1px solid var(--border); border-radius:20px; padding:2px 12px; }
+#budget-chip.warn { color:var(--warn); border-color:var(--warn); }
+
+/* ===== 三栏主体 ===== */
+main { flex:1; display:flex; min-height:0; }
+
+/* 左:会话列表 */
+#sidebar { width:230px; background:var(--panel); border-right:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
+#sidebar h3 { font-size:12px; color:var(--muted); padding:10px 12px 6px; letter-spacing:1px; }
+#session-list { flex:1; overflow-y:auto; }
+.sess { padding:9px 12px; cursor:pointer; border-left:3px solid transparent; color:var(--muted); font-size:13px; display:flex; align-items:center; gap:8px; }
+.sess:hover { background:var(--panel2); color:var(--text); }
+.sess.active { background:var(--panel2); border-left-color:var(--accent); color:var(--text); }
+.sess .dot { width:6px; height:6px; border-radius:50%; background:var(--ok); flex:none; }
+#new-session { margin:10px; padding:8px; background:var(--accent); color:#fff; border:0; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; }
+#new-session:hover { background:var(--accent2); }
+
+/* 中:对话流 */
+#chat { flex:1; display:flex; flex-direction:column; min-width:0; }
+#messages { flex:1; overflow-y:auto; padding:16px; }
+.msg { margin-bottom:14px; max-width:78%; }
+.msg .who { font-size:11px; color:var(--muted); margin-bottom:3px; }
+.msg .bubble { padding:9px 13px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
+.msg.user { margin-left:auto; }
+.msg.user .bubble { background:var(--user); border:1px solid #3a4f80; }
+.msg.agent .bubble { background:var(--panel2); border:1px solid var(--border); }
+.msg.system { max-width:100%; text-align:center; margin:6px 0; }
+.msg.system .bubble { background:transparent; color:var(--muted); font-size:12px; padding:2px; }
+.msg.tool .bubble { font-family:var(--mono); font-size:12px; background:#202a3e; }
+.typing { color:var(--muted); font-size:12px; padding:4px 2px; animation:blink 1.2s infinite; }
+@keyframes blink { 50% { opacity:.3; } }
+
+#input-bar { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--border); background:var(--panel); }
+#input-bar input { flex:1; padding:10px 12px; background:var(--panel2); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:14px; outline:none; }
+#input-bar input:focus { border-color:var(--accent); }
+#input-bar button { padding:10px 22px; background:var(--accent); color:#fff; border:0; border-radius:8px; font-weight:600; cursor:pointer; }
+#input-bar button:hover { background:var(--accent2); }
+#input-bar button:disabled { opacity:.5; cursor:not-allowed; }
+
+/* 右:轨迹时间线 */
+#timeline-pane { width:380px; background:var(--panel); border-left:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
+#timeline-pane h3 { font-size:12px; color:var(--muted); padding:10px 12px 6px; letter-spacing:1px; }
+#timeline { flex:1; overflow-y:auto; padding:4px 8px 12px; }
+.tl-node { display:flex; gap:10px; padding:6px 4px; border-left:2px solid var(--border); margin-left:8px; position:relative; cursor:pointer; }
+.tl-node::before { content:""; position:absolute; left:-6px; top:12px; width:10px; height:10px; border-radius:50%; background:var(--border); }
+.tl-node[data-sev=success]::before { background:var(--ok); }
+.tl-node[data-sev=warn]::before { background:var(--warn); }
+.tl-node[data-sev=danger]::before { background:var(--danger); }
+.tl-node[data-sev=info]::before { background:var(--accent); }
+.tl-node .seq { font-family:var(--mono); font-size:10px; color:var(--muted); padding-top:2px; width:28px; text-align:right; flex:none; }
+.tl-node .body { flex:1; min-width:0; }
+.tl-node .title { font-size:13px; }
+.tl-node .meta { font-size:10px; color:var(--muted); font-family:var(--mono); }
+.tl-node .detail { font-size:11px; color:var(--muted); margin-top:2px; white-space:pre-wrap; word-break:break-all; display:none; max-height:120px; overflow-y:auto; }
+.tl-node.open .detail { display:block; }
+.tl-node[data-k=guard] .title { color:var(--danger); }
+.tl-node[data-k=approval] .title { color:var(--warn); }
+.tl-node[data-k=tool] .title { color:var(--accent2); }
+.tl-node[data-k=message] .title { color:var(--ok); }
+.tl-node[data-k=user] .title { color:var(--text); }
+.tl-node[data-k=budget] .title { color:var(--warn); }
+#timeline-empty { color:var(--muted); font-size:12px; text-align:center; padding:30px 10px; }
+
+/* ===== 审批弹窗 ===== */
+#modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:100; }
+#modal-bg.show { display:flex; }
+#modal { width:520px; max-width:92vw; background:var(--panel2); border:1px solid var(--warn); border-radius:12px; padding:20px; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+#modal h2 { color:var(--warn); font-size:16px; margin-bottom:6px; }
+#modal .tool-name { font-family:var(--mono); color:var(--text); background:var(--panel); padding:3px 8px; border-radius:5px; display:inline-block; margin:8px 0; font-size:13px; }
+#modal .args { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; max-height:160px; overflow-y:auto; color:var(--muted); }
+#modal .risk { margin:10px 0; font-size:12px; }
+#modal .risk b.critical { color:var(--danger); } #modal .risk b.high { color:var(--danger); } #modal .risk b.medium { color:var(--warn); }
+#modal .btns { display:flex; gap:10px; margin-top:16px; }
+#modal .btns button { flex:1; padding:10px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; border:0; }
+#btn-deny { background:#3a2530; color:var(--danger); border:1px solid var(--danger) !important; }
+#btn-approve { background:var(--accent); color:#fff; }
+#btn-deny:hover { background:#4a2f3c; } #btn-approve:hover { background:var(--accent2); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><b>PyHarness</b> Desktop</div>
+  <div class="sub">Agent 事件溯源 · 轨迹时间线 · 只读投影</div>
+  <div id="budget-chip">预算 --</div>
+</header>
+<main>
+  <aside id="sidebar">
+    <h3>会话</h3>
+    <div id="session-list"><div id="timeline-empty" style="padding:20px 10px">加载中…</div></div>
+    <button id="new-session">+ 新会话</button>
+  </aside>
+  <section id="chat">
+    <div id="messages"></div>
+    <div id="input-bar">
+      <input id="msg-input" placeholder="输入问题,回车发送…(Enter 发送)" autocomplete="off">
+      <button id="send-btn">发送</button>
+    </div>
+  </section>
+  <aside id="timeline-pane">
+    <h3>Agent 轨迹时间线 <span id="tl-cursor" style="opacity:.6"></span></h3>
+    <div id="timeline"></div>
+  </aside>
+</main>
+
+<div id="modal-bg">
+  <div id="modal">
+    <h2>⚠ 工具审批请求</h2>
+    <div style="font-size:12px;color:var(--muted)">Agent 请求调用工具,需要你批准或拒绝:</div>
+    <div class="tool-name" id="modal-tool">—</div>
+    <div class="args" id="modal-args">—</div>
+    <div class="risk" id="modal-risk"></div>
+    <div class="btns">
+      <button id="btn-deny">拒绝</button>
+      <button id="btn-approve">批准</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const state = { sid: null, seq: 0, approvals: new Map(), es: null };
+
+/* ---------- 工具 ---------- */
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.advice || j.code || r.status);
+  return j;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c])); }
+
+/* ---------- 会话列表 ---------- */
+async function loadSessions() {
+  const d = await api("/api/sessions");
+  const box = $("#session-list");
+  box.innerHTML = "";
+  if (!d.sessions.length) {
+    box.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:14px 12px">暂无会话,点下方新建</div>';
+    return;
+  }
+  for (const s of d.sessions) {
+    const sid = s.sid || s;
+    const el = document.createElement("div");
+    el.className = "sess" + (sid === state.sid ? " active" : "");
+    el.innerHTML = `<span class="dot"></span><span class="sid-name">${esc(sid)}</span>`;
+    el.title = sid;
+    el.onclick = () => selectSession(sid);
+    box.appendChild(el);
+  }
+}
+
+/* ---------- 会话选择 / 加载 ---------- */
+async function selectSession(sid) {
+  state.sid = sid;
+  state.seq = 0;
+  document.querySelectorAll(".sess").forEach((e) => e.classList.toggle("active", e.title === sid));
+  $("#messages").innerHTML = "";
+  $("#timeline").innerHTML = "";
+  $("#timeline-empty").style.display = "none";
+  await loadChat();
+  await loadTimeline();
+  await loadBudget();
+  connectSSE();
+}
+async function loadChat() {
+  const d = await api(`/api/sessions/${state.sid}/messages`);
+  const box = $("#messages");
+  box.innerHTML = "";
+  for (const m of d.messages || []) appendMsg(m);
+  box.scrollTop = box.scrollHeight;
+}
+function appendMsg(m) {
+  const box = $("#messages");
+  const el = document.createElement("div");
+  const role = m.role === "user" ? "user" : (m.role === "system" ? "system" : "agent");
+  if (role === "agent" && m.tool_calls) { /* 工具轮:折叠为 system 提示 */
+    el.className = "msg system";
+    el.innerHTML = `<div class="bubble">🔧 Agent 请求工具:${esc((m.tool_calls[0]?.function?.name) || "?")}</div>`;
+  } else {
+    el.className = `msg ${role}`;
+    el.innerHTML = `<div class="who">${role === "user" ? "你" : role === "system" ? "系统" : "Agent"}</div>
+      <div class="bubble">${esc(m.content ?? "") || "…"}</div>`;
+  }
+  box.appendChild(el);
+}
+
+/* ---------- 轨迹时间线 ---------- */
+async function loadTimeline(after = 0) {
+  if (!state.sid) return;
+  const d = await api(`/api/sessions/${state.sid}/timeline?after_seq=${after}`);
+  const box = $("#timeline");
+  if (after === 0) box.innerHTML = "";
+  if (!d.nodes?.length) {
+    if (!box.children.length) box.innerHTML = '<div id="timeline-empty">暂无轨迹 — 发条消息,Agent 每一步都会实时出现在这里</div>';
+    return;
+  }
+  for (const n of d.nodes) appendNode(n);
+  state.seq = Math.max(state.seq, ...d.nodes.map((n) => n.seq));
+  $("#tl-cursor").textContent = `#${state.seq}`;
+  box.scrollTop = box.scrollHeight;
+}
+function appendNode(n) {
+  const box = $("#timeline");
+  $("#timeline-empty")?.remove();
+  const el = document.createElement("div");
+  el.className = "tl-node";
+  el.dataset.sev = n.severity || "info";
+  el.dataset.k = n.kind;
+  const detail = typeof n.detail === "string" ? n.detail : JSON.stringify(n.detail ?? {}, null, 2);
+  const ts = (n.ts || "").replace("T", " ").slice(5, 19);
+  el.innerHTML = `<div class="seq">${n.seq}</div>
+    <div class="body">
+      <div class="title">${esc(n.title)}</div>
+      <div class="meta">${esc(n.kind)} · ${esc(n.actor || "")} · ${esc(ts)}</div>
+      <div class="detail">${esc(detail)}</div>
+    </div>`;
+  el.onclick = () => el.classList.toggle("open");
+  box.appendChild(el);
+}
+
+/* ---------- 预算 ---------- */
+async function loadBudget() {
+  if (!state.sid) return;
+  const d = await api(`/api/budget/${state.sid}`);
+  const chip = $("#budget-chip");
+  if (d.disabled) { chip.textContent = "预算未装配"; chip.className = ""; return; }
+  const pct = Math.round((d.ratio || 0) * 100);
+  chip.textContent = `¥${(d.used_cny || 0).toFixed(4)} / ¥${d.limit_cny} · ${pct}%`;
+  chip.className = d.warned ? "warn" : "";
+}
+
+/* ---------- 发送 ---------- */
+async function send() {
+  const text = $("#msg-input").value.trim();
+  if (!text || !state.sid) return;
+  $("#msg-input").value = "";
+  appendMsg({ role: "user", content: text });
+  const typing = document.createElement("div");
+  typing.className = "typing"; typing.textContent = "Agent 思考中…";
+  $("#messages").appendChild(typing);
+  $("#messages").scrollTop = $("#messages").scrollHeight;
+  $("#send-btn").disabled = true;
+  try {
+    await api(`/api/sessions/${state.sid}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+  } catch (e) {
+    typing.remove();
+    appendMsg({ role: "system", content: `⚠ 发送失败:${esc(e.message)}` });
+  } finally { $("#send-btn").disabled = false; }
+}
+
+/* ---------- 审批 ---------- */
+async function checkApprovals() {
+  try {
+    const d = await api("/api/approvals/pending");
+    for (const a of d.pending || []) {
+      if (state.approvals.has(a.approval_id)) continue;
+      state.approvals.set(a.approval_id, a);
+      showModal(a);
+    }
+  } catch (e) { /* 静默 */ }
+}
+function showModal(a) {
+  $("#modal-tool").textContent = a.tool || "未知工具";
+  $("#modal-args").textContent = a.args_summary || "{}";
+  const risk = (a.risk || "high").toLowerCase();
+  $("#modal-risk").innerHTML = `风险等级: <b class="${risk}">${esc(risk)}</b>` +
+    (a.ttl_ms ? ` · <span style="color:var(--muted)">${Math.round(a.ttl_ms / 1000)}s 内未操作自动拒绝</span>` : "");
+  $("#modal-bg").classList.add("show");
+  const decide = async (decision) => {
+    $("#modal-bg").classList.remove("show");
+    try { await api(`/api/approvals/${a.approval_id}`, { method: "POST", body: JSON.stringify({ decision }) }); }
+    catch (e) { appendMsg({ role: "system", content: `⚠ 审批失败:${esc(e.message)}` }); }
+  };
+  $("#btn-approve").onclick = () => decide("approve");
+  $("#btn-deny").onclick = () => decide("deny");
+}
+
+/* ---------- SSE 实时流 ---------- */
+function connectSSE() {
+  if (state.es) state.es.close();
+  const es = new EventSource(`/api/stream?sid=${state.sid}&after_seq=${state.seq}`);
+  state.es = es;
+  const refresh = async () => {
+    try {
+      await loadTimeline(state.seq);
+      await loadChat();
+      await loadBudget();
+      await checkApprovals();
+    } catch (e) { /* 会话可能未就绪 */ }
+  };
+  es.onmessage = refresh;   // 无名消息(心跳等)
+  es.addEventListener("session.created", refresh);
+  ["user.message","agent.message","agent.done","tool.call","tool.result",
+   "guard.rejected","approval.requested","approval.granted","approval.denied",
+   "llm.usage","session.recovered","run.finished"].forEach((t) => es.addEventListener(t, refresh));
+  es.onerror = () => { /* 自动重连由 EventSource 内建 */ };
+}
+
+/* ---------- 新会话 ---------- */
+async function newSession() {
+  try {
+    const d = await api("/api/sessions", { method: "POST" });
+    const sid = d.sid;
+    await selectSession(sid);
+    await loadSessions();
+    $("#msg-input").focus();
+  } catch (e) {
+    appendMsg({ role: "system", content: `⚠ 新建会话失败:${esc(e.message)}` });
+  }
+}
+
+/* ---------- 事件绑定 ---------- */
+$("#send-btn").onclick = send;
+$("#msg-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+$("#new-session").onclick = newSession;
+
+/* ---------- 启动 ---------- */
+(async function boot() {
+  try {
+    await loadSessions();
+    if (state.sid) { await selectSession(state.sid); return; }
+    /* 无会话:建一个演示会话(标题问候),前端立即可用 */
+    newSession();
+  } catch (e) {
+    $("#messages").innerHTML = `<div class="msg system"><div class="bubble">⚠ 启动失败:${esc(e.message)}</div></div>`;
+  }
+})();
+</script>
+</body>
+</html>

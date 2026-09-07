@@ -62,7 +62,7 @@ class FakeLLM:
         self.calls: list[list] = []           # (hist, tools) 记录(进入即记)
         self.n = 0                            # 已成功返回的调用数
 
-    async def chat(self, hist, tools=None):
+    async def chat(self, hist, tools=None, *, ctx=None):
         self.calls.append((hist, tools))      # 进入即记:阻塞中也可见(测试同步点)
         if self.raise_exc is not None:
             raise self.raise_exc

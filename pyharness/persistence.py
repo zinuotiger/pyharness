@@ -188,9 +188,12 @@ class SessionStore:
             raise_code("PERS-202", hint="会话暂停(落盘通道故障),repair 后恢复;拒新不丢旧")
         line = env.model_dump_json() + "\n"       # 信封+payload 拍平单行(§3.6)
         if sync:                                  # 强同步点:成功才返回
+            # 入 pending + 立即 flush:物理序 = 入队序 = seq 序。若直接 write,
+            # 会与非 sync 攒批行交错 → 文件物理序 ≠ seq 序(5 在 3/4 前),
+            # 回放遇 seq 倒退即弃 → 重启后 0 事件(实测 bug)。
             try:
-                self._fh.write(line)
-                self._fh.flush()
+                self._pending.append((env.seq, line))
+                await self._flush_pending_all()
             except OSError as e:
                 self._fail_streak += 1
                 raise_code("PERS-202", seq=env.seq, why=str(e),
@@ -201,6 +204,28 @@ class SessionStore:
                 await self._flush_batch()
             # 0.5s 定时器兜底:由独立定时任务调 flush()(append 内不 sleep)
         self._maybe_rotate()                      # >50MB → 轮转(§8.3.4)
+
+    async def _flush_pending_all(self) -> None:
+        """内部:全量 pending + 重试队列写盘(强同步路径用;失败 → OSError 上抛)。
+
+        失败语义:本次 pending 行丢弃(强同步失败 = 不承诺,调用方 raise PERS-202
+        后自行重试重新 append,不经过重试队列——否则重试会双写同 seq);
+        既有 _retry_q 原样保留(攒批失败行仍待定时重试)。
+        """
+        if not self._pending and not self._retry_q:
+            return
+        retry_old = list(self._retry_q)
+        pending_now = list(self._pending)
+        self._pending = deque()
+        try:
+            for _seq, line in retry_old + pending_now:
+                self._fh.write(line)
+            self._fh.flush()
+            self._fail_streak = 0
+            self._retry_q.clear()
+        except OSError:
+            self._retry_q = deque(retry_old)      # 攒批旧行保底;本次行丢弃(见上)
+            raise
 
     async def flush(self, up_to_seq: Optional[int] = None) -> None:
         """公开 flush:把 _pending 中 seq ≤ up_to_seq 的行(连同重试队列)写盘+flush。

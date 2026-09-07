@@ -864,7 +864,8 @@ class DesktopApp:
             store = getattr(self._surface_mgr(), "_stores", {}).get(sid)
             spine = _eng.build_runner_components(
                 cfg, log_=log_, bus=getattr(self.ctx, "bus", None),
-                sessions_dir=_sessions_dir_of(self.ctx), store=store)
+                sessions_dir=_sessions_dir_of(self.ctx), store=store,
+                attach_persistence=False)   # manager 已订阅落盘;重复订=双写卡死
             self._engines[sid] = spine
         return _eng_make_runner(spine)
 

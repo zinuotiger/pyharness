@@ -104,13 +104,19 @@ async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
 
 def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
                             sessions_dir: Path,
-                            store: Any = None) -> SimpleNamespace:
+                            store: Any = None,
+                            attach_persistence: bool = True) -> SimpleNamespace:
     """纯组件装配(复用外部已 open 的 SessionLog/bus/store)。
 
     desktop 多会话场景:会话已由 DesktopSessionManager open(log_/store/bus
-    俱在),本函数只补 loop/scope/registry/tools/llm + 总线落盘订阅——
-    避免第二 store 实例同写一 JSONL(双缓冲竞态)。build_spine = 本函数 +
-    自建 store/session,语义等价。
+    俱在),本函数只补 loop/scope/registry/tools/llm——避免第二 store 实例
+    同写一 JSONL(双缓冲竞态)。build_spine = 本函数 + 自建 store/session,
+    语义等价。
+
+    attach_persistence:总线→存储落盘订阅开关。自建 spine(build_spine)须开;
+    desktop 复用 manager 会话时 manager._attach_persistence 已订阅(owner=
+    persistence:{sid}),重复订阅 → 每事件双写 + store 游标错乱(实测卡死),
+    故 desktop 调用传 attach_persistence=False。
     """
     # AgentLoop(真 cfg:max_turns=30 权威默认)
     loop = AgentLoop(cfg)
@@ -130,12 +136,13 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     llm_client = llm_mod.LLMClient(cfg)
 
     # SessionLog 接总线落盘订阅(事件一入内存即入真源队列)
-    if bus is not None:
-        owner = f"engine:{getattr(log_, 'session_id', '?')}"
-        for t in _EVENT_TYPES_OR_ALL():
-            bus.subscribe(t, _record_to(store), owner=owner)
-    if store is not None:
-        log_._bus = bus                      # append → 分发 → 落盘闭环
+    if attach_persistence:
+        if bus is not None:
+            owner = f"engine:{getattr(log_, 'session_id', '?')}"
+            for t in _EVENT_TYPES_OR_ALL():
+                bus.subscribe(t, _record_to(store), owner=owner)
+        if store is not None:
+            log_._bus = bus                  # append → 分发 → 落盘闭环
 
     spine = SimpleNamespace(
         session=log_, bus=bus, registry=registry, persistence=store,

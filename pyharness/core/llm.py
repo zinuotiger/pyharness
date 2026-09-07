@@ -692,7 +692,9 @@ class _OpenAICompatHTTPTransport:
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {api_key}"},   # 鉴权只走 header,禁拼 URL
-            timeout=timeout, max_redirects=2)
+            timeout=timeout, max_redirects=2,
+            trust_env=False)   # 禁读 env 代理:DeepSeek 直连;应用层不随 HTTP_PROXY 劫持
+                                # (桌面 exe 曾因此卡死在 Clash 转发上,180s 才超时)
         self._req_path = "/chat/completions"
 
     async def aclose(self) -> None:

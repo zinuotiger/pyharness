@@ -5,9 +5,9 @@
 <title>PyHarness Desktop</title>
 <style>
 :root {
-  --bg: #0f1420; --panel: #171e2e; --panel2: #1d2637; --border: #2a3550;
-  --text: #dbe4f5; --muted: #8b98b5; --accent: #4f8cff; --accent2: #6ea8ff;
-  --ok: #3ddc97; --warn: #ffb84d; --danger: #ff5d5d; --user: #2b3a5e;
+  --bg: #f4f6fa; --panel: #ffffff; --panel2: #eef1f7; --border: #d9dfeb;
+  --text: #1c2433; --muted: #5d6b84; --accent: #2563eb; --accent2: #3b82f6;
+  --ok: #15803d; --warn: #b45309; --danger: #dc2626; --user: #dbeafe;
   --mono: "Cascadia Code", Consolas, monospace;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -43,11 +43,11 @@ main { flex:1; display:flex; min-height:0; }
 .msg .who { font-size:11px; color:var(--muted); margin-bottom:3px; }
 .msg .bubble { padding:9px 13px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
 .msg.user { margin-left:auto; }
-.msg.user .bubble { background:var(--user); border:1px solid #3a4f80; }
+.msg.user .bubble { background:var(--user); border:1px solid #b7c9ec; }
 .msg.agent .bubble { background:var(--panel2); border:1px solid var(--border); }
 .msg.system { max-width:100%; text-align:center; margin:6px 0; }
 .msg.system .bubble { background:transparent; color:var(--muted); font-size:12px; padding:2px; }
-.msg.tool .bubble { font-family:var(--mono); font-size:12px; background:#202a3e; }
+.msg.tool .bubble { font-family:var(--mono); font-size:12px; background:#e8edf5; }
 .typing { color:var(--muted); font-size:12px; padding:4px 2px; animation:blink 1.2s infinite; }
 @keyframes blink { 50% { opacity:.3; } }
 
@@ -93,9 +93,9 @@ main { flex:1; display:flex; min-height:0; }
 #modal .risk b.critical { color:var(--danger); } #modal .risk b.high { color:var(--danger); } #modal .risk b.medium { color:var(--warn); }
 #modal .btns { display:flex; gap:10px; margin-top:16px; }
 #modal .btns button { flex:1; padding:10px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; border:0; }
-#btn-deny { background:#3a2530; color:var(--danger); border:1px solid var(--danger) !important; }
+#btn-deny { background:#fdeaea; color:var(--danger); border:1px solid var(--danger) !important; }
 #btn-approve { background:var(--accent); color:#fff; }
-#btn-deny:hover { background:#4a2f3c; } #btn-approve:hover { background:var(--accent2); }
+#btn-deny:hover { background:#f8d7d7; } #btn-approve:hover { background:var(--accent2); }
 </style>
 </head>
 <body>
@@ -107,7 +107,7 @@ main { flex:1; display:flex; min-height:0; }
 <main>
   <aside id="sidebar">
     <h3>会话</h3>
-    <div id="session-list"><div id="timeline-empty" style="padding:20px 10px">加载中…</div></div>
+    <div id="session-list"><div class="sess-hint" style="padding:20px 10px;color:var(--muted);font-size:12px">加载中…</div></div>
     <button id="new-session">+ 新会话</button>
   </aside>
   <section id="chat">
@@ -181,7 +181,8 @@ async function selectSession(sid) {
   document.querySelectorAll(".sess").forEach((e) => e.classList.toggle("active", e.title === sid));
   $("#messages").innerHTML = "";
   $("#timeline").innerHTML = "";
-  $("#timeline-empty").style.display = "none";
+  const _te = document.getElementById("timeline-empty");
+  if (_te) _te.style.display = "none";
   await loadChat();
   await loadTimeline();
   await loadBudget();

@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -190,6 +191,49 @@ class AdapterTriple:
 
 
 # ================================================================ 传输层异常
+def _sanitize_tool_name(name: str) -> str:
+    """DeepSeek 工具名正则 ^[a-zA-Z0-9_-]+$(禁点号);fs.read_file → fs_read_file。
+
+    真链实测:带点工具名 → HTTP 400 'Invalid tools[0].function.name' →
+    被归一为 LLM-304。发送前清洗、响应 tool_calls 名还原(见 chat)。
+    """
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+
+
+def _sanitize_tools(tools: Optional[list]) -> tuple:
+    """下发 tools 清洗 + 反向映射表。返回 (clean_tools, {sanitized: original})。"""
+    if not tools:
+        return tools, {}
+    rev: dict[str, str] = {}
+    clean: list[dict] = []
+    for t in tools:
+        fn = (t or {}).get("function") or {}
+        orig = fn.get("name", "")
+        if orig and orig != _sanitize_tool_name(orig):
+            rev[_sanitize_tool_name(orig)] = orig
+        clean.append(t)
+    if not rev:
+        return tools, {}
+    # 需重建带清洗名的 tools(嵌套 dict 深拷贝改 name)
+    import copy as _copy
+    out = []
+    for t in clean:
+        t2 = _copy.deepcopy(t)
+        fn = t2.get("function")
+        if fn and fn.get("name"):
+            fn["name"] = _sanitize_tool_name(str(fn["name"]))
+        out.append(t2)
+    return out, rev
+
+
+def _restore_call_names(calls: list, rev: dict) -> None:
+    """响应 tool_calls 名还原(sanitized → original,原地改)。"""
+    if not rev:
+        return
+    for c in calls:
+        nm = getattr(c, "name", "")
+        if nm in rev:
+            c.name = rev[nm]
 class ProviderStatusError(Exception):
     """内置传输层 HTTP 状态错(类别判定用,ADI §7;body 文案不上行 ERR §5.1)。"""
 
@@ -548,8 +592,9 @@ class OpenAICompatAdapter(LLMAdapter):
         """
         cfg_llm = self._llm_cfg(ctx)
         transport = self._ensure_transport()
+        tools_clean, name_map = _sanitize_tools(tools)   # 禁点号工具名清洗(DeepSeek)
         req = {"model": self.model, "messages": list(messages),
-               "tools": tools or None,             # 无工具整字段省略在传输层(wire 规则)
+               "tools": tools_clean or None,    # 无工具整字段省略在传输层(wire 规则)
                "temperature": cfg_llm.temperature,  # 0-1.5(越窗已在配置层 CFG-601 拒)
                "max_tokens": cfg_llm.max_tokens}    # 单次输出上限(默认 4096)
         await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
@@ -563,6 +608,7 @@ class OpenAICompatAdapter(LLMAdapter):
         msg, finish = self._first_message(raw)
         content = (msg.content or "") if msg.content is not None else ""
         calls = parse_tool_calls(msg)               # ToolCallSyntaxError 上抛 → TLB-803 回喂
+        _restore_call_names(calls, name_map)        # sanitized → fs.read_file 还原
         if not content and not calls:
             raise_code("LLM-304", model=self.model,
                        hint="content null 且无 tool_calls(协议异常,不回空文本冒充成功)")
@@ -581,7 +627,9 @@ class OpenAICompatAdapter(LLMAdapter):
         """流式编排:chunk 实时上总线(accumulate 内,不进日志);聚合后同 chat 型返回。"""
         cfg_llm = self._llm_cfg(ctx)
         transport = self._ensure_transport()
-        req = {"model": self.model, "messages": list(messages), "tools": tools or None,
+        tools_clean, name_map = _sanitize_tools(tools)   # 禁点号工具名清洗(DeepSeek)
+        req = {"model": self.model, "messages": list(messages),
+               "tools": tools_clean or None,
                "temperature": cfg_llm.temperature, "max_tokens": cfg_llm.max_tokens,
                "stream": True, "stream_options": {"include_usage": True}}
         await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
@@ -593,6 +641,7 @@ class OpenAICompatAdapter(LLMAdapter):
         except Exception as e:                      # noqa: BLE001 断流/总闸统一归一
             code = normalize_exc(e)
             raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES)
+        _restore_call_names(calls, name_map)        # sanitized → fs.read_file 还原
         if not text and not calls:
             raise_code("LLM-304", model=self.model,
                        hint="流式聚合为空(断流/零内容),不回空文本冒充成功")

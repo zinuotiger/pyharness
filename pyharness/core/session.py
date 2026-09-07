@@ -234,7 +234,7 @@ class SessionLog:
         kept: list[dict] = []
         acc = 0
         for m in reversed(msgs):              # 新 → 旧累计,旧消息先丢
-            t = _estimate_tokens(m["content"])
+            t = _estimate_tokens(m.get("content") or "")
             if acc > 0 and acc + t > max_tokens:
                 break                          # 预算已满:更旧的头部整体丢弃
             kept.append(m)

@@ -723,6 +723,7 @@ class DesktopApp:
         self._logs: dict[str, Any] = {}          # sid → SessionLog(同柄,INV-03)
         self._queues: dict[str, TaskQueue] = {}
         self._approvals: dict[str, ApprovalProvider] = {}
+        self._engines: dict[str, Any] = {}       # sid → 引擎 spine(懒装配)
         self.api = FastAPI(title="PyHarness Desktop", docs_url=None, redoc_url=None)
         # 会话面惰性解析(首用才装配管理器;EVT-106 提前暴露装配缺面)
         self._surface: Any = None
@@ -838,13 +839,34 @@ class DesktopApp:
         self._logs[sid] = log_
         return log_
 
-    def _queue_for(self, sid: str, log_: Any) -> TaskQueue:
-        """per-session TaskQueue(注入 runner 由 ctx 提供;None → 任务 CYC-999 快失败)。"""
+    async def _queue_for(self, sid: str, log_: Any) -> TaskQueue:
+        """per-session TaskQueue(runner = per-session 真实引擎;真 LLM 已注册)。"""
         q = self._queues.get(sid)
         if q is None:
-            q = TaskQueue(session=log_, runner=self._runner_seam())
+            runner = await self._engine_runner_for(sid, log_)
+            q = TaskQueue(session=log_, runner=runner)
             self._queues[sid] = q
         return q
+
+    async def _engine_runner_for(self, sid: str, log_: Any) -> Any:
+        """per-session 引擎 runner(懒装配):复用 manager 已 open 的 log_/bus,
+        补 loop/scope/llm/空工具表 + 总线落盘订阅 → engine.make_runner。
+
+        无 DEEPSEEK_API_KEY 时注册失败 → 回落 CYC-999 runner(任务快速失败,
+        前端收到结构化错误提示,不悬挂)——装配层降级,见 engine 偏离说明。
+        """
+        spine = self._engines.get(sid)
+        if spine is None:
+            from pyharness import engine as _eng
+            from pyharness.engine import make_runner as _eng_make_runner
+            cfg = self.ctx.settings
+            _eng.register_default_llm(cfg)          # 幂等;无 key → CRED-701
+            store = getattr(self._surface_mgr(), "_stores", {}).get(sid)
+            spine = _eng.build_runner_components(
+                cfg, log_=log_, bus=getattr(self.ctx, "bus", None),
+                sessions_dir=_sessions_dir_of(self.ctx), store=store)
+            self._engines[sid] = spine
+        return _eng_make_runner(spine)
 
     def _runner_seam(self) -> Any:
         """执行器注入点(引擎装配层):ctx.make_runner()/ctx.task_runner 优先,None 缺省。"""
@@ -994,7 +1016,7 @@ class DesktopApp:
         env = await log_.append("user.message", {"content": text},
                                 actor="user", origin=CHANNEL, sync=True)
         await self._append_attachments(log_, body.get("attachments"))
-        queue = self._queue_for(sid, log_)
+        queue = await self._queue_for(sid, log_)
         task_id = await queue.submit(text, meta={"channel": CHANNEL,
                                                  "session_id": sid})
         return {"task_id": task_id, "user_seq": env.seq}

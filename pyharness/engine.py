@@ -95,14 +95,30 @@ async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
     bus = bus or EventBus()
     store = open_store(sid, dir=sessions_dir)
     log_ = await open_session(sid, store)    # async 工厂(SessionLog 装配)
+    spine = build_runner_components(cfg, log_=log_, bus=bus,
+                                    sessions_dir=sessions_dir,
+                                    store=store)
+    spine.persistence = store
+    return spine
 
+
+def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
+                            sessions_dir: Path,
+                            store: Any = None) -> SimpleNamespace:
+    """纯组件装配(复用外部已 open 的 SessionLog/bus/store)。
+
+    desktop 多会话场景:会话已由 DesktopSessionManager open(log_/store/bus
+    俱在),本函数只补 loop/scope/registry/tools/llm + 总线落盘订阅——
+    避免第二 store 实例同写一 JSONL(双缓冲竞态)。build_spine = 本函数 +
+    自建 store/session,语义等价。
+    """
     # AgentLoop(真 cfg:max_turns=30 权威默认)
     loop = AgentLoop(cfg)
 
     # Scope(strict 最小权限 + cfg 预算)
     limits = BudgetLimits.from_cfg(cfg)
     policy = ScopePolicy()                     # 默认:strict / 空 deny / 空域名
-    scope = Scope(policy, limits, session_id=sid,
+    scope = Scope(policy, limits, session_id=str(getattr(log_, "session_id", "")),
                   session=log_, bus=bus)
 
     # Registry(空工具表;纯聊装配,见偏离 1)
@@ -114,10 +130,12 @@ async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
     llm_client = llm_mod.LLMClient(cfg)
 
     # SessionLog 接总线落盘订阅(事件一入内存即入真源队列)
-    owner = f"engine:{sid}"
-    for t in _EVENT_TYPES_OR_ALL():
-        bus.subscribe(t, _record_to(store), owner=owner)
-    log_._bus = bus                            # append → 分发 → 落盘闭环
+    if bus is not None:
+        owner = f"engine:{getattr(log_, 'session_id', '?')}"
+        for t in _EVENT_TYPES_OR_ALL():
+            bus.subscribe(t, _record_to(store), owner=owner)
+    if store is not None:
+        log_._bus = bus                      # append → 分发 → 落盘闭环
 
     spine = SimpleNamespace(
         session=log_, bus=bus, registry=registry, persistence=store,

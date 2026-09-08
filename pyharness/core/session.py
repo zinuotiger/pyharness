@@ -218,7 +218,16 @@ class SessionLog:
                              "content": p.get("summary") or "",
                              "name": p.get("name")})
                 sources.append(ev.seq)
-            # guard.*/agent.message/tool.error/其余 llm.*/E 组:审计流或派生外,
+            elif t == "tool.error":
+                # 失败也须配对 tool 消息(assistant.tool_calls 后悬空 → 端点 400,
+                # 实测 LLM-304 刷屏);content = 错误摘要回喂,LLM 可据此改口
+                msgs.append({"role": "tool",
+                             "tool_call_id": p.get("call_id") or "",
+                             "content": (str(p.get("code") or "")
+                                         + " " + str(p.get("message") or ""))[:500],
+                             "name": p.get("name")})
+                sources.append(ev.seq)
+            # guard.*/agent.message/其余 llm.*/E 组:审计流或派生外,
             # 不进 LLM 上下文(§4.2 映射表);llm.chunk 为瞬时事件,日志中天然不存在
         return msgs
 

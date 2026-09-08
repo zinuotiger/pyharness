@@ -552,12 +552,19 @@ class DesktopSessionManager:
         return self.dir / f"{sid}.jsonl"
 
     def _attach_persistence(self, log_: SessionLog, store: Any, sid: str) -> None:
-        """总线 → 存储订阅(事件一入内存即入真源队列;强同步三类即写即刷 F011)。"""
+        """总线 → 存储订阅(事件一入内存即入真源队列;强同步三类即写即刷 F011)。
+
+        sid 过滤:桌面总线全局共享(多会话同 bus),订阅者必须只落本会话事件
+        ——否则后开会话的事件会串写进先开会话文件(实测:两个 session.created
+        同文件、回放错乱)。store.append 侧无 sid 校验,过滤责任在订阅者。
+        """
         if self.bus is None:
             return
         owner = f"persistence:{sid}"
 
         async def _record(type_: str, payload: Any) -> None:
+            if getattr(payload, "session_id", None) != sid:
+                return                       # 跨会话事件:不落本文件(多会话隔离)
             await store.append(payload, sync=type_ in (
                 "user.message", "guard.rejected", "approval.requested",
                 "approval.granted", "approval.denied", "approval.timeout",
@@ -618,7 +625,12 @@ class DesktopSessionManager:
                 await res
 
     def list(self) -> list[dict]:
-        """会话摘要清单:只读首/尾行 + 行数,不整文件重放(老会话 O(1) 扫描)。"""
+        """会话摘要清单:只读头部若干行 + 尾行 + 行数,不整文件重放。
+
+        排序:按最后活动时间(st_mtime)倒序——最新使用的会话排最上(桌面
+        会话列表时间序)。preview = 首条 user.message 内容前 10 字(列表显示
+        用;title 为空时它就是会话的"名字")。
+        """
         out: list[dict] = []
         if not self.dir.exists():
             return out
@@ -626,22 +638,35 @@ class DesktopSessionManager:
             sid = path.stem
             if not sid.startswith("s-"):        # 轮转段 .N.jsonl / 备份非会话文件跳过
                 continue
-            summary: dict[str, Any] = {"sid": sid, "title": "", "finished": False}
+            summary: dict[str, Any] = {"sid": sid, "title": "", "preview": "",
+                                       "finished": False}
             try:
+                stat = path.stat()
+                summary["updated"] = stat.st_mtime          # 使用时间(最后写入)
+                summary["size_bytes"] = stat.st_size
                 with open(path, "rb") as f:
                     lines = f.readlines()
                 summary["lines"] = len(lines)
-                summary["size_bytes"] = path.stat().st_size
                 if lines:
                     head = json.loads(lines[0])
                     if head.get("type") == "session.created":
                         summary["title"] = (head.get("payload") or {}).get("title", "")
                     tail = json.loads(lines[-1])
                     summary["finished"] = tail.get("type") == "session.finished"
+                    # 首条 user.message 内容前 10 字(会话"名字";只扫头部防 O(n))
+                    for ln in lines[:60]:
+                        try:
+                            e = json.loads(ln)
+                        except Exception:                 # noqa: BLE001 坏行跳过
+                            continue
+                        if e.get("type") == "user.message":
+                            c = (e.get("payload") or {}).get("content") or ""
+                            summary["preview"] = c.strip()[:10]
+                            break
             except Exception:               # noqa: BLE001 文件坏/竞态 → 摘要留最小
                 log.warning("desktop list 读 %s 失败(摘要降级)", path.name, exc_info=True)
             out.append(summary)
-        out.sort(key=lambda s: s["sid"])
+        out.sort(key=lambda s: s.get("updated", 0), reverse=True)  # 时间倒序
         return out
 
     def logs(self) -> list[SessionLog]:

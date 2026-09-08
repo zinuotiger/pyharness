@@ -37,7 +37,7 @@ main { flex:1; display:flex; min-height:0; }
 #new-session:hover { background:var(--accent2); }
 
 /* 中:对话流 */
-#chat { flex:1; display:flex; flex-direction:column; min-width:0; }
+#chat { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
 #messages { flex:1; overflow-y:auto; padding:16px; }
 .msg { margin-bottom:14px; max-width:78%; }
 .msg .who { font-size:11px; color:var(--muted); margin-bottom:3px; }
@@ -165,10 +165,11 @@ async function loadSessions() {
   }
   for (const s of d.sessions) {
     const sid = s.sid || s;
+    const name = (s.preview || s.title || "新会话").slice(0, 10) || "新会话";
     const el = document.createElement("div");
     el.className = "sess" + (sid === state.sid ? " active" : "");
-    el.innerHTML = `<span class="dot"></span><span class="sid-name">${esc(sid)}</span>`;
     el.title = sid;
+    el.innerHTML = `<span class="dot"></span><span class="sid-name">${esc(name)}</span>`;
     el.onclick = () => selectSession(sid);
     box.appendChild(el);
   }
@@ -195,18 +196,80 @@ async function loadChat() {
   for (const m of d.messages || []) appendMsg(m);
   box.scrollTop = box.scrollHeight;
 }
+function fmtArgs(argsStr) {
+  /* 工具参数 → 可读一行:只挑常见键,不整段 JSON */
+  try {
+    const a = JSON.parse(argsStr || "{}");
+    const pick = ["path", "query", "url", "name", "content", "mode", "glob"];
+    const parts = [];
+    for (const k of pick) {
+      if (a[k] !== undefined && a[k] !== null) {
+        let v = String(a[k]);
+        if (v.length > 24) v = v.slice(0, 24) + "…";
+        parts.push(`${k}=${v}`);
+      }
+    }
+    return parts.length ? "(" + parts.join(", ") + ")" : "";
+  } catch { return ""; }
+}
+function fmtResult(content) {
+  /* 工具结果 → 可读摘要:JSON 提要点,不整段贴 */
+  const raw = String(content || "").trim();
+  if (!raw) return "";
+  try {
+    const j = JSON.parse(raw);
+    if (Array.isArray(j.entries)) {
+      const names = j.entries.slice(0, 4).map(e => e.name).join(", ");
+      const more = j.entries.length > 4 ? ` 等 ${j.entries.length} 项` : "";
+      return `📁 ${j.entries.length} 项: ${names}${more}`;
+    }
+    if (typeof j.content === "string") {
+      return "📄 " + (j.content.length > 40 ? j.content.slice(0, 40) + "…" : j.content);
+    }
+    if (typeof j.deleted === "string") return "🗑 " + j.deleted;
+    if (j.ok === false || j.error) return "⚠ " + String(j.error || j.message || "失败").slice(0, 60);
+    return raw.slice(0, 60) + (raw.length > 60 ? "…" : "");
+  } catch { return raw.slice(0, 60) + (raw.length > 60 ? "…" : ""); }
+}
 function appendMsg(m) {
   const box = $("#messages");
-  const el = document.createElement("div");
-  const role = m.role === "user" ? "user" : (m.role === "system" ? "system" : "agent");
-  if (role === "agent" && m.tool_calls) { /* 工具轮:折叠为 system 提示 */
-    el.className = "msg system";
-    el.innerHTML = `<div class="bubble">🔧 Agent 请求工具:${esc((m.tool_calls[0]?.function?.name) || "?")}</div>`;
-  } else {
-    el.className = `msg ${role}`;
-    el.innerHTML = `<div class="who">${role === "user" ? "你" : role === "system" ? "系统" : "Agent"}</div>
-      <div class="bubble">${esc(m.content ?? "") || "…"}</div>`;
+  if (m.role === "user") {
+    const el = document.createElement("div");
+    el.className = "msg user";
+    el.innerHTML = `<div class="who">你</div><div class="bubble">${esc(m.content ?? "")}</div>`;
+    box.appendChild(el);
+    return;
   }
+  if (m.role === "system") {
+    const el = document.createElement("div");
+    el.className = "msg system";
+    el.innerHTML = `<div class="bubble">${esc(m.content ?? "")}</div>`;
+    box.appendChild(el);
+    return;
+  }
+  // agent 工具轮:可读动作提示(思考过程),不贴原始 JSON
+  if (m.role === "assistant" && m.tool_calls) {
+    for (const tc of m.tool_calls.slice(0, 3)) {
+      const fn = tc.function || {};
+      const el = document.createElement("div");
+      el.className = "msg tool";
+      el.innerHTML = `<div class="bubble">🔧 调用工具: <b>${esc(fn.name || "")}</b> ${esc(fmtArgs(fn.arguments))}</div>`;
+      box.appendChild(el);
+    }
+    return;
+  }
+  // tool 结果:可读摘要
+  if (m.role === "tool") {
+    const el = document.createElement("div");
+    el.className = "msg tool";
+    el.innerHTML = `<div class="bubble">↩ ${esc(fmtResult(m.content))}</div>`;
+    box.appendChild(el);
+    return;
+  }
+  // agent 文字回复
+  const el = document.createElement("div");
+  el.className = "msg agent";
+  el.innerHTML = `<div class="who">Agent</div><div class="bubble">${esc(m.content ?? "") || "…"}</div>`;
   box.appendChild(el);
 }
 

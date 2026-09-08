@@ -9,3 +9,4 @@ docs/specs/*.part*
 build/
 dist/
 *.spec
+.coverage

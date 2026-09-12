@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="1310" viewBox="0 0 1320 1310"><style>text{font-family:'JetBrains Mono','Microsoft YaHei','PingFang SC','Noto Sans CJK SC',monospace}</style><rect x="0" y="0" width="1320" height="1310" fill="#020617"/>
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrow-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#64748b" />
+          </marker>
+          <marker id="arrow-cyan-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#22d3ee" />
+          </marker>
+          <marker id="arrow-emerald-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#34d399" />
+          </marker>
+          <marker id="arrow-violet-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#a78bfa" />
+          </marker>
+          <marker id="arrow-amber-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#fbbf24" />
+          </marker>
+          <marker id="arrow-rose-s" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#fb7185" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ==================== 连线（先画，压在组件下方） ==================== -->
+
+        <!-- 用户 → 外壳层 -->
+        <line x1="470" y1="80" x2="470" y2="98" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan-s)"/>
+
+        <!-- 外壳层 → 能力层 -->
+        <line x1="470" y1="300" x2="470" y2="328" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan-s)"/>
+        <text x="482" y="318" fill="#94a3b8" font-size="8">协议适配 · 零业务逻辑</text>
+
+        <!-- 能力层 → 核心脊柱 -->
+        <line x1="470" y1="570" x2="470" y2="596" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald-s)"/>
+        <text x="482" y="587" fill="#94a3b8" font-size="8">经 ctx.* 注入,能力层不 import 核心</text>
+
+        <!-- 核心脊柱 → 插件总线地基 -->
+        <line x1="470" y1="818" x2="470" y2="844" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet-s)"/>
+        <text x="482" y="835" fill="#94a3b8" font-size="8">工具注册表 + 事件投递(依赖单向到底)</text>
+
+        <!-- 总线 → 事件日志 -->
+        <line x1="200" y1="976" x2="200" y2="1002" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet-s)"/>
+        <text x="210" y="994" fill="#a78bfa" font-size="8">日志订阅者捕获全部会话事件</text>
+
+        <!-- 事件日志 → 派生视图 -->
+        <line x1="203" y1="1082" x2="203" y2="1112" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow-violet-s)"/>
+        <line x1="469" y1="1082" x2="469" y2="1112" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow-violet-s)"/>
+        <line x1="735" y1="1082" x2="735" y2="1112" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#arrow-violet-s)"/>
+
+        <!-- 工具四关内部连线 -->
+        <line x1="1095" y1="186" x2="1095" y2="204" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrow-rose-s)"/>
+        <line x1="1095" y1="294" x2="1095" y2="312" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrow-rose-s)"/>
+        <line x1="1095" y1="432" x2="1095" y2="450" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrow-rose-s)"/>
+        <line x1="1095" y1="540" x2="1095" y2="558" stroke="#fb7185" stroke-width="1.5" marker-end="url(#arrow-rose-s)"/>
+
+        <!-- 关4 → 结果回核心脊柱 -->
+        <line x1="926" y1="604" x2="884" y2="604" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="4,4" marker-end="url(#arrow-rose-s)"/>
+
+        <!-- 脊柱 ⇢ 外部服务 -->
+        <path d="M 860 470 L 890 470 L 890 766 L 922 766" fill="none" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-amber-s)"/>
+        <text x="902" y="740" fill="#fbbf24" font-size="8" transform="rotate(-90 902 740)">真实 LLM 调用 · 降级链</text>
+
+        <!-- ==================== 边界 ==================== -->
+
+        <!-- ④ 外壳层 -->
+        <rect x="60" y="100" width="820" height="200" rx="12" fill="rgba(8, 51, 68, 0.06)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="76" y="120" fill="#22d3ee" font-size="10" font-weight="600">④ 外壳层 shell · 阶段6 · 可插拔入口 · 无自己的主循环</text>
+
+        <!-- ③ 外围能力层 -->
+        <rect x="60" y="330" width="820" height="240" rx="12" fill="rgba(6, 78, 59, 0.05)" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="76" y="350" fill="#34d399" font-size="10" font-weight="600">③ 外围能力层 cap · 全可插拔 · 挂 ctx.* · Definition + Provider(实测装配 19 工具)</text>
+
+        <!-- ② 核心脊柱 -->
+        <rect x="60" y="598" width="820" height="220" rx="12" fill="rgba(76, 29, 149, 0.06)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="76" y="618" fill="#a78bfa" font-size="10" font-weight="600">② 核心脊柱 8 模块 · 每次对话必经 · 启动硬接线 · 不可换(reserved 名单 · BUS-002)</text>
+
+        <!-- ① 插件总线地基 -->
+        <rect x="60" y="846" width="820" height="130" rx="12" fill="rgba(251, 146, 60, 0.05)" stroke="#fb923c" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="76" y="866" fill="#fb923c" font-size="10" font-weight="600">① 插件总线地基 · 阶段0 · 自研 Cordis 等价物 · 单进程内唯一通信通道</text>
+
+        <!-- 工具四关边界 -->
+        <rect x="910" y="100" width="370" height="564" rx="12" fill="rgba(136, 19, 55, 0.05)" stroke="#fb7185" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="926" y="120" fill="#fb7185" font-size="10" font-weight="600">工具调用链路 · 四关(LLM 零信任)</text>
+
+        <!-- 外部服务边界 -->
+        <rect x="910" y="690" width="370" height="436" rx="12" fill="rgba(120, 53, 15, 0.04)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="926" y="710" fill="#fbbf24" font-size="10" font-weight="600">外部服务 / 本机边界</text>
+
+        <!-- ==================== 组件 ==================== -->
+
+        <!-- 用户 / 外部程序 -->
+        <rect x="60" y="24" width="820" height="56" rx="6" fill="#0f172a"/>
+        <rect x="60" y="24" width="820" height="56" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="470" y="48" fill="white" font-size="12" font-weight="600" text-anchor="middle">用户 / 外部程序</text>
+        <text x="470" y="66" fill="#94a3b8" font-size="9" text-anchor="middle">文本 · 图片 · 斜杠命令 · JSON-RPC · HTTP/SSE · 其他 Agent</text>
+
+        <!-- 外壳 ×4 -->
+        <rect x="78" y="134" width="182" height="84" rx="6" fill="#0f172a"/>
+        <rect x="78" y="134" width="182" height="84" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="169" y="156" fill="white" font-size="11" font-weight="600" text-anchor="middle">CLI pyharness</text>
+        <text x="169" y="176" fill="#94a3b8" font-size="8" text-anchor="middle">chat / run / plan / search</text>
+        <text x="169" y="190" fill="#94a3b8" font-size="8" text-anchor="middle">session / fork / schedule / workflow</text>
+        <text x="169" y="206" fill="#22d3ee" font-size="8" text-anchor="middle">16 子命令 · 流式渲染</text>
+
+        <rect x="272" y="134" width="196" height="84" rx="6" fill="#0f172a"/>
+        <rect x="272" y="134" width="196" height="84" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="370" y="156" fill="white" font-size="11" font-weight="600" text-anchor="middle">桌面壳 · Web</text>
+        <text x="370" y="176" fill="#94a3b8" font-size="8" text-anchor="middle">pywebview 壳 + FastAPI 同进程</text>
+        <text x="370" y="190" fill="#94a3b8" font-size="8" text-anchor="middle">SSE 推送 · 轨迹时间线回放</text>
+        <text x="370" y="206" fill="#22d3ee" font-size="8" text-anchor="middle">对话 / 审批弹窗 / 预算仪表盘</text>
+
+        <rect x="480" y="134" width="196" height="84" rx="6" fill="#0f172a"/>
+        <rect x="480" y="134" width="196" height="84" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="578" y="156" fill="white" font-size="11" font-weight="600" text-anchor="middle">桌面壳 · 原生</text>
+        <text x="578" y="176" fill="#94a3b8" font-size="8" text-anchor="middle">PySide6 + qasync</text>
+        <text x="578" y="190" fill="#94a3b8" font-size="8" text-anchor="middle">不启 uvicorn / SSE / WebView2</text>
+        <text x="578" y="206" fill="#22d3ee" font-size="8" text-anchor="middle">同能力 · Qt 原生弹窗</text>
+
+        <rect x="688" y="134" width="174" height="84" rx="6" fill="#0f172a"/>
+        <rect x="688" y="134" width="174" height="84" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="775" y="156" fill="white" font-size="11" font-weight="600" text-anchor="middle">ACP 桥</text>
+        <text x="775" y="176" fill="#94a3b8" font-size="8" text-anchor="middle">JSON-RPC over stdio</text>
+        <text x="775" y="190" fill="#94a3b8" font-size="8" text-anchor="middle">initialize → chat</text>
+        <text x="775" y="206" fill="#22d3ee" font-size="8" text-anchor="middle">引擎 = 可编程组件</text>
+
+        <!-- 共享服务层 -->
+        <rect x="78" y="232" width="784" height="56" rx="6" fill="#0f172a"/>
+        <rect x="78" y="232" width="784" height="56" rx="6" fill="rgba(8, 51, 68, 0.25)" stroke="#22d3ee" stroke-width="1.2" stroke-dasharray="4,4"/>
+        <text x="470" y="253" fill="white" font-size="10" font-weight="600" text-anchor="middle">ApplicationService · 双壳共享能力契约(会话/引擎/队列/审批/反问/消息/Jobs/定时/子Agent/技能/插件/权限预设)</text>
+        <text x="470" y="272" fill="#94a3b8" font-size="8" text-anchor="middle">GET /api/capabilities · NativeController.capabilities() 运行时自检 · SHELL_CAPABILITIES 清单固化</text>
+
+        <!-- 能力层 ×6 -->
+        <rect x="78" y="364" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="78" y="364" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="203" y="386" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.tools</text>
+        <text x="203" y="406" fill="#94a3b8" font-size="8" text-anchor="middle">文件读写 · 列目录 · Web 搜索/抓取</text>
+        <text x="203" y="422" fill="#94a3b8" font-size="8" text-anchor="middle">spill 截断留痕 · todo</text>
+        <text x="203" y="438" fill="#94a3b8" font-size="8" text-anchor="middle">subprocess / PTY(ConPTY)· MCP 工具桥</text>
+        <text x="203" y="450" fill="#34d399" font-size="8" text-anchor="middle">唯一进程出口,受 guard 管辖</text>
+
+        <rect x="344" y="364" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="344" y="364" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="469" y="386" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.agent</text>
+        <text x="469" y="406" fill="#94a3b8" font-size="8" text-anchor="middle">任务队列 / plan / goal</text>
+        <text x="469" y="422" fill="#94a3b8" font-size="8" text-anchor="middle">schedule / subagent / workflow</text>
+        <text x="469" y="438" fill="#94a3b8" font-size="8" text-anchor="middle">jobs(持久化 + 独立 segment;子会话归 subagent)</text>
+        <text x="469" y="450" fill="#34d399" font-size="8" text-anchor="middle">协程级并发 · 共享同一 seq 分配器</text>
+
+        <rect x="610" y="364" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="610" y="364" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="735" y="386" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.session</text>
+        <text x="735" y="406" fill="#94a3b8" font-size="8" text-anchor="middle">fork / compaction 上下文压缩</text>
+        <text x="735" y="422" fill="#94a3b8" font-size="8" text-anchor="middle">FTS5 查询(CLI search + session.fts_query 工具)</text>
+        <text x="735" y="438" fill="#94a3b8" font-size="8" text-anchor="middle">repair 崩溃恢复(F060)</text>
+        <text x="735" y="450" fill="#34d399" font-size="8" text-anchor="middle">compaction 只动派生视图</text>
+
+        <rect x="78" y="464" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="78" y="464" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="203" y="486" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.storage</text>
+        <text x="203" y="506" fill="#94a3b8" font-size="8" text-anchor="middle">会话级域 KV(F056)</text>
+        <text x="203" y="522" fill="#94a3b8" font-size="8" text-anchor="middle">scope.updated 落盘</text>
+        <text x="203" y="538" fill="#94a3b8" font-size="8" text-anchor="middle">预算门面 BudgetGate(与 scope 同源只读)</text>
+
+        <rect x="344" y="464" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="344" y="464" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="469" y="486" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.sys</text>
+        <text x="469" y="506" fill="#94a3b8" font-size="8" text-anchor="middle">sandbox(策略层:域显隐+路径闸+审批,非 OS 隔离)</text>
+        <text x="469" y="522" fill="#94a3b8" font-size="8" text-anchor="middle">workspace 工作区边界</text>
+        <text x="469" y="538" fill="#94a3b8" font-size="8" text-anchor="middle">路径逃逸 = guard 拒绝</text>
+
+        <rect x="610" y="464" width="250" height="88" rx="6" fill="#0f172a"/>
+        <rect x="610" y="464" width="250" height="88" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="735" y="486" fill="white" font-size="11" font-weight="600" text-anchor="middle">ctx.ui</text>
+        <text x="735" y="506" fill="#94a3b8" font-size="8" text-anchor="middle">附件 / 反馈(点赞点踩)</text>
+        <text x="735" y="522" fill="#94a3b8" font-size="8" text-anchor="middle">消息编辑 · 重发(F061-063)</text>
+        <text x="735" y="538" fill="#94a3b8" font-size="8" text-anchor="middle">写操作全走 session.append</text>
+
+        <!-- 核心脊柱 ×8 -->
+        <rect x="78" y="632" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="78" y="632" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="170" y="656" fill="white" font-size="11" font-weight="600" text-anchor="middle">agent-loop</text>
+        <text x="170" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">循环驱动 · 三态机</text>
+        <text x="170" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">idle → running</text>
+        <text x="170" y="708" fill="#a78bfa" font-size="8" text-anchor="middle">→ terminated</text>
+
+        <rect x="277" y="632" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="277" y="632" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="369" y="656" fill="white" font-size="11" font-weight="600" text-anchor="middle">agent</text>
+        <text x="369" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">会话实体 + ctx 门面</text>
+        <text x="369" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">能力 seam 消费端总闸</text>
+
+        <rect x="476" y="632" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="476" y="632" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="568" y="656" fill="white" font-size="11" font-weight="600" text-anchor="middle">session</text>
+        <text x="568" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">事件日志门面</text>
+        <text x="568" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">append / 回放 / 订阅</text>
+        <text x="568" y="708" fill="#a78bfa" font-size="8" text-anchor="middle">derive_history 派生历史</text>
+
+        <rect x="675" y="632" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="675" y="632" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="767" y="656" fill="white" font-size="11" font-weight="600" text-anchor="middle">llm</text>
+        <text x="767" y="676" fill="#94a3b8" font-size="8" text-anchor="middle">DeepSeek 客户端 + 降级链</text>
+        <text x="767" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">流式 / 重试 / 用量记账</text>
+        <text x="767" y="708" fill="#a78bfa" font-size="8" text-anchor="middle">三档超时 10s/60s/180s</text>
+
+        <rect x="78" y="728" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="78" y="728" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="170" y="752" fill="white" font-size="11" font-weight="600" text-anchor="middle">system-prompt</text>
+        <text x="170" y="772" fill="#94a3b8" font-size="8" text-anchor="middle">提示词组装(只读)</text>
+        <text x="170" y="788" fill="#94a3b8" font-size="8" text-anchor="middle">护栏段注入(F024)</text>
+
+        <rect x="277" y="728" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="277" y="728" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="369" y="752" fill="white" font-size="11" font-weight="600" text-anchor="middle">scope</text>
+        <text x="369" y="772" fill="#94a3b8" font-size="8" text-anchor="middle">权限边界 / 预算硬闸</text>
+        <text x="369" y="788" fill="#94a3b8" font-size="8" text-anchor="middle">上下文窗口 / 危险标记集</text>
+
+        <rect x="476" y="728" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="476" y="728" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="568" y="752" fill="white" font-size="11" font-weight="600" text-anchor="middle">tools</text>
+        <text x="568" y="772" fill="#94a3b8" font-size="8" text-anchor="middle">工具注册表总闸</text>
+        <text x="568" y="788" fill="#94a3b8" font-size="8" text-anchor="middle">name→Definition→Provider</text>
+
+        <rect x="675" y="728" width="185" height="86" rx="6" fill="#0f172a"/>
+        <rect x="675" y="728" width="185" height="86" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="767" y="752" fill="white" font-size="11" font-weight="600" text-anchor="middle">persistence</text>
+        <text x="767" y="772" fill="#94a3b8" font-size="8" text-anchor="middle">JSONL 落盘 / 轮转</text>
+        <text x="767" y="788" fill="#94a3b8" font-size="8" text-anchor="middle">损坏检测 / 崩溃恢复入口</text>
+
+        <!-- 插件总线 ×4 -->
+        <rect x="78" y="878" width="185" height="84" rx="6" fill="#0f172a"/>
+        <rect x="78" y="878" width="185" height="84" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="170" y="902" fill="white" font-size="11" font-weight="600" text-anchor="middle">事件总线</text>
+        <text x="170" y="922" fill="#94a3b8" font-size="8" text-anchor="middle">emit / subscribe</text>
+        <text x="170" y="938" fill="#94a3b8" font-size="8" text-anchor="middle">只中转不落盘</text>
+
+        <rect x="277" y="878" width="185" height="84" rx="6" fill="#0f172a"/>
+        <rect x="277" y="878" width="185" height="84" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="369" y="902" fill="white" font-size="11" font-weight="600" text-anchor="middle">分发器</text>
+        <text x="369" y="922" fill="#94a3b8" font-size="8" text-anchor="middle">精确 / 通配 tool.* / 谓词</text>
+        <text x="369" y="938" fill="#94a3b8" font-size="8" text-anchor="middle">背压:同 sender FIFO</text>
+
+        <rect x="476" y="878" width="185" height="84" rx="6" fill="#0f172a"/>
+        <rect x="476" y="878" width="185" height="84" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="568" y="902" fill="white" font-size="11" font-weight="600" text-anchor="middle">注册表</text>
+        <text x="568" y="922" fill="#94a3b8" font-size="8" text-anchor="middle">插件 / 工具 / 能力三类索引</text>
+        <text x="568" y="938" fill="#94a3b8" font-size="8" text-anchor="middle">脊柱名保留 BUS-002</text>
+
+        <rect x="675" y="878" width="185" height="84" rx="6" fill="#0f172a"/>
+        <rect x="675" y="878" width="185" height="84" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="767" y="902" fill="white" font-size="11" font-weight="600" text-anchor="middle">热插拔生命周期</text>
+        <text x="767" y="922" fill="#94a3b8" font-size="8" text-anchor="middle">install / uninstall</text>
+        <text x="767" y="938" fill="#94a3b8" font-size="8" text-anchor="middle">五态 · 拒新不丢旧</text>
+
+        <!-- 会话事件日志 -->
+        <rect x="60" y="1004" width="820" height="78" rx="6" fill="#0f172a"/>
+        <rect x="60" y="1004" width="820" height="78" rx="6" fill="rgba(76, 29, 149, 0.45)" stroke="#a78bfa" stroke-width="2"/>
+        <text x="470" y="1028" fill="white" font-size="11" font-weight="600" text-anchor="middle">会话事件日志 · JSONL append-only · 唯一真源(73 型事件词表)</text>
+        <text x="470" y="1048" fill="#94a3b8" font-size="8" text-anchor="middle">消息历史 / UI 渲染 / FTS 索引全是它的派生视图,不存第二份;修正 = 追加修正事件,永不 update/delete</text>
+        <text x="470" y="1066" fill="#a78bfa" font-size="8" text-anchor="middle">强同步点:user.message / guard.rejected / approval.*(落盘成功才 ACK)· 其余异步 ≤0.5s 或 64 条 flush</text>
+
+        <!-- 派生视图 -->
+        <text x="78" y="1104" fill="#94a3b8" font-size="8">派生视图(可弃可重建)</text>
+        <rect x="78" y="1114" width="250" height="52" rx="6" fill="#0f172a"/>
+        <rect x="78" y="1114" width="250" height="52" rx="6" fill="rgba(76, 29, 149, 0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="203" y="1136" fill="white" font-size="9" font-weight="600" text-anchor="middle">消息历史 derive_history</text>
+        <text x="203" y="1154" fill="#94a3b8" font-size="8" text-anchor="middle">每次请求从日志现算 + 截窗</text>
+
+        <rect x="344" y="1114" width="250" height="52" rx="6" fill="#0f172a"/>
+        <rect x="344" y="1114" width="250" height="52" rx="6" fill="rgba(76, 29, 149, 0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="469" y="1136" fill="white" font-size="9" font-weight="600" text-anchor="middle">UI 渲染 / 轨迹回放</text>
+        <text x="469" y="1154" fill="#94a3b8" font-size="8" text-anchor="middle">三壳是同一事件流的投影</text>
+
+        <rect x="610" y="1114" width="250" height="52" rx="6" fill="#0f172a"/>
+        <rect x="610" y="1114" width="250" height="52" rx="6" fill="rgba(76, 29, 149, 0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="735" y="1136" fill="white" font-size="9" font-weight="600" text-anchor="middle">SQLite FTS5 索引</text>
+        <text x="735" y="1154" fill="#94a3b8" font-size="8" text-anchor="middle">旧会话全文搜索(F057)</text>
+
+        <!-- 右栏:单进程 -->
+        <rect x="910" y="24" width="370" height="56" rx="6" fill="#0f172a"/>
+        <rect x="910" y="24" width="370" height="56" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="1095" y="48" fill="white" font-size="11" font-weight="600" text-anchor="middle">单进程 · 一个 asyncio 事件循环</text>
+        <text x="1095" y="66" fill="#94a3b8" font-size="8" text-anchor="middle">INV-07 钉死单进程 · 单会话仅一个 running</text>
+
+        <!-- 四关 -->
+        <rect x="926" y="132" width="338" height="54" rx="6" fill="#0f172a"/>
+        <rect x="926" y="132" width="338" height="54" rx="6" fill="rgba(136, 19, 55, 0.35)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="1095" y="153" fill="white" font-size="10" font-weight="600" text-anchor="middle">LLM 返回 tool_calls(raw JSON)</text>
+        <text x="1095" y="171" fill="#94a3b8" font-size="8" text-anchor="middle">不可信:畸形 / 编造 / 被注入</text>
+
+        <rect x="926" y="206" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="206" width="338" height="88" rx="6" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="1095" y="228" fill="white" font-size="10" font-weight="600" text-anchor="middle">关1 · 契约校验(先验后跑)</text>
+        <text x="1095" y="248" fill="#94a3b8" font-size="8" text-anchor="middle">注册表查 Definition → raw_args 过 pydantic</text>
+        <text x="1095" y="264" fill="#94a3b8" font-size="8" text-anchor="middle">查不到 → TLB-802;类型失败 → TLB-803</text>
+        <text x="1095" y="282" fill="#fb7185" font-size="8" text-anchor="middle">不允许:部分通过 / 原样透传 / 隐式修正</text>
+
+        <rect x="926" y="314" width="338" height="118" rx="6" fill="#0f172a"/>
+        <rect x="926" y="314" width="338" height="118" rx="6" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="1095" y="336" fill="white" font-size="10" font-weight="600" text-anchor="middle">关2 · guard 单调拒绝(原则3)</text>
+        <text x="1095" y="356" fill="#94a3b8" font-size="8" text-anchor="middle">g1 schema → g2 danger → g3 fs-path → g4 credential-read</text>
+        <text x="1095" y="372" fill="#94a3b8" font-size="8" text-anchor="middle">g5 net-outbound → g6 exec → g7 overwrite(共 7 条)</text>
+        <text x="1095" y="390" fill="#94a3b8" font-size="8" text-anchor="middle">任一 reject = 终局:无翻回 allow / 无旁路</text>
+        <text x="1095" y="406" fill="#94a3b8" font-size="8" text-anchor="middle">danger ≥ high → 人类审批;critical → 拒绝</text>
+        <text x="1095" y="422" fill="#fb7185" font-size="8" text-anchor="middle">审批通过 ≠ 放行 → 重入 guard 链起点</text>
+
+        <rect x="926" y="452" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="452" width="338" height="88" rx="6" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="1095" y="474" fill="white" font-size="10" font-weight="600" text-anchor="middle">关3 · Provider 执行(能力 seam)</text>
+        <text x="1095" y="494" fill="#94a3b8" font-size="8" text-anchor="middle">换实现不碰消费方 · 同步 handler 走线程池</text>
+        <text x="1095" y="510" fill="#94a3b8" font-size="8" text-anchor="middle">笼子里:scope / 预算 / 超时 / 取消传播</text>
+        <text x="1095" y="528" fill="#fb7185" font-size="8" text-anchor="middle">被拒绝的调用零副作用(INV-05)</text>
+
+        <rect x="926" y="560" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="560" width="338" height="88" rx="6" fill="rgba(136, 19, 55, 0.2)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="1095" y="582" fill="white" font-size="10" font-weight="600" text-anchor="middle">关4 · 结果检查(落地前最后一道)</text>
+        <text x="1095" y="602" fill="#94a3b8" font-size="8" text-anchor="middle">输出超长 → spill 截断留痕</text>
+        <text x="1095" y="618" fill="#94a3b8" font-size="8" text-anchor="middle">INV-06:日志 args 与执行 args 一致</text>
+        <text x="1095" y="636" fill="#fb7185" font-size="8" text-anchor="middle">写 tool.result → 回 agent-loop 步骤5</text>
+
+        <!-- 外部服务 -->
+        <rect x="926" y="722" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="722" width="338" height="88" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1095" y="744" fill="white" font-size="11" font-weight="600" text-anchor="middle">DeepSeek(主模型)</text>
+        <text x="1095" y="764" fill="#94a3b8" font-size="8" text-anchor="middle">OpenAI 兼容 · chat / 流式</text>
+        <text x="1095" y="780" fill="#94a3b8" font-size="8" text-anchor="middle">key 走环境变量 / 租户密钥库(DPAPI)</text>
+        <text x="1095" y="796" fill="#fbbf24" font-size="8" text-anchor="middle">单任务 &lt; 1 元 · 用量记账(F029)</text>
+
+        <rect x="926" y="822" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="822" width="338" height="88" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1095" y="844" fill="white" font-size="11" font-weight="600" text-anchor="middle">qwen-max(降级链)</text>
+        <text x="1095" y="864" fill="#94a3b8" font-size="8" text-anchor="middle">401 / 超时 / 断网 → 指数退避重试</text>
+        <text x="1095" y="880" fill="#94a3b8" font-size="8" text-anchor="middle">适配器隔离 · 健康探针择优(F033)</text>
+        <text x="1095" y="896" fill="#fbbf24" font-size="8" text-anchor="middle">降级不降安全:同过校验 / guard / 预算</text>
+
+        <rect x="926" y="922" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="922" width="338" height="88" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1095" y="944" fill="white" font-size="11" font-weight="600" text-anchor="middle">MCP Server(stdio 子进程)</text>
+        <text x="1095" y="964" fill="#94a3b8" font-size="8" text-anchor="middle">2024-11-05 协议子集(Final)· stdio 真链</text>
+        <text x="1095" y="980" fill="#94a3b8" font-size="8" text-anchor="middle">initialize → tools/list → tools/call</text>
+        <text x="1095" y="996" fill="#fbbf24" font-size="8" text-anchor="middle">工具桥 mcp.&lt;server&gt;.&lt;tool&gt;(经注册表)</text>
+
+        <rect x="926" y="1022" width="338" height="88" rx="6" fill="#0f172a"/>
+        <rect x="926" y="1022" width="338" height="88" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="1095" y="1044" fill="white" font-size="11" font-weight="600" text-anchor="middle">网络 / 本机</text>
+        <text x="1095" y="1064" fill="#94a3b8" font-size="8" text-anchor="middle">Bing RSS 搜索(无 key)· Web 抓取</text>
+        <text x="1095" y="1080" fill="#94a3b8" font-size="8" text-anchor="middle">文件系统 · subprocess / PTY</text>
+        <text x="1095" y="1096" fill="#fbbf24" font-size="8" text-anchor="middle">唯一进程出口 · 必须过 guard</text>
+
+        <!-- ==================== 图例（在所有边界之外） ==================== -->
+        <rect x="60" y="1198" width="1220" height="92" rx="10" fill="rgba(15, 23, 42, 0.6)" stroke="#1e293b" stroke-width="1"/>
+        <text x="76" y="1220" fill="white" font-size="10" font-weight="600">图例</text>
+
+        <rect x="130" y="1236" width="16" height="10" rx="2" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="154" y="1245" fill="#94a3b8" font-size="9">交互 / 外壳层</text>
+
+        <rect x="440" y="1236" width="16" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="464" y="1245" fill="#94a3b8" font-size="9">脊柱 / 能力层</text>
+
+        <rect x="750" y="1236" width="16" height="10" rx="2" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1"/>
+        <text x="774" y="1245" fill="#94a3b8" font-size="9">插件总线地基</text>
+
+        <rect x="1060" y="1236" width="16" height="10" rx="2" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="1084" y="1245" fill="#94a3b8" font-size="9">事件日志 / 数据</text>
+
+        <rect x="130" y="1262" width="16" height="10" rx="2" fill="rgba(136, 19, 55, 0.35)" stroke="#fb7185" stroke-width="1"/>
+        <text x="154" y="1271" fill="#94a3b8" font-size="9">安全 / guard · 审批</text>
+
+        <rect x="440" y="1262" width="16" height="10" rx="2" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1"/>
+        <text x="464" y="1271" fill="#94a3b8" font-size="9">外部服务 / 本机边界</text>
+
+        <rect x="750" y="1262" width="16" height="10" rx="2" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="774" y="1271" fill="#94a3b8" font-size="9">用户 / 外部程序</text>
+
+        <rect x="1060" y="1262" width="16" height="10" rx="2" fill="transparent" stroke="#64748b" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="1084" y="1271" fill="#94a3b8" font-size="9">层边界（虚线框）</text>
+      </svg>

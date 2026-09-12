@@ -27,6 +27,7 @@ async def main() -> int:
     ctx.storage.sessions_dir = tmp
 
     app = DesktopApp(ctx=ctx)
+    token = app._api_token
     port = pick_free_port()
     threading.Thread(target=run_uvicorn, args=(app, port), daemon=True).start()
     if not wait_until_listening(port):
@@ -34,7 +35,9 @@ async def main() -> int:
         return 1
     base = f"http://127.0.0.1:{port}"
 
-    async with httpx.AsyncClient(base_url=base, trust_env=False) as c:
+    hdrs = {"X-PyHarness-Token": token}
+    async with httpx.AsyncClient(base_url=base, trust_env=False,
+                                 headers=hdrs) as c:
         # 1. 根路由
         r = await c.get("/")
         print(f"GET / → {r.status_code} html={r.headers.get('content-type')} "
@@ -52,7 +55,7 @@ async def main() -> int:
         r = await c.get(f"/api/budget/{sid}")
         print(f"GET budget → {r.status_code} disabled={r.json().get('disabled')}")
     app.shutdown_gracefully()
-    print("\n✅ 冒烟完成")
+    print("\n[OK] 冒烟完成")
     return 0
 
 

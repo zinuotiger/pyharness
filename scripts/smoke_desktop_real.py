@@ -26,6 +26,7 @@ async def main() -> int:
     ctx.storage.sessions_dir = tmp
 
     app = DesktopApp(ctx=ctx)
+    token = app._api_token
     port = pick_free_port()
     threading.Thread(target=run_uvicorn, args=(app, port), daemon=True).start()
     if not wait_until_listening(port):
@@ -33,6 +34,7 @@ async def main() -> int:
     base = f"http://127.0.0.1:{port}"
 
     async with httpx.AsyncClient(base_url=base, trust_env=False,
+                                 headers={"X-PyHarness-Token": token},
                                  timeout=httpx.Timeout(120.0)) as c:
         # 新建会话
         r = await c.post("/api/sessions")
@@ -63,7 +65,7 @@ async def main() -> int:
         d = r.json()
         print(f"4. budget: used_in={d.get('used_in_tokens')} used_out={d.get('used_out_tokens')}")
     app.shutdown_gracefully()
-    print("\n✅ 桌面真实全链路冒烟完成")
+    print("\n[OK] desktop real chain smoke done")
     return 0
 
 

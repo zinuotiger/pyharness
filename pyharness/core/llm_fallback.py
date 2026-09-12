@@ -160,19 +160,13 @@ class AdapterHealth:
 def _fire_emit(bus: Any, type_: str, payload: dict) -> None:
     """尽力而为总线出口:bus 未接线/emit 抛错只记日志,不阻断调用方主路径。
 
-    EventBus.emit(type, payload) 同步返回分发协程(见 event_bus.py emit 偏离点);
-    运行中事件循环存在时 create_task 排程投递,否则降级为日志(config.py _emit_event
-    同款 fire-and-forget 语义;告警/通知不阻塞降级主路径)。
+    经 bus.schedule_emit 统一排程(保留 task 引用);告警/通知不阻塞降级主路径。
     """
     if bus is None:
         return
+    from pyharness.bus import schedule_emit
     try:
-        r = bus.emit(type_, payload)
-        if inspect.isawaitable(r):
-            try:
-                asyncio.get_running_loop().create_task(r)
-            except RuntimeError:             # 无运行中事件循环:同步/未装配上下文
-                log.warning("llm_fallback: 无运行中事件循环,%s 事件未投递", type_)
+        schedule_emit(bus, type_, payload)
     except Exception as exc:                 # noqa: BLE001 EVT-102 未注册类型等
         log.warning("llm_fallback emit %s 失败: %s", type_, exc)
 
@@ -210,7 +204,8 @@ class FallbackChain:
         self.health = {n: AdapterHealth() for n in self.chain}
 
     # ====================================================== 链式降级编排(F013)
-    async def chat_with_fallback(self, messages, tools=None, *, ctx) -> Any:
+    async def chat_with_fallback(self, messages, tools=None, *, ctx,
+                                 method: str = "chat") -> Any:
         """从 chain[idx:] 起逐适配器经 _retry_adapter 尝试,返回 LLMResponse。
 
         每适配器进入前过 BudgetGuard(预算前置闸);302/303 且满足降级条件 → 留痕 +
@@ -230,7 +225,8 @@ class FallbackChain:
                 continue
             await BudgetGuard.check(ctx)      # 每请求前置预算闸(F032)
             try:
-                return await self._retry_adapter(name, messages, tools, ctx)
+                return await self._retry_adapter(name, messages, tools, ctx,
+                                                 method=method)
             except PyHError as e:
                 err_hist.append((name, e.code))
                 if (e.code in _DEGRADE_CODES and enabled
@@ -247,7 +243,8 @@ class FallbackChain:
                    advice="全链失败,任务终止(不无限降级)")
 
     # ====================================================== 指数退避(F028)
-    async def _retry_adapter(self, name: str, messages, tools, ctx) -> Any:
+    async def _retry_adapter(self, name: str, messages, tools, ctx, *,
+                             method: str = "chat") -> Any:
         """单适配器内重试循环:只重试 LLM-301/303;基数 1s×2 递增、上限 attempts
         (默认 4)、±jitter(默认 30%)抖动;每次等待落 llm.retry 事件(sleep 可被取消
         F025);退避耗尽 → LLM-303(exhausted)交 chat_with_fallback 降级决策。
@@ -259,7 +256,12 @@ class FallbackChain:
         for attempt in range(n_attempts):
             await BudgetGuard.check(ctx)              # 每次重试前再查预算(防烧钱)
             try:
-                return await self.adapters[name].chat(messages, tools, ctx=ctx)
+                fn = getattr(self.adapters[name], method, None)
+                if not callable(fn):
+                    raise_code("CFG-601", reason="structural", adapter=name,
+                               missing=method,
+                               detail="适配器缺降级链请求方法")
+                return await fn(messages, tools, ctx=ctx)
             except PyHError as e:
                 if e.code not in _RETRYABLE_CODES:
                     raise                             # LLM-302/304:不重试

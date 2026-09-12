@@ -142,6 +142,8 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 | `security.sandbox.proc_mem_limit_mb` | int | `0` | 0=不限;≥1=MB | 子进程内存限额;Windows 尽力而为(F054) | L2 |
 | `security.network.allowed_domains` | list[str] | `[]` | 域名列表 | 外发 allowlist,空=禁一切外发 POL-NET-1(F023/N13);域名归一 | L2 |
 | `security.network.web_search_per_session` | int | `20` | 0-1000 | 搜索次数闸,0=禁用(F037) | L2 |
+| `security.network.search_backend` | enum | `bing` | disabled/bing/duckduckgo | 内置搜索后端;`bing`=Bing RSS 无 key,`duckduckgo`=HTML 后端,`disabled`=关闭(F037) | L2 |
+| `security.network.search_endpoint` | str | `https://cn.bing.com/search` | URL | 搜索后端端点;仅在对应后端启用时使用(F037) | L2 |
 | `security.policy.deny_tools_extra` | list[str] | `[]` | 工具名 | 权限预设基集上**只增**的 deny 追加(GRD-401) | L2 |
 | `security.policy.read_extra_dirs` | list[str] | `[]` | 绝对目录 | workspace 外显式授权**只读**例外,须 config+guard 留痕(F055) | L2 |
 | `security.tool_danger_extra` | dict | `{}` | `{工具: none/low/high/critical}` | danger 只许**调高收紧**(low→high 转审批);调低→CFG-601 越权拒 | L2 |
@@ -158,6 +160,17 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 **权限预设(内置,只可追加)**:strict=deny 含 `fs.delete_file` 等+allowlist 空+subprocess 禁;basic=高危部分限制、g-exec 需授权;off=deny 空、workspace 边界仍在(F055)。
 
 **guard 纪律固定**:五内置默认全激活不可整体关闭(F023);high→审批、critical→拒不可审批(SEC §4.2);granted 重入链起点(F014);`guard.rejected`/`approval.*` 强同步。
+
+## 3.3.1 Skill Registry(F073)
+
+| 键 | 类型 | 默认值 | 取值范围 | 说明 | 覆盖 |
+|---|---|---|---|---|---|
+| `skills.dir` | str | `~/.pyharness/skills` | 路径 | 用户技能安装根;与仓库 `skills/` 一起扫描 | L2 |
+| `skills.registry_url` | str | `""` | http/https/file URL | Skill Registry JSON 清单地址 | L2 |
+| `skills.max_package_bytes` | int | `5242880` | 1KB-100MB | Skill zip 下载/解压大小上限 | L2 |
+| `skills.max_files` | int | `200` | 1-10000 | Skill zip 文件数上限 | L2 |
+
+Skill 安装流程:`search → download → SHA-256 → quarantine → safe extract → frontmatter/name check → version store → active install`。安装、回滚、卸载均要求人类批准参数与事件审计。
 
 ## 3.4 日志域(F009/F011)
 
@@ -211,6 +224,7 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 |---|---|---|---|---|---|
 | `plugins.enabled` | list[str] | 内置能力(空=只装内置) | 插件/能力 id | 启用名单;名单外不装载;脊柱 8 模块不可配(BUS-002) | L2+ |
 | `plugins.dir` | str | `~/.pyharness/plugins` | 路径 | 第三方插件包目录(含 manifest);不存在=忽略 | L2+ |
+| `plugins.mcp_servers` | list[object] | `[]` | `{name, command:[argv], enabled, timeout_s}` | MCP stdio server 列表;不走 shell,工具以 `mcp.<name>.<tool>` 注册并强制审批 | L2+ |
 | `plugins.ctx_lazy` | bool | `true` | true/false | ctx 服务惰性装载(DIS-SEAM §3.3);false=启动期全量 enter | L2 |
 | `plugins.pre_activate` | list[str] | `[storage.spill, credentials, storage.kv]` | 基础能力 id | 预激活:启动第⑤步先行 enter(DIS-SEAM §3.4) | L2 |
 | `plugins.priority` | dict | `{}` | `{插件id: int}` | 同层无依赖插件次序,小者先;默认 0 按注册序 | L2 |
@@ -388,6 +402,11 @@ storage:
   db_path: ~/.pyharness/pyharness.db
   workspaces_dir: ~/.pyharness/workspaces
   spill_dir: ~/.pyharness/spill           # spill 私有区 600
+skills:
+  dir: ~/.pyharness/skills
+  registry_url: ""
+  max_package_bytes: 5242880
+  max_files: 200
 plugins:
   enabled: []                     # 空=只装内置
   ctx_lazy: true
@@ -420,3 +439,22 @@ shell:
 1. 配置键/默认值/编号溯源 PRD-Core(F007/F010/F012/F013/F015/F017/F021/F023/F026/F028/F029/F032/F033/F034/F037/F038/F039/F043/F049/F051/F052/F054/F055/F056/F057/F058/F061/F063-F066、§2.5/§3.6、§7 NFR)与 SECURITY.md(§5/§6/§7)、DIS-SEAM.md(§3 ctx.lazy/§4.6);冲突以 PRD §7 与 SECURITY.md 为准。
 2. 错误码 CFG-601~603 与 ERR.md 已登记语义一致(F019 配置域);CFG-607/608 为本文提议新登记(编号取 ERR 预留空洞),落地同步 ERR;遵守 ADR-011:按码决策、不裸 raise。
 3. 本文件为 `pyharness/config.py`、`config` 子命令(F064)与 test_f021_config.py 唯一权威规格;实现阶段以 specs/ 函数级规格为准。
+
+---
+
+# 9 租户模型设置(桌面 UI)
+
+桌面壳顶栏“设置”页面用于创建租户并配置 OpenAI 兼容模型档案。该数据独立于 `config.yaml`：
+
+```text
+~/.pyharness/tenants/<tenant>/
+├── models.json          # provider/model/base_url/temperature/max_tokens,不含明文 Key
+└── model-secrets.bin    # Windows DPAPI 加密；其他平台 0600 文件
+```
+
+- Web 请求使用 `X-PyHarness-Tenant: <tenant>`；SSE 使用 `?tenant=<tenant>`。
+- 每个租户使用独立 `sessions/`、`skills/`、`plugins/` 目录。
+- `llm.api_key` 使用内部引用 `tenant:<tenant>:<profile>`；适配器在请求发送前才解密。
+- Key 为只写字段，查询接口只返回 `has_api_key`，不回显明文。
+- 同一进程内同名模型会生成带哈希的独立适配器键，避免租户间复用凭据。
+- 该隔离是应用级逻辑租户，不是针对同一 Windows 用户的强安全边界。

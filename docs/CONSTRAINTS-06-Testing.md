@@ -49,17 +49,29 @@
 
 
 ## 7. 核心不变量测试清单(先写测试再写实现,RED→GREEN)
+
+> **口径统一(2026-09-12)**:本表此前的 INV-03/04/05/06/07/08 语义与 `PRD-Core.md`
+> 的权威 INV 表(`PRD-Core.md:838`,冲突以 PRD 为准)不一致——曾把"guard 无放行 /
+> 参数非法 / 强同步不丢 / 降级生效 / 循环必终止"记在这些编号上,导致同一编号在两份
+> 文档里指两件事(代码注释与测试 docstring 也跟着混用)。现已按 PRD 对齐为本表,后续
+> 新增引用一律以此为准;"循环必终止"不是不变量编号,而是 F007 循环护栏(由
+> `max_turns` 用例覆盖,见 `tests/unit/test_agent_loop.py`)。
+
 | # | 不变量 | 测试断言 | 对应设计 |
 |---|--------|---------|---------|
-| INV-01 | 日志只追加 | append 后文件 hash 不变;无 delete/update API | 事件溯源 |
-| INV-02 | 消息历史=日志派生 | derive 结果与"逐事件重放"一致 | 单一真源 |
-| INV-03 | guard 无放行 | deny 后任何 guard 组合不能使调用通过 | 单调拒绝 |
-| INV-04 | guard 拒绝=零副作用 | 被拒调用后 mock 函数调用次数=0 | 先验后跑 |
-| INV-05 | 参数非法=函数未执行 | pydantic 失败后真实函数零调用 | LLM 零信任 |
-| INV-06 | 强同步事件不丢 | 崩溃恢复后强同步事件齐全 | 持久化 |
-| INV-07 | 降级生效 | 主模型 5xx 后请求走备用 base_url | 降级链 |
-| INV-08 | 循环必终止 | 任何输入下 max_turns 内结束 | 死循环防护 |
+| INV-01 | 日志只追加 / 历史必由日志派生 | append 后文件 hash 不变;无 delete/update API;derive 结果 = 逐事件重放 | 事件溯源 |
+| INV-02 | 无绕过 agent-loop 直调 llm | 全库 `llm.chat` 唯一合法调用方 = agent-loop | 单一入口 |
+| INV-03 | rebuild 与缓存一致 | `rebuild_from_log` 后缓存与重建前逐事件一致(含增量/编辑重放/二次 rebuild 无重复) | 派生视图可整体丢弃重建 |
+| INV-04 | 无 guard 事件即非法执行 | 全链 allow 恰一条 `guard.evaluated`;模块无 bypass/放行/执行类方法面 | guard 单调拒绝 |
+| INV-05 | guard 拒绝 = 零副作用 | 被拒调用后真实函数调用次数 = 0(拒后有 `guard.rejected` 无 `tool.result`) | 先验后跑 |
+| INV-06 | 执行 args = 日志 args | 构造 N 例畸形参数:真实函数零调用,且 args/raw_args 双份逐字段一致 | LLM 零信任 |
+| INV-07 | 单进程 | 全库进程数 = 1(无 multiprocessing / 跨进程 RPC;subprocess 工具除外且受 guard) | 单进程架构 |
+| INV-08 | 阶段 import 方向 | 阶段 N 不得 import 阶段 N+1 模块(核心脊柱无环) | 依赖单向 |
 | INV-09 | 日志脱敏 | 含 key 的输出在日志中为掩码 | 凭据安全 |
+
+> 说明:降级链"主模型 5xx/401 后请求走备用"由 `tests/unit/test_llm_fallback.py`
+> 覆盖,但它是**功能验收**(F013/F028),不是 INV 编号——早期把它记作 INV-07 的做法
+> 已废弃。
 
 ## 8. 测试目录与命名规范
 ```

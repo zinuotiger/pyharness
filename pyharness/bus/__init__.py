@@ -14,13 +14,14 @@
 错误全经 raise_code(F019),订阅者异常 EVT-103 隔离不外抛。
 """
 from pyharness.bus.event_bus import EventBus, STOP, Subscription
+from pyharness.bus.event_bus import schedule_emit
 from pyharness.bus.registry import Registry
 from pyharness.bus.plugin import (API_VERSION, BusyUninstall, Capability,
                                   PluginHost, PluginManager, PluginRecord)
 
 __all__ = [
     # 订阅与总线
-    "EventBus", "Subscription", "STOP",
+    "EventBus", "Subscription", "STOP", "schedule_emit",
     # 注册表
     "Registry",
     # 插件宿主与能力契约

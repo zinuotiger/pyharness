@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+.env
 docs/docs_html/
 docs/specs/*.part*
 .pytest_cache/
@@ -10,3 +11,13 @@ build/
 dist/
 *.spec
 .coverage
+# 探针/调试产物(本地生成,不入库)
+.probe_pty_tmp/
+.ui_check.js
+
+# 私人材料与本地运行产物(勿入库:仓库是 PUBLIC)
+简历*.docx
+*.log
+_commit_msg.txt
+collect_only.txt
+pytest_final.txt

@@ -69,6 +69,7 @@ import hashlib
 import inspect
 import json
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
@@ -159,6 +160,7 @@ class ApprovalRequest:
     timer: Any = None                      # TTL asyncio.TimerHandle(仅 lead)
     batch: list = field(default_factory=list)  # 所属 60s 批(含自身;lead 恒 batch[0])
     batch_mono: float = 0.0                # 批创建单调时钟(60s 窗口判定)
+    decision_inflight: Optional[str] = None  # granted/denied/timeout 正在落盘
 
     @property
     def is_terminal(self) -> bool:
@@ -305,30 +307,79 @@ class ApprovalProvider:
         """
         self._spawn_outcome("granted", approval_id, by)
 
+    async def approve_async(self, approval_id: int, *, by: str) -> None:
+        """异步裁决:等待 approval.granted 强同步落盘后才返回。"""
+        await self._decide_async("granted", approval_id, by)
+
     def deny(self, approval_id: int, *, by: str) -> None:
         """人类拒绝入口(同 approve:落 approval.denied)。"""
         self._spawn_outcome("denied", approval_id, by)
 
+    async def deny_async(self, approval_id: int, *, by: str) -> None:
+        """异步裁决:等待 approval.denied 强同步落盘后才返回。"""
+        await self._decide_async("denied", approval_id, by)
+
+    async def user_choice(self, options: list[str],
+                          *, prompt: str = "选择(输入序号/文字): ") -> str:
+        """plan 单步失败三选一裁决通道(F046):仅交互 cli 通道可用。
+
+        headless/desktop 无键盘通道 → APR-501(安全默认由 plan 层中止);
+        输入接受序号或命中选项文字,词表外一律按“中止”安全默认。
+        """
+        if self._headless or self._channel != "cli":
+            raise_code("APR-501", reason="no-user-choice",
+                       hint="无用户裁决通道(ctx.approval.user_choice 未接线)",
+                       advice="headless/桌面无键盘三选一;单步失败直接中止")
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}. {opt}", file=sys.stderr)
+        try:
+            ans = (await asyncio.to_thread(input, prompt)).strip()
+        except (EOFError, KeyboardInterrupt):
+            return "中止"
+        if ans.isdigit() and 1 <= int(ans) <= len(options):
+            return options[int(ans) - 1]
+        hit = next((o for o in options if o in ans), None)
+        return hit or "中止"
+
     def _spawn_outcome(self, verdict: str, approval_id: int, by: str) -> None:
         """裁决落地公共路径:身份校验 → 判 id(未知/已消费 → APR-503)→ 异步强同步落事件。"""
+        req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)
+        if not self._spawn(self._emit_outcome(req, sess, type_, by, actor="user")):
+            req.decision_inflight = None
+
+    async def _decide_async(self, verdict: str, approval_id: int, by: str) -> None:
+        """裁决落地公共异步路径;调用方可 await 确保事件已成为事实。"""
+        req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)
+        await self._emit_outcome(req, sess, type_, by, actor="user")
+
+    def _prepare_outcome(self, verdict: str, approval_id: int, by: str) -> tuple:
+        """同步完成身份与 pending 校验,保证无效裁决立即抛错而不是后台吞掉。"""
         self._require_human(by)
         req = self._pending.get(int(approval_id))
         if req is None or req.state != "pending":
             raise_code("APR-503", approval_id=approval_id,
                        why="未知或已裁决的 approval_id;同一审批至多一个结果(防重放)")
+        if req.decision_inflight is not None:
+            raise_code("APR-503", approval_id=approval_id,
+                       why=f"审批正在处理({req.decision_inflight}),拒绝重复裁决")
         sess = req.log or self._session
         if sess is None:
             raise_code("CYC-999", module="approval",
                        hint="请求无会话日志落点,裁决无法强同步落盘")
         type_ = _OUTCOME_EVENTS[verdict]
-        self._spawn(self._emit_outcome(req, sess, type_, by, actor="user"))
+        req.decision_inflight = verdict
+        return req, sess, type_
 
     async def _emit_outcome(self, req: ApprovalRequest, sess: Any, type_: str,
                             by: str, *, actor: str) -> None:
         """强同步落结果事件(approval.granted/denied/timeout,by 框架打)+ 唤醒。"""
         payload = {"approval_id": req.approval_id, "by": by,
                    "ttl_ms": req.ttl_ms}
-        await self._emit_verdict(sess, type_, payload, actor=actor)
+        try:
+            await self._emit_verdict(sess, type_, payload, actor=actor)
+        except Exception:
+            req.decision_inflight = None
+            raise
 
     async def _emit_verdict(self, sess: Any, type_: str, payload: dict, *,
                             actor: str) -> Any:
@@ -407,6 +458,7 @@ class ApprovalProvider:
                 continue
             w.state = verdict                    # 一次性迁移,终态不再接受裁决
             w.by = by
+            w.decision_inflight = None
             self._cancel_timer(w)
             if not w.waiter.done():
                 w.waiter.set_result(verdict)     # 唤醒 request() 等待者
@@ -445,13 +497,21 @@ class ApprovalProvider:
         """
         if req.state != "pending":
             return
+        if req.decision_inflight is not None:
+            return
+        req.decision_inflight = "timeout"
         sess = req.log or self._session
         if sess is None:
+            req.decision_inflight = None
             return
-        await self._emit_verdict(sess, "approval.timeout",
-                                 {"approval_id": req.approval_id, "by": "system",
-                                  "ttl_ms": req.ttl_ms},
-                                 actor="system")
+        try:
+            await self._emit_verdict(sess, "approval.timeout",
+                                     {"approval_id": req.approval_id, "by": "system",
+                                      "ttl_ms": req.ttl_ms},
+                                     actor="system")
+        except Exception:
+            req.decision_inflight = None
+            raise
 
     # ================================================== 等待与取消(APR-502)
     async def _wait_any(self, req: ApprovalRequest) -> str:
@@ -658,7 +718,7 @@ class ApprovalProvider:
         except (TypeError, ValueError):
             return default
 
-    def _spawn(self, coro: Any) -> None:
+    def _spawn(self, coro: Any) -> bool:
         """异步协程排程(fire-and-forget):失败只记日志;任务登记防 GC。"""
         if not inspect.isawaitable(coro):
             coro = coro()
@@ -667,11 +727,12 @@ class ApprovalProvider:
         except RuntimeError:
             logger.warning("approval 无运行中事件循环,协程未投递: %s",
                            getattr(coro, "__name__", coro))
-            return
+            return False
         task = loop.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(self._task_error)
+        return True
 
     @staticmethod
     def _task_error(task: Any) -> None:
@@ -721,13 +782,9 @@ class ApprovalProvider:
         if bus is None:
             logger.debug("approval 信任事件未广播(未接线 bus): %s %s", type_, payload)
             return
+        from pyharness.bus import schedule_emit
         try:
-            r = bus.emit(type_, payload)
-            if inspect.isawaitable(r):
-                try:
-                    asyncio.get_running_loop().create_task(r)
-                except RuntimeError:             # 无事件循环:日志降级
-                    logger.warning("approval 无运行中事件循环,%s 未投递", type_)
+            schedule_emit(bus, type_, payload)
         except Exception as exc:                 # noqa: BLE001 广播失败尽力而为
             logger.debug("approval %s 广播降级: %s", type_, exc)
 

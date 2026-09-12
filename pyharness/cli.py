@@ -320,7 +320,7 @@ def parse_args(argv: list[str]) -> ParseResult:
                                 description="PyHarness Agent 框架(66 功能/6 阶段)")
     _add_global_flags(p)
     sub = p.add_subparsers(dest="cmd", required=True, metavar="<子命令>",
-                           title="子命令(14)")
+                           title="子命令(16)")
 
     def leaf(name: str, *pos: tuple, **kw: Any) -> argparse.ArgumentParser:
         """叶子解析器:全局旗标(SUPPRESS 缺省)+ 通用 *args 位置参(可关)+ 专用
@@ -353,6 +353,10 @@ def parse_args(argv: list[str]) -> ParseResult:
     # -- 其余叶子(通用 args)
     leaf("schedule", bare_args=True, help="定时任务查看/管理")
     leaf("job", bare_args=True, help="任务队列/记录查询")
+    leaf("workflow", bare_args=True,
+         help="顺序编排:workflow \"步骤1\" \"步骤2\" …(逐步进真 AgentLoop)")
+    leaf("skill", bare_args=True,
+         help="本地技能包:skill | skill <name>(离线,零装配)")
     leaf("repair", bare_args=True, help="崩溃/损坏修复(F060)")
     leaf("desktop", bare_args=True, help="桌面程序(pywebview 壳,F065)")
     leaf("acp", bare_args=True, help="ACP 桥(JSON-RPC over stdio,F066)")
@@ -394,9 +398,11 @@ class CmdEntry:
 CMD_TABLE: dict[str, CmdEntry] = {
     "chat":     CmdEntry("interactive", need_session=True),
     "run":      CmdEntry("run", need_session=True),
-    "plan":     CmdEntry("once", need_session=True),     # 引擎单发(plan 引擎未来装配)
+    "plan":     CmdEntry("once", need_session=True),     # 引擎单发(真装配见 _cmd_plan)
     "schedule": CmdEntry("once"),
     "job":      CmdEntry("once"),
+    "workflow": CmdEntry("once"),
+    "skill":    CmdEntry("offline", offline=True),
     "search":   CmdEntry("once"),
     "session":  CmdEntry("once"),
     "fork":     CmdEntry("once"),
@@ -450,16 +456,25 @@ async def cli_main(r: ParseResult) -> int:
     sh = await bootstrap_shell(r)              # 启动序 + repair 前置 + headless 判定
     try:
         if r.cmd == "chat":
+            await _attach_engine(sh)           # 真实引擎:浅门面 → 可跑执行路径
             return await interactive_loop(sh, once=r.flags.get("once"))
         if r.cmd == "run":
-            return await run_intent(sh, await _run_text(sh, r.positional),
-                                    headless=sh.headless)
+            text = await _run_text(sh, r.positional)
+            if not text:
+                raise_code("EVT-100", advice="run 需要任务文本(stdin 或参数)",
+                           hint="用法:pyharness run \"任务文本\" 或管道喂入")
+            await _attach_engine(sh)
+            return await run_intent(sh, text, headless=sh.headless)
         if r.cmd == "repair":
             return await repair_cmd(sh, r.flags.get("session"))    # F060 桥
         if r.cmd == "desktop":
             from pyharness.desktop import run_desktop     # F065 交权(惰性:同批任务)
             return await run_desktop(sh.ctx)
         if r.cmd == "acp":
+            from pyharness.desktop.sessions import DesktopSessionManager
+            sh.ctx.session = DesktopSessionManager(
+                dir=_sessions_path(sh.ctx.settings),
+                bus=sh.ctx.bus, config=sh.ctx.settings)   # ACP 真会话门面
             mod = __import__("pyharness.acp", fromlist=["serve", "AcpBridge"])
             serve = getattr(mod, "serve", None)
             if serve is None:                            # AcpBridge 旧面兜底(偏离 7)
@@ -467,6 +482,7 @@ async def cli_main(r: ParseResult) -> int:
                 return await bridge.serve()
             return await serve(sh.ctx, client_id="acp:cli")
         # plan/schedule/job/search/session/fork:统一"装配+执行+渲染"单发路径
+        sh.ctx.handlers = _build_once_handlers(sh)
         return await run_once_sub(sh, r.cmd, r.positional, r.flags)
     finally:
         await _flush_session(sh)               # 收尾落盘:普通事件攒批全量刷盘(F011)
@@ -545,6 +561,31 @@ def _wire_queue(ns: SimpleNamespace) -> None:
         log.warning("approval provider 装配失败,审批降级为无通道自动拒", exc_info=True)
 
 
+async def _attach_engine(sh: ShellCtx) -> None:
+    """CLI 真引擎装配:把轻量门面换成 spine + runner + 真实 TaskQueue。
+
+    bootstrap_shell 只做会话/权限门面;chat/run/plan 真正干活前必须把
+    engine 装配进来(原设计留了 ctx.handlers/runner 注入点但从未接线)。
+    """
+    ctx = getattr(sh, "ctx", None)
+    if ctx is None:
+        raise_code("CYC-999", hint="ShellCtx 缺 ctx,无法装配引擎")
+    if getattr(ctx, "engine_spine", None) is not None:
+        return
+    from pyharness import engine as _eng
+    log_ = getattr(ctx, "session", None)
+    if log_ is None:
+        raise_code("CYC-999", hint="引擎装配前无会话(chat/run/plan 应先开/建会话)")
+    channel = "cli" if not getattr(sh, "headless", True) else None
+    await _eng.attach_engine_to_ctx(
+        ctx, ctx.settings, log_=log_,
+        sessions_dir=Path(getattr(getattr(ctx, "storage", None),
+                                  "sessions_dir", ".")).expanduser(),
+        bus=ctx.bus,
+        store=getattr(log_, "_persistence", None),
+        channel=channel)
+
+
 class _ExitFlag:
     """外壳退出旗标(commands.cmd_exit 经 ctx.shell.request_exit(0) 副作用表达退出;
     interactive_loop 消费 .exit_code,见 commands.py.md 偏离 6)。"""
@@ -573,6 +614,8 @@ def _attach_log_persistence(bus: Any, log_: Any, store: Any) -> None:
 
     async def _record(type_: str, payload: Any) -> None:
         env = payload                          # SessionLog._dispatch 以 Envelope 为载荷
+        if not hasattr(env, "model_dump_json"):
+            return                             # 瞬时 llm.chunk:仅总线,禁落盘
         await store.append(env, sync=type_ in _EVT_SYNC)
 
     for t in EVENT_TYPES:                      # 词表 57 类型逐类型订阅(精确命中)
@@ -622,6 +665,22 @@ async def _flush_session(sh: ShellCtx) -> None:
             await res
     except Exception:                          # noqa: BLE001 收尾刷盘失败不掩盖退出码
         log.warning("会话收尾 flush 失败(事件已入攒批,疑磁盘问题)", exc_info=True)
+    spine = getattr(sh.ctx, "engine_spine", None)
+    close = getattr(spine, "close", None)
+    if callable(close):
+        try:
+            await close()
+        except Exception:                      # noqa: BLE001 外部资源收尾尽力
+            log.warning("引擎外部资源收尾失败", exc_info=True)
+    mgr = getattr(sh.ctx, "session", None)
+    shutdown = getattr(mgr, "shutdown_all", None) if mgr is not None else None
+    if callable(shutdown):
+        try:
+            res = shutdown()
+            if hasattr(res, "__await__"):
+                await res
+        except Exception:                      # noqa: BLE001 门面收尾尽力
+            log.warning("会话门面收尾失败", exc_info=True)
 
 
 async def _scan_unhealthy(sessions_dir: Path) -> Optional[str]:
@@ -779,6 +838,11 @@ async def _submit_wait_report(sh: ShellCtx, raw: str) -> None:
     if q is None:
         raise_code("CYC-999", hint="任务队列未装配(runner 注入点待引擎装配)")
     meta = {"channel": sh.ctx.channel or "headless"}
+    session = getattr(sh.ctx, "session", None)
+    if session is not None:
+        await session.append(
+            "user.message", {"content": raw}, actor="user", origin="cli",
+            sync=True)
     task_id = await q.submit(raw, meta=meta)
     res = await _wait_and_render(sh, task_id)
     if res is not None and not _result_ok(res):
@@ -854,6 +918,11 @@ async def run_intent(sh: ShellCtx, text: str, *, headless: bool) -> int:
     q = getattr(sh.ctx, "task_queue", None)
     if q is None:
         raise_code("CYC-999", hint="任务队列未装配(runner 注入点待引擎装配)")
+    session = getattr(sh.ctx, "session", None)
+    if session is not None:
+        await session.append(
+            "user.message", {"content": text}, actor="user", origin="cli",
+            sync=True)
     task_id = await q.submit(text, meta={"channel": sh.ctx.channel})
     res = await _wait_and_render(sh, task_id)
     rejected = _rejected_list(res)                   # guard.rejected 拒绝明细(G4)
@@ -890,6 +959,450 @@ async def run_once_sub(sh: ShellCtx, cmd: str, positional: list[str],
     if hasattr(res, "__await__"):
         res = await res
     return int(res) if res is not None else 0
+
+
+# ---------------------------------------------------------------- 单发处理器
+def _build_once_handlers(sh: ShellCtx) -> dict:
+    """真实单发处理器表(plan/schedule/job/search/session/fork)。
+
+    此前 handlers 留空导致 5 个 once 子命令一律 CYC-999;这里把已有模块
+    (session_query/plan_mode/schedule/jobs)以只读/管理命令面接进 CLI。
+    """
+    return {
+        "search": _cmd_search,
+        "session": _cmd_session,
+        "fork": _cmd_fork,
+        "job": _cmd_job,
+        "schedule": _cmd_schedule,
+        "plan": _cmd_plan,
+        "workflow": _cmd_workflow,
+    }
+
+
+def _sessions_dir_ctx(sh: ShellCtx) -> Path:
+    cfg = sh.ctx.settings
+    return Path(getattr(getattr(sh.ctx, "storage", None), "sessions_dir",
+                        _sessions_path(cfg))).expanduser()
+
+
+async def _cmd_search(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """search <q>:FTS 全文检索(派生索引只读,不触真源)。"""
+    from pyharness.core.session_query import SessionQueryIndex
+    from pyharness.persistence import open_store
+    q = " ".join(positional).strip()
+    if not q:
+        raise_code("EVT-100", advice="search 需要检索词",
+                   hint="用法:pyharness search <检索词>")
+    sessions_dir = _sessions_dir_ctx(sh)
+    db = Path(str(sh.ctx.settings.storage.db_path)).expanduser()
+    stores: list = []
+    sources: dict = {}
+    if sessions_dir.is_dir():
+        for f in sorted(sessions_dir.glob("*.jsonl")):
+            sid = f.stem
+            if not sid.startswith("s-"):
+                continue
+            try:
+                st = open_store(sid, dir=sessions_dir)
+            except Exception:                        # noqa: BLE001 单会话失败隔离
+                continue
+            stores.append(st)
+            sources[sid] = st
+    idx = SessionQueryIndex(db_path=db, sources=sources)
+    try:
+        await idx.enter(ctx=SimpleNamespace(config=sh.ctx.settings))
+        await idx.rebuild()
+        res = await idx.query(q)
+        hits = [{"session_id": h.session_id, "seq": h.seq, "type": h.type,
+                 "ts": h.ts, "snippet": h.snippet, "rank": h.rank}
+                for h in res.hits]
+    finally:
+        try:
+            await idx.detach()
+        except Exception:                            # noqa: BLE001
+            pass
+        for st in stores:
+            try:
+                st.close()
+            except Exception:                        # noqa: BLE001
+                pass
+    if flags.get("json"):
+        _json_line({"query": q, "timed_out": res.timed_out, "hits": hits})
+        return 0
+    if not hits:
+        print("无结果")
+        return 0
+    for h in hits:
+        print(f"[{h['session_id']}#{h['seq']} {h['type']}] {h['snippet']}")
+    return 0
+
+
+async def _cmd_session(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """session list / session show <sid>:只读会话清单与回放展示。"""
+    from pyharness.core.session import open_session
+    from pyharness.persistence import open_store
+    sessions_dir = _sessions_dir_ctx(sh)
+    act = (positional or ["list"])[0]
+    if act == "list":
+        from pyharness.desktop.sessions import DesktopSessionManager
+        mgr = DesktopSessionManager(dir=sessions_dir, bus=sh.ctx.bus,
+                                    config=sh.ctx.settings)
+        rows = mgr.list()
+        if flags.get("json"):
+            _json_line({"sessions": [dict(r) for r in rows]})
+            return 0
+        if not rows:
+            print("0 个会话")
+            return 0
+        for r in rows:
+            name = (r.get("title") or r.get("preview") or "新会话")
+            state = "已终态" if r.get("finished") else "活跃"
+            print(f"{r['sid']}  {name}  {r.get('lines', 0)} 事件  {state}")
+        return 0
+    if act == "show":
+        sid = positional[1] if len(positional) > 1 else flags.get("session")
+        if not sid:
+            raise_code("EVT-100", advice="session show 需要 sid",
+                       hint="用法:pyharness session show <sid>")
+        from pyharness.desktop.sessions import validate_session_id
+        sid = validate_session_id(str(sid))
+        if not (sessions_dir / f"{sid}.jsonl").exists():
+            raise_code("EVT-106", session_id=sid,
+                       hint="会话不存在(先 session list 确认 sid)")
+        store = open_store(sid, dir=sessions_dir)
+        log_ = await open_session(sid, store)
+        try:
+            evs = list(log_.events_after(0))
+            msgs = log_.derive_messages()
+            if flags.get("json"):
+                _json_line({"sid": sid, "messages": msgs,
+                            "events": [e.model_dump(exclude_none=True)
+                                       for e in evs]})
+                return 0
+            print(f"会话 {sid} 事件 {len(evs)} 条:")
+            for m in msgs:
+                role = m.get("role", "?")
+                content = str(m.get("content") or "").replace("\n", " ")[:200]
+                if not content and m.get("tool_calls"):
+                    content = "工具调用"
+                print(f"  [{role}] {content}")
+        finally:
+            store.close()
+        return 0
+    raise_code("EVT-100", advice=f"未知 session 子命令:{act}",
+               hint="可用:session list | session show <sid>")
+
+
+async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """fork <sid>:物理复制事件流到新会话 + 父会话落 fork.created 声明。"""
+    from pyharness.core.session import open_session
+    from pyharness.persistence import open_store
+    sessions_dir = _sessions_dir_ctx(sh)
+    if not positional:
+        raise_code("EVT-100", advice="fork 需要源会话 sid",
+                   hint="用法:pyharness fork <sid>")
+    from pyharness.desktop.sessions import validate_session_id
+    sid = validate_session_id(str(positional[0]))
+    if not (sessions_dir / f"{sid}.jsonl").exists():
+        raise_code("EVT-106", session_id=sid, hint="源会话不存在")
+    src = open_store(sid, dir=sessions_dir)
+    try:
+        events = list(src.replay())
+    finally:
+        src.close()
+    if not events:
+        raise_code("EVT-106", session_id=sid, hint="源会话为空(缺 session.created)")
+    new_sid = f"s-fork-{uuid.uuid4().hex[:8]}"
+    tgt = open_store(new_sid, dir=sessions_dir)
+    try:
+        for e in events:
+            if e.type == "session.finished":
+                continue
+            await tgt.append(e.model_copy(update={"session_id": new_sid}),
+                             sync=True)
+        await tgt.flush()
+    finally:
+        tgt.close()
+    store2 = open_store(sid, dir=sessions_dir)
+    log_ = await open_session(sid, store2)
+    try:
+        base_seq = max((e.seq for e in events), default=0)
+        await log_.append("fork.created",
+                          {"new_session_id": new_sid, "base_seq": base_seq,
+                           "reason": "cli fork"},
+                          actor="system", sync=True)
+    finally:
+        store2.close()
+    if flags.get("json"):
+        _json_line({"source_sid": sid, "new_session_id": new_sid,
+                    "base_seq": base_seq, "events": len(events)})
+    else:
+        print(f"已分叉 {sid} → {new_sid}({len(events)} 条事件,base_seq={base_seq})")
+    return 0
+
+
+async def _cmd_job(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """job list / show <task_id> / logs <task_id>:任务记录查询(事件源派生)。"""
+    sessions_dir = _sessions_dir_ctx(sh)
+    action = (positional or ["list"])[0]
+    if action not in ("list", "show", "logs"):
+        raise_code("EVT-100", advice=f"未知 job 子命令:{action}",
+                   hint="可用:job list | job show <task_id> | job logs <task_id>")
+    rows: dict[str, dict] = {}
+    events_by_tid: dict[str, list] = {}
+    if sessions_dir.is_dir():
+        for f in sorted(sessions_dir.glob("*.jsonl")):
+            sid = f.stem
+            if not sid.startswith("s-"):
+                continue
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        p = ev.get("payload") or {}
+                        tid = p.get("task_id") or ev.get("task_id")
+                        if not tid or not str(tid).startswith("job:"):
+                            continue
+                        rec = rows.setdefault(
+                            tid, {"task_id": tid, "sid": sid, "status": "queued",
+                                  "seq": ev.get("seq"), "reason": None})
+                        events_by_tid.setdefault(tid, []).append(ev)
+                        t = ev.get("type", "")
+                        if t == "job.started":
+                            rec["status"] = "running"
+                        elif t == "job.completed":
+                            rec["status"] = "completed"
+                            rec["reason"] = None
+                        elif t == "job.failed":
+                            rec["status"] = "failed"
+                            rec["reason"] = p.get("reason")
+                        elif t == "task.completed" and rec["status"] != "failed":
+                            rec["status"] = "completed"
+                        elif t == "task.failed" and rec["status"] != "completed":
+                            rec["status"] = "failed"
+                            rec["reason"] = p.get("error") or p.get("reason")
+            except Exception:                        # noqa: BLE001 坏文件跳过
+                continue
+    if action in ("show", "logs"):
+        want = positional[1] if len(positional) > 1 else None
+        if not want:
+            raise_code("EVT-100", advice=f"job {action} 需要 task_id",
+                       hint=f"用法:pyharness job {action} <task_id>")
+        row = rows.get(want)
+        if row is None:
+            if flags.get("json"):
+                _json_line({"task_id": want, "found": False})
+            else:
+                print(f"无匹配任务:{want}")
+            return 1
+        events = events_by_tid.get(want, [])
+        if flags.get("json"):
+            _json_line({"task_id": want, "job": row, "events": events})
+            return 0
+        print(f"{row['task_id']}  sid={row['sid']}  seq={row['seq']}  "
+              f"{row['status']}" + (f"  reason={row['reason']}" if row["reason"] else ""))
+        if action == "logs":
+            for ev in events:
+                p = ev.get("payload") or {}
+                print(f"  #{ev.get('seq')} {ev.get('type')} {p}")
+        return 0
+    ordered = sorted(rows.values(), key=lambda r: (r["sid"], r["seq"]))
+    if flags.get("json"):
+        _json_line({"tasks": ordered})
+        return 0
+    if not ordered:
+        print("无任务记录")
+        return 0
+    for r in ordered:
+        extra = f"  reason={r['reason']}" if r.get("reason") else ""
+        print(f"{r['task_id']}  sid={r['sid']}  seq={r['seq']}  "
+              f"{r['status']}{extra}")
+    return 0
+
+
+async def _cmd_schedule(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """schedule list / add/remove/pause/resume(--session <sid>)。"""
+    from pyharness.core.schedule import Scheduler
+    sessions_dir = _sessions_dir_ctx(sh)
+    action = (positional or ["list"])[0]
+    if action == "list":
+        jobs: dict[str, dict] = {}
+        if sessions_dir.is_dir():
+            for f in sorted(sessions_dir.glob("*.jsonl")):
+                sid = f.stem
+                if not sid.startswith("s-"):
+                    continue
+                try:
+                    with open(f, encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                ev = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            p = ev.get("payload") or {}
+                            name = p.get("name") or p.get("job")
+                            t = ev.get("type", "")
+                            key = f"{sid}:{name}"
+                            if t == "schedule.registered" and name:
+                                jobs[key] = {"name": name, "sid": sid,
+                                             "kind": p.get("kind"),
+                                             "expr": p.get("expr"),
+                                             "paused": bool(p.get("paused")),
+                                             "next_fire_at": p.get("next_fire_at")}
+                            elif t == "schedule.updated" and name and key in jobs:
+                                jobs[key]["paused"] = bool(p.get("paused",
+                                                                 jobs[key]["paused"]))
+                            elif t == "schedule.removed" and name:
+                                jobs.pop(key, None)
+                except Exception:                    # noqa: BLE001 坏文件跳过
+                    continue
+        ordered = sorted(jobs.values(), key=lambda r: (r["sid"], r["name"]))
+        if flags.get("json"):
+            _json_line({"jobs": ordered})
+            return 0
+        if not ordered:
+            print("无定时任务")
+            return 0
+        for j in ordered:
+            state = "暂停" if j["paused"] else "运行"
+            print(f"{j['sid']}:{j['name']}  {j['kind']} {j['expr']}  {state}"
+                  f"  下次 {j.get('next_fire_at')}")
+        return 0
+    if action not in ("add", "remove", "pause", "resume"):
+        raise_code("EVT-100", advice=f"未知 schedule 子命令:{action}",
+                   hint="可用:list | add <name> <kind> <expr> <intent> | "
+                        "remove|pause|resume <name>")
+    sid = flags.get("session")
+    if not sid:
+        raise_code("EVT-100", advice="管理定时任务需要 --session <sid>",
+                   hint="用法:pyharness schedule add ... --session <sid>")
+    from pyharness.core.session import open_session
+    from pyharness.persistence import open_store
+    sid = str(sid)
+    if not (sessions_dir / f"{sid}.jsonl").exists():
+        raise_code("EVT-106", session_id=sid, hint="目标会话不存在")
+    store = open_store(sid, dir=sessions_dir)
+    log_ = await open_session(sid, store)
+    sched = Scheduler.rebuild_for_session(log_)
+    try:
+        if action == "add":
+            if len(positional) < 4:
+                raise_code("EVT-100", advice="add 缺参数",
+                           hint="用法:schedule add <name> <kind> <expr> <intent>")
+            intent = " ".join(positional[4:])
+            await sched.register(positional[1], positional[2],
+                                 positional[3], {"intent": intent})
+        elif action in ("remove", "pause", "resume"):
+            if len(positional) < 2:
+                raise_code("EVT-100", advice=f"{action} 需要 name",
+                           hint=f"用法:schedule {action} <name> --session <sid>")
+            fn = {"remove": sched.remove, "pause": sched.pause,
+                  "resume": sched.resume}[action]
+            await fn(positional[1])
+    finally:
+        store.flush()
+        store.close()
+    msg = {"ok": True, "action": action, "session_id": sid,
+           "name": positional[1] if len(positional) > 1 else None}
+    if flags.get("json"):
+        _json_line(msg)
+    else:
+        print(f"schedule {action} 完成(sid={sid})")
+    return 0
+
+
+async def _cmd_plan(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """plan <goal>:LLM 提案 → 交互批准 → 逐步执行(F045/46 真链)。"""
+    from pyharness.core.plan_mode import PlanManager
+    goal = " ".join(positional).strip()
+    if not goal:
+        raise_code("EVT-100", advice="plan 需要目标文本",
+                   hint="用法:pyharness plan <目标>")
+    if sh.ctx.session is None:
+        sh.ctx.session = await _new_session(sh.ctx.settings, sh.ctx.bus)
+        _wire_queue(sh.ctx)
+    await _attach_engine(sh)
+    pm = getattr(getattr(sh.ctx, "engine_spine", None), "plan", None)
+    if pm is None:
+        pm = PlanManager()
+    p = await pm.plan_propose(goal, sh.ctx)
+    summary = {"plan_id": p.id, "goal": p.goal, "selfcheck_ok": p.selfcheck_ok,
+               "expires_at": str(p.expires_at),
+               "steps": [{"action": s.action, "tool": s.tool,
+                          "expected": s.expected, "risk": s.risk}
+                         for s in p.steps]}
+    if flags.get("json"):
+        _json_line(summary)
+    else:
+        print(f"方案 {p.id}: {p.goal}(selfcheck={'ok' if p.selfcheck_ok else 'fail'})")
+        for i, s in enumerate(p.steps, 1):
+            print(f"  {i}. [{s.risk}] {s.tool}: {s.action} → {s.expected}")
+    if sh.headless or sh.ctx.channel is None:
+        print("headless 不自动批准;方案已落盘,可用桌面/交互 chat 后续确认",
+              file=sys.stderr)
+        return 0
+    try:
+        ans = (await asyncio.to_thread(
+            input, f"批准方案 {p.id}? [y/N]: ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+    if ans not in ("y", "yes"):
+        await pm.plan_reject(p.id, who="cli", reason="cli-rejected", ctx=sh.ctx)
+        print("已拒绝")
+        return 0
+    await pm.plan_approve(p.id, who="cli", ctx=sh.ctx)
+    tasks = list(getattr(pm, "_exec_tasks", set()) or ())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    final = pm.get(p.id)
+    status = final.status if final is not None else "?"
+    print(f"方案完成状态: {status}")
+    return 0 if status == "completed" else 1
+
+
+async def _cmd_workflow(sh: ShellCtx, positional: list[str], flags: dict) -> int:
+    """workflow <步骤1> [步骤2 …]:当前(或新建)会话内顺序编排(#45 真链)。
+
+    每步经队列提交真实 AgentLoop(与 chat 同一条 runner seam),workflow.step
+    事件留痕(started/done/failed);stop_on_fail=True = 首败即停。CLI 此前无
+    workflow 入口(管理面只在桌面壳),本条补齐。
+    """
+    from pyharness.core.workflow import WorkflowRunner, queue_submit_adapter
+    steps = [s for s in positional if str(s).strip()]
+    if not steps:
+        raise_code("EVT-100", advice="workflow 需要至少一个步骤文本",
+                   hint='用法:pyharness workflow "步骤1" "步骤2" …')
+    if sh.ctx.session is None:
+        sh.ctx.session = await _new_session(sh.ctx.settings, sh.ctx.bus)
+        _wire_queue(sh.ctx)
+    await _attach_engine(sh)
+    queue = getattr(sh.ctx, "task_queue", None)
+    log_ = sh.ctx.session
+    if queue is None or log_ is None:
+        raise_code("CYC-999", cmd="workflow",
+                   hint="会话或任务队列未装配(引擎未接)")
+    runner = WorkflowRunner(log_, queue_submit_adapter(log_, queue), name="cli")
+    results = await runner.run(steps, stop_on_fail=True)
+    ok = bool(results) and all(r["ok"] for r in results)
+    sid = str(getattr(log_, "session_id", ""))
+    if flags.get("json"):
+        _json_line({"sid": sid, "ok": ok, "results": results})
+    else:
+        print(f"工作流 {len(results)} 步(会话 {sid}):")
+        for r in results:
+            mark = "✅" if r["ok"] else "❌"
+            print(f"  {mark} [{r['index']}] {str(r['intent'])[:60]} → "
+                  f"{str(r['summary'])[:100]}")
+    return 0 if ok else 1
 
 
 # ---------------------------------------------------------------- 事件渲染
@@ -952,8 +1465,43 @@ async def prompt_approval(sh: ShellCtx, type_: str, payload: Any) -> None:
 
 
 # ---------------------------------------------------------------- 离线子命令
+def _skill_cmd(positional: list[str], flags: dict) -> int:
+    """skill [name]:列本地技能包目录(离线零装配)或打印某技能正文。
+
+    技能库 = 仓库 skills/(内置示例)+ settings.skills.dir(用户目录);正文经
+    SkillManager.load 截断保护(超长截断)。CLI 此前只能由 LLM 调 skill.load
+    看技能,人看不到——本条给人一个只读入口(与桌面技能页同源数据)。
+    """
+    from pyharness.core.skill import SkillManager
+    settings = _load_settings(flags.get("config"))
+    roots = [Path(__file__).resolve().parents[1] / "skills"]
+    extra = getattr(getattr(settings, "skills", None), "dir", None)
+    if extra:
+        roots.append(Path(str(extra)).expanduser())
+    mgr = SkillManager(roots)
+    name = " ".join(positional).strip()
+    if not name:
+        items = mgr.list()
+        data = {"roots": [str(r) for r in roots], "count": len(items),
+                "skills": items}
+        if flags.get("json"):
+            _json_line(data)
+        else:
+            print(f"技能库({len(items)} 个):{', '.join(str(r) for r in roots)}")
+            for it in items:
+                print(f"  - {it['name']}: {it['description']}")
+        return 0
+    skill = mgr.load(name)                       # 未知名 → SKL-901(带 advice)
+    if flags.get("json"):
+        _json_line(skill)
+    else:
+        print(f"# {skill['name']}\n{skill['description']}\n目录: {skill['dir']}\n")
+        print(skill["body"])
+    return 0
+
+
 def offline_cmd(cmd: str, positional: list[str], flags: dict) -> int:
-    """离线子命令(config/budget/stats):不装配引擎零网络零 LLM(DEP §5.1 ✅)。
+    """离线子命令(config/budget/stats/skill):不装配引擎零网络零 LLM(DEP §5.1 ✅)。
     config validate 失败退 1;未知子动作退 2。"""
     if cmd == "config":
         return _config_cmd(positional, flags)
@@ -961,6 +1509,8 @@ def offline_cmd(cmd: str, positional: list[str], flags: dict) -> int:
         return _budget_cmd(flags)
     if cmd == "stats":
         return _stats_cmd(flags)
+    if cmd == "skill":
+        return _skill_cmd(positional, flags)
     return 2
 
 
@@ -1133,7 +1683,7 @@ def _report_dict(report: Any, sid: str) -> dict:
             out["sid"] = sid
             return out
         except Exception:                            # noqa: BLE001
-            pass
+            log.debug("repair report asdict failed", exc_info=True)
     import dataclasses as _dc
     if _dc.is_dataclass(report):
         out = _dc.asdict(report)

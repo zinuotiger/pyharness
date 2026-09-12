@@ -152,6 +152,11 @@ class UsageCounters:
     cost_est: float = 0.0
     requests: int = 0
     by_model: dict[str, "UsageCounters"] = field(default_factory=dict)
+    # llm_fallback 编排面私有计数(协议:task_total/rate_limit_streak/degrade_add;
+    # 非事件字段——可整体重建,不进 snapshot,防审计口径漂移)
+    _rate_limit_streak: int = field(default=0, repr=False, compare=False)
+    _degrade_total: int = field(default=0, repr=False, compare=False)
+    _degrade_last: dict = field(default_factory=dict, repr=False, compare=False)
 
     def task_add(self, payload: dict) -> None:
         """按 llm.usage 事件 payload 入账(事件即事实;计数器可整体重建)。"""
@@ -179,6 +184,31 @@ class UsageCounters:
             "cost_est": round(self.cost_est, 6),
             "by_model": {k: v.snapshot() for k, v in sorted(self.by_model.items())},
         }
+
+    def task_total(self) -> Any:
+        """llm_fallback.UsageCounters 协议:TaskUsage 型读数(F032 预算闸同源)。
+
+        scope.budget_state/BudgetGuard 每轮现读本方法;in/out/cost 与会话级
+        总量同字段(单任务会话语义,1 会话 = 1 agent = 1 任务)。"""
+        from pyharness.core.llm_fallback import TaskUsage   # 免顶层环依赖
+        return TaskUsage(in_tokens=self.in_tokens,
+                         out_tokens=self.out_tokens,
+                         cost_est=round(self.cost_est, 6))
+
+    def rate_limit_streak(self) -> int:
+        """连续 429 计数(协议;事件可重建)。"""
+        return self._rate_limit_streak
+
+    def rate_limit_add(self) -> int:
+        """429 计数 +1(适配器归一 LLM-303 时调用;返回累计)。"""
+        self._rate_limit_streak += 1
+        return self._rate_limit_streak
+
+    def degrade_add(self, failed: str, to: str) -> int:
+        """会话级降级计数(F013):返回累计次数(超 max_per_session 发告警)。"""
+        self._degrade_total += 1
+        self._degrade_last = {"failed": failed, "to": to}
+        return self._degrade_total
 
 
 @dataclass(frozen=True)
@@ -326,7 +356,12 @@ async def _emit_chunk(ctx: Any, delta: str) -> None:
     if bus is None:
         return                                      # 未装配总线:纯内存/单测模式
     try:
-        r = bus.emit("llm.chunk", {"delta": delta})
+        payload = {"delta": delta, "session_id": str(getattr(
+            getattr(ctx, "session", None), "sid", "") or "")}
+        task_id = getattr(ctx, "task_id", None)
+        if task_id:
+            payload["task_id"] = str(task_id)
+        r = bus.emit("llm.chunk", payload)
         if asyncio.iscoroutine(r):
             await r
     except Exception as exc:                        # noqa: BLE001 UI 通道尽力而为
@@ -555,6 +590,7 @@ class OpenAICompatAdapter(LLMAdapter):
         self._cfg = cfg
         self._transport = transport
         self._counters = counters if counters is not None else UsageCounters()
+        self._counters_injected: bool = counters is not None
         self._deg: Optional[str] = None            # 降级来源(fallback 切链后置位 F013)
 
     # ------------------------------------------------------ 传输解析
@@ -656,8 +692,15 @@ class OpenAICompatAdapter(LLMAdapter):
 
     # ------------------------------------------------------ 计量钩子
     async def report_usage(self, usage: Any, model: str, *, ctx: Any) -> Any:
-        """F029 适配器侧计量(spec chat 伪码 self.report_usage 调用形;实现见模块级函数)。"""
-        return await report_usage(usage, model, ctx=ctx, counters=self._counters)
+        """F029 适配器侧计量(spec chat 伪码 self.report_usage 调用形;实现见模块级函数)。
+
+        计数归属:显式注入(engine 装配共享实例)优先;未注入(桌面/CLI 装配期
+        适配器先于 ctx)且 ctx.counters 在岗 → 落 ctx.counters——预算闸与
+        llm 计量强制同源(scope._counters == ctx.counters == 本实例)。"""
+        cnt = self._counters
+        if not self._counters_injected:
+            cnt = getattr(ctx, "counters", None) or self._counters
+        return await report_usage(usage, model, ctx=ctx, counters=cnt)
 
     # ------------------------------------------------------ F033 探针
     async def ping(self) -> float:
@@ -701,12 +744,15 @@ def require_adapter(name: str) -> LLMAdapter:
 
 # ================================================================ 凭据与客户端
 def resolve_secret_ref(ref: str) -> str:
-    """F016 单口最小落地:env:NAME → 环境变量;file:PATH → 首行。缺失 → CRED-701。
+    """F016 单口最小落地:env/file/tenant 引用。缺失 → CRED-701。
 
     偏离 6:credentials 模块(真 F016)未在本阶段实现,此为默认 resolver;凭据模块落地后
     由装配层以 resolver 注入 build_client 替换。禁字面量密钥(配置层已拒载,CFG §7.1)。
     """
     val: Optional[str] = None
+    if ref.startswith("tenant:"):
+        from pyharness.core.tenant_settings import resolve_tenant_secret
+        return resolve_tenant_secret(ref)
     if ref.startswith("env:"):
         val = os.environ.get(ref[4:].strip())
     elif ref.startswith("file:"):
@@ -719,10 +765,10 @@ def resolve_secret_ref(ref: str) -> str:
                        hint="凭据缺失:检查 file:PATH 与权限(600)")
     else:
         raise_code("CRED-701", ref=ref, reason="secret_ref 语法非法",
-                   hint="凭据只接受 env:NAME / file:PATH 引用(CFG §7.1)")
+                   hint="凭据只接受 env:NAME / file:PATH / tenant:租户:档案 引用")
     if not val:
         raise_code("CRED-701", ref=ref,
-                   hint="凭据缺失:配置 env:NAME/file:PATH 引用后重启(不热重载)")
+                   hint="凭据缺失:配置 env/file/tenant 引用后重试")
     return val
 
 
@@ -740,7 +786,9 @@ class _OpenAICompatHTTPTransport:
         self._base_url = base_url.rstrip("/")       # 裸域或 /v1 结尾(禁写 /chat/completions)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            headers={"Authorization": f"Bearer {api_key}"},   # 鉴权只走 header,禁拼 URL
+            headers={"Authorization": f"Bearer {api_key}",   # 鉴权只走 header,禁拼 URL
+                     # #23 请求归属:每请求带本框架标识(单机自用,审计友好)
+                     "X-PyHarness-Agent": "pyharness/1.0"},
             timeout=timeout, max_redirects=2,
             trust_env=False)   # 禁读 env 代理:DeepSeek 直连;应用层不随 HTTP_PROXY 劫持
                                 # (桌面 exe 曾因此卡死在 Clash 转发上,180s 才超时)
@@ -831,14 +879,17 @@ class LLMClient:
 
     模型解析:显式 model → cfg.llm.model → L1 deepseek-chat;注册表缺该模型 → LLM-304
     (核对模型名 F030,不自动造适配器——装配层 register_adapter 显式登记,禁隐式端点)。
-    降级链/退避(F013/F028)由 llm_fallback 编排层在后续阶段挂载本类,llm 零改动。
+    降级链/退避(F013/F028):chain 注入后本类代理到 FallbackChain.chat_with_fallback
+    (指数退避 + 单调降级 + BudgetGuard 前置;链缺位 = 直连适配器,行为同旧版)。
     """
 
     def __init__(self, cfg: Any = None, *, model: Optional[str] = None,
-                 registry: Optional[dict] = None) -> None:
+                 registry: Optional[dict] = None,
+                 chain: Any = None) -> None:
         llm = getattr(cfg, "llm", None) if cfg is not None else None
         self.model: str = model or (llm.model if llm is not None else "deepseek-chat")
         self.registry: dict = registry if registry is not None else adapters
+        self._chain: Any = chain                 # FallbackChain(F013/F028;可 None)
 
     def require(self) -> LLMAdapter:
         """解析当前模型适配器(未注册 → LLM-304)。"""
@@ -848,15 +899,67 @@ class LLMClient:
                        hint="模型未注册:核对模型名,或 register_adapter 后重试(F030)")
         return inst
 
+    async def _chat_any(self, method: str, messages: list[dict],
+                        tools: Optional[list], ctx: Any) -> LLMResponse:
+        """统一路由:chain 在岗(engine 装配)走降级编排;否则直连适配器。"""
+        ch = self._chain
+        if ch is not None and callable(getattr(ch, "chat_with_fallback", None)):
+            return await ch.chat_with_fallback(messages, tools, ctx=ctx,
+                                               method=method)
+        inst = self.require()
+        return await getattr(inst, method)(messages, tools, ctx=ctx)
+
     async def chat(self, messages: list[dict], tools: Optional[list] = None, *,
                    ctx: Any) -> LLMResponse:
-        """唯一出口(代理到适配器;适配器 = 请求全生命周期单元,事件路径唯一)。"""
-        return await self.require().chat(messages, tools, ctx=ctx)
+        """唯一出口(代理到适配器/降级链;请求全生命周期单元,事件路径唯一)。"""
+        return await self._chat_any("chat", messages, tools, ctx)
 
     async def chat_stream(self, messages: list[dict], tools: Optional[list] = None, *,
                           ctx: Any) -> LLMResponse:
-        """流式出口(代理到适配器;chunk 上总线不入日志)。"""
-        return await self.require().chat_stream(messages, tools, ctx=ctx)
+        """流式出口(代理到适配器/降级链;chunk 上总线不入日志)。"""
+        return await self._chat_any("chat_stream", messages, tools, ctx)
+
+    async def summarize(self, prompt: str, *, budget: int = 400,
+                        ctx: Any = None) -> str:
+        """压缩摘要出口(F058 Consumer):单次 chat 取 content;同走降级链。
+
+        compaction._call_summarize 经 ctx.llm.summarize 消费;未装配该面时
+        compaction 走规则降级(LLM-399 → degrade_summary,不炸)。"""
+        messages = [{"role": "user", "content": prompt}]
+        resp = await self._chat_any("chat", messages, None, ctx)
+        return (resp.content or "").strip()
+
+    async def json_chat(self, prompt: str, **kw: Any) -> Any:
+        """JSON 强约束出口(plan_mode 等编排消费):单次 chat 后稳健抽取 JSON。
+
+        只负责把模型文本解析成 dict/list;结构校验由消费方(PlanManager)完成。
+        代码块围栏/前后叙述裁剪,坏 JSON → LLM-304(可重试错误,不静默伪装)。
+        """
+        goal = str(kw.get("goal") or "")
+        max_steps = int(kw.get("max_steps") or 8)
+        ctx = kw.get("ctx")
+        user = f"目标: {goal}\n最多 {max_steps} 步" if goal else \
+            f"最多 {max_steps} 步"
+        messages = [{"role": "system", "content": prompt},
+                    {"role": "user", "content": user}]
+        resp = await self._chat_any("chat", messages, None, ctx)
+        text = (resp.content or "").strip()
+        try:
+            return _extract_json_text(text)
+        except ValueError as e:
+            raise_code("LLM-304", hint=f"json_chat 输出解析失败: {e}",
+                       advice="提示模型只回 JSON;重试")
+
+
+def _extract_json_text(text: str) -> Any:
+    """裁剪 ```json 围栏后抽取首个完整 JSON 对象/数组。"""
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.I)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        lo, hi = cleaned.find(open_ch), cleaned.rfind(close_ch)
+        if lo != -1 and hi > lo:
+            return json.loads(cleaned[lo:hi + 1])
+    raise ValueError("模型输出不含 JSON 对象/数组")
 
 
 __all__ = [

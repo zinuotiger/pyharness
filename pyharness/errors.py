@@ -90,6 +90,10 @@ def register_default_codes() -> None:
     register("TLB-803", "参数校验失败", "回喂明细零执行(INV-06);连败 2 次终止轮")
     register("TLB-805", "执行超时/异常", "tool.error 回喂,重试性由 LLM 判断")
     register("TLB-806", "二进制拒读", "结构化错误,提示换工具")
+    register("TLB-807", "PTY 不可用", "当前平台/系统不支持伪终端(ConPTY);"
+                                     "提示改用 exec.shell_run 行式执行")
+    # ===== SKL 域(F073 技能系统)=====
+    register("SKL-901", "技能未找到", "skill.load 回喂 LLM 自查(skill.list 看目录)")
     # ===== CYC 域 =====
     register("CYC-999", "未预期异常", "system.error+终态 reason=error;堆栈仅本地 debug")
 

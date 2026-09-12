@@ -1,7 +1,7 @@
-"""desktop_launcher.py — PyInstaller 打包专用入口(desktop.py 无 __main__ 块)。
+"""desktop_launcher.py — PyInstaller 打包专用入口(pyharness.desktop 包无 __main__ 块)。
 
 PyInstaller 需要脚本顶层有 `if __name__ == "__main__"` 才会真正调用 main();
-直接打 desktop.py 会得到"启动即退"的空转 exe(实测 exit 0 零输出)。
+直接打包模块会得到"启动即退"的空转 exe(实测 exit 0 零输出)。
 本入口 = 薄壳:import 真实实现 → 调 main → 退出码透传。
 打包诊断:main 返回码与异常写 ~/ph_desktop_exit.txt(仅打包版生效,源码入口不受影响)。
 """

@@ -300,6 +300,36 @@ def truncate_history(hist: list[dict], budget: int) -> tuple[list, list]:
     return kept, dropped
 
 
+def _active_skills_segment(ctx: Any) -> str:
+    """F073 可用技能目录段:ctx.skills(SkillManager).render_catalog → 文本。
+
+    空技能库/装配缺位返回空串零开销;渲染失败只记日志不阻断(F010 主路径)。"""
+    mgr = getattr(ctx, "skills", None)
+    fn = getattr(mgr, "render_catalog", None)
+    if not callable(fn):
+        return ""
+    try:
+        return str(fn() or "")
+    except Exception:                                # noqa: BLE001
+        log.debug("skills segment render failed,零开销跳过")
+        return ""
+
+
+def _active_goal_segment(ctx: Any) -> str:
+    """F047 活动目标软锚定段:ctx.goals(GoalManager)render → 文本;空/缺位零开销。
+
+    目标板渲染失败只记日志不阻断装配(软提醒是建议性的,F010 主路径不受影响)。"""
+    mgr = getattr(ctx, "goals", None)
+    fn = getattr(mgr, "render_goal_segment", None)
+    if not callable(fn):
+        return ""
+    try:
+        return str(fn() or "")
+    except Exception:                                # noqa: BLE001 目标板异常不阻断
+        log.debug("goal segment render failed,零开销跳过")
+        return ""
+
+
 # ================================================================ 装配器
 class SystemPromptAssembler:
     """系统提示词装配器(F010):模板 + ctx 派生变量 + 护栏 + 截窗历史 → messages。
@@ -503,5 +533,13 @@ class SystemPromptAssembler:
                           "kept_tokens": kept_tokens})
         if compact:                             # F058:派生 ≥75% 窗口且新增 ≥10 轮
             self._signal(ctx, "sysprompt.compact_hint", {"reason": "window"})
-        content = core + "\n\n" + guard          # 护栏恒在 system content 最末
+        goal_seg = _active_goal_segment(ctx)     # F047 活动目标板(空串零注入)
+        skills_seg = _active_skills_segment(ctx)  # F073 技能目录(空库零注入)
+        parts = [core]
+        if goal_seg:
+            parts.append(goal_seg)
+        if skills_seg:
+            parts.append(skills_seg)
+        parts.append(guard)                       # F024 护栏段恒在最末
+        content = "\n\n".join(parts)
         return [{"role": "system", "content": content}] + list(kept)

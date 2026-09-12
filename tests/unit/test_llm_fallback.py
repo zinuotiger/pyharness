@@ -610,3 +610,23 @@ async def test_budget_check_gates_request_entry():
     assert ei.value.code == "BUDGET-EXHAUSTED"
     assert len(main.chats) == 0 and len(backup.chats) == 0
     assert chain.idx == 0
+
+class _StreamAdapter:
+    async def chat(self, messages, tools=None, *, ctx):
+        raise AssertionError("stream must not call chat")
+
+    async def chat_stream(self, messages, tools=None, *, ctx):
+        return SimpleNamespace(content="stream-ok", tool_calls=None,
+                               model="mock")
+
+    async def ping(self):
+        return 0.01
+
+
+async def test_fallback_chain_preserves_stream_method():
+    cfg = _cfg()
+    chain = _chain({MAIN: _StreamAdapter(), BACKUP: _StreamAdapter()}, cfg)
+    resp = await chain.chat_with_fallback(
+        [{"role": "user", "content": "hi"}], ctx=_ctx(config=cfg),
+        method="chat_stream")
+    assert resp.content == "stream-ok"

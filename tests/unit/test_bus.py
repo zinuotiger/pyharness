@@ -43,8 +43,10 @@ class _FakeSession:
     def __init__(self) -> None:
         self.events: list = []
 
-    async def append(self, type_: str, **payload) -> None:
-        self.events.append((type_, dict(payload)))
+    async def append(self, type_: str, payload: dict = None, **kw) -> None:
+        payload = dict(payload or {})
+        payload.update({k: v for k, v in kw.items() if k != "actor"})
+        self.events.append((type_, payload))
 
 
 class _FakeCtx:

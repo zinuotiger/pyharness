@@ -5,7 +5,9 @@ PH_ env 解析与白名单、敏感项脱敏(env:NAME 引用/字面量拒载/red
 非法配置抛码(CFG-601 file_parse/env_parse/type_range/structural/越权/secret_literal)、
 热更(CFG-608 只读键拒绝 / 事件留痕)、config show/validate 后端。
 """
+import asyncio
 import logging
+import warnings
 from pathlib import Path
 
 import pytest
@@ -448,7 +450,7 @@ class _FakeBus:
     def __init__(self):
         self.events: list[tuple[str, dict]] = []
 
-    def emit(self, event: str, payload: dict):
+    def emit(self, event: str, payload: dict, mode: str = "sequential"):
         self.events.append((event, payload))
 
 
@@ -466,6 +468,29 @@ def test_hot_update_mutable_key_effective_with_event():
     event, payload = bus.events[0]
     assert event == "config.updated"
     assert payload == {"key": "log.level", "old": "info", "new": "debug", "by": "ops"}
+
+
+async def test_hot_update_emits_to_real_bus():
+    """真实 EventBus 上 config.updated 必须送达订阅者(修掉协程被丢弃的假绿)。"""
+    from pyharness.bus import EventBus
+
+    bus = EventBus()
+    got: list[tuple[str, dict]] = []
+
+    async def collect(type_: str, payload: dict) -> None:
+        got.append((type_, payload))
+
+    bus.subscribe("config.updated", collect)
+    holder = SettingsHolder(load_settings(), bus=bus)
+    hot_update(holder, "log.level", "debug", by="ops")
+    for _ in range(50):
+        if got:
+            break
+        await asyncio.sleep(0.01)
+    assert holder.settings.log.level == "debug"
+    assert got == [("config.updated",
+                    {"key": "log.level", "old": "info",
+                     "new": "debug", "by": "ops"})]
 
 
 def test_hot_update_readonly_keys_rejected_cfg608():
@@ -545,3 +570,18 @@ def test_default_load_never_fails_and_roundtrip():
     assert s.log.redact_enabled is True
     assert s.storage.sessions_dir == "~/.pyharness/sessions"
     assert s.plugins.pre_activate == ["storage.spill", "credentials", "storage.kv"]
+
+
+def test_default_unit_price_factory_is_strongly_typed():
+    """Settings() 的 default_factory 必须产出 UnitPriceCfg,不能混入裸 dict。"""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        settings = Settings()
+        price = settings.llm.usage.unit_price["deepseek-chat"]
+        dumped = settings.model_dump()
+
+    assert isinstance(price, C.UnitPriceCfg)
+    assert price.in_per_million == 2.0
+    assert dumped["llm"]["usage"]["unit_price"]["deepseek-chat"] == {
+        "in_per_million": 2.0, "out_per_million": 8.0}
+    assert caught == []

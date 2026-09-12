@@ -46,12 +46,20 @@ EXPECTED_ALL = (
     "job.started", "job.completed", "job.failed",
     "subagent.spawned", "subagent.joined", "subagent.failed",
     "workflow.step", "queue.suspended", "queue.resumed",
-    # E 系统侧(9)
+    # E 系统侧(11)
     "fork.created", "context.compacted",
     "plugin.installed", "plugin.uninstalled", "bus.backpressure",
     "system.cancelled", "system.error", "todo.updated", "syscheck.fail",
+    # F032/F014 策略与预算事件(装配后 budget.paused/scope.updated 真实落盘)
+    "scope.updated", "budget.paused",
+    # #38 反问(user.question/answer 对)
+    "user.question", "user.answer",
+    # F073 技能系统装载审计
+    "skill.used", "skill.installed", "skill.removed", "skill.rollback",
+    # 配置热更审计(瞬时)
+    "config.updated",
 )
-assert len(EXPECTED_ALL) == 64, "测试词表清单必须恰为 64 名(57 + §7 扩展 7)"
+assert len(EXPECTED_ALL) == 73, "测试词表清单必须恰为 73 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -67,8 +75,8 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 # 词表完整
 # =====================================================================
 def test_vocab_full_64():
-    """词表 64 名(57 核心 + §7 扩展 7)与权威清单完全一致(不多不少)。"""
-    assert len(EVENT_TYPES) == 64
+    """词表 73 名(72 核心 + config.updated 瞬时审计)。"""
+    assert len(EVENT_TYPES) == 73
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 
@@ -84,7 +92,8 @@ def test_strong_sync_families_present():
 
 def test_transient_types_constants():
     """瞬时事件:llm.chunk 注册且标记 transient;registry.updated 仅总线无 payload 模型。"""
-    assert EV.TRANSIENT_TYPES == frozenset({"llm.chunk", "registry.updated"})
+    assert EV.TRANSIENT_TYPES == frozenset(
+        {"llm.chunk", "registry.updated", "config.updated"})
     assert payload_model_for("llm.chunk") is not None
     assert EV.is_transient("llm.chunk") is True
     assert "registry.updated" not in EVENT_TYPES      # 无 §3 字段表,不入词表

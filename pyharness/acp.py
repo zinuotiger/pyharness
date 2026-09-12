@@ -354,6 +354,36 @@ def _task_enqueued_seq(log_: Any, task_id: str) -> Optional[int]:
     return None                              # 队列异会话(偏离 10)→ 未知下界
 
 
+async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
+    """ACP 会话队列惰性装配:轻量 ctx(无队列/异会话队列)时接真实引擎。
+
+    原 cli.acp 只注入轻量门面,队列/runner 从未接线;这里把 engine 装配
+    原语搬到 ACP chat 前,使 initialize → chat 也能走真实 AgentLoop。
+    """
+    cfg = getattr(ctx, "settings", None) or getattr(ctx, "config", None)
+    q = getattr(ctx, "task_queue", None)
+    if q is not None and (not hasattr(q, "_session")
+                          or getattr(q, "_session", None) is log_):
+        return q
+    if cfg is None:
+        return q
+    from pathlib import Path
+    from pyharness import engine as _eng
+    storage = getattr(ctx, "storage", None)
+    sessions_dir = getattr(storage, "sessions_dir", None)
+    if not sessions_dir:
+        try:
+            sessions_dir = cfg.storage.sessions_dir
+        except Exception:                    # noqa: BLE001 配置缺键:不装配
+            return q
+    await _eng.attach_engine_to_ctx(
+        ctx, cfg, log_=log_,
+        sessions_dir=Path(str(sessions_dir)).expanduser(),
+        bus=getattr(ctx, "bus", None),
+        store=getattr(log_, "_persistence", None))
+    return getattr(ctx, "task_queue", None)
+
+
 def _chat_summary(log_: Any, task_id: str, enq_seq: Optional[int],
                   res: Any, reason: str) -> dict:
     """阻塞 chat 终局摘要(偏离 3:从会话日志派生,无第二份状态)。
@@ -405,7 +435,7 @@ async def cmd_chat(ctx: Any, st: AcpState, params: dict) -> dict:
     if not callable(append):
         raise_code("EVT-106", session_id=sid,
                    hint="会话无 append 写面(只读投影);无法发起 chat")
-    queue = getattr(ctx, "task_queue", None)
+    queue = await _ensure_engine_queue(ctx, log_, sid)
     if queue is None or not callable(getattr(queue, "submit", None)):
         raise_code("CYC-999", hint="桥未装配任务队列(ctx.task_queue.submit)")
     st.busy = True

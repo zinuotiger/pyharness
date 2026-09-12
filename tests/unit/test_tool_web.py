@@ -818,3 +818,27 @@ def test_module_compiles_without_syntax_warning():
                        text=True, cwd=str(root))
     assert r.returncode == 0, r.stderr
     assert "OK" in r.stdout
+
+@pytest.mark.asyncio
+async def test_duckduckgo_backend_parses_no_key_results(monkeypatch):
+    html = (b'<a class="result__a" href="https://example.com/a">'
+            b'Example A</a><a class="result__snippet">Snippet A</a>')
+    async def fake_once(ctx, url, *, max_bytes):
+        return web._RawResponse(200, {}, html, url)
+    monkeypatch.setattr(web, "_http_once", fake_once)
+    hits = await web.DuckDuckGoBackend().search(
+        query="example", top_k=5, key=None)
+    assert hits == [{"title": "Example A", "url": "https://example.com/a",
+                     "snippet": "Snippet A"}]
+
+@pytest.mark.asyncio
+async def test_bing_rss_backend_parses_no_key_results(monkeypatch):
+    xml = (b'<rss><channel><item><title>T</title>'
+           b'<link>https://example.com</link>'
+           b'<description>S</description></item></channel></rss>')
+    async def fake_once(ctx, url, *, max_bytes):
+        return web._RawResponse(200, {}, xml, url)
+    monkeypatch.setattr(web, "_http_once", fake_once)
+    hits = await web.BingRssBackend().search(query="q", top_k=3, key=None)
+    assert hits == [{"title": "T", "url": "https://example.com",
+                     "snippet": "S"}]

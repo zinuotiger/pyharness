@@ -53,7 +53,9 @@ DEFAULTS: dict = {
              "message_edit_window_s": 1800},
     "security": {"sandbox": {"level": "strict", "proc_wallclock_s": 60,
                              "proc_mem_limit_mb": 0},
-                 "network": {"allowed_domains": [], "web_search_per_session": 20},
+                 "network": {"allowed_domains": [], "web_search_per_session": 20,
+                            "search_backend": "bing",
+                            "search_endpoint": "https://cn.bing.com/search"},
                  "policy": {"deny_tools_extra": [], "read_extra_dirs": []},
                  "tool_danger_extra": {},
                  "guards": {"disabled": []},
@@ -81,8 +83,11 @@ DEFAULTS: dict = {
                           "max_per_session_mb": 100},
                 "fts": {"index_batch_ms": 200, "query_timeout_s": 5,
                         "result_limit": 20}},
+    "skills": {"dir": "~/.pyharness/skills", "registry_url": "",
+               "max_package_bytes": 5242880, "max_files": 200},
     "plugins": {"enabled": [], "dir": "~/.pyharness/plugins", "ctx_lazy": True,
                 "pre_activate": ["storage.spill", "credentials", "storage.kv"],
+                "mcp_servers": [],
                 "priority": {}, "backpressure_limit": 1000,
                 "deadletter_samples": 100},
     "shell": {"web": {"host": "127.0.0.1", "port": 8000, "token": ""},
@@ -114,7 +119,9 @@ ENV_WHITELIST: dict[str, str] = {
     "PH_BUDGET_MONTHLY_ALERT_RATIO": "budget.monthly.alert_ratio",
     "PH_STORAGE_ROOT": "storage.root", "PH_STORAGE_SESSIONS_DIR": "storage.sessions_dir",
     "PH_STORAGE_DB_PATH": "storage.db_path",
+    "PH_SEARCH_BACKEND": "security.network.search_backend",
     "PH_PLUGINS_ENABLED": "plugins.enabled", "PH_PLUGINS_DIR": "plugins.dir",
+    "PH_SKILLS_DIR": "skills.dir", "PH_SKILL_REGISTRY_URL": "skills.registry_url",
     "PH_WEB_HOST": "shell.web.host", "PH_WEB_PORT": "shell.web.port",
     "PH_ACP_ENABLED": "shell.acp.enabled",
 }
@@ -420,17 +427,14 @@ class SettingsHolder:
 
 
 def _emit_event(holder: SettingsHolder, event: str, payload: dict) -> None:
-    """热更事件出口:优先用 holder.bus;否则惰性取 bus 模块(同阶段实现,未装配则日志降级)。"""
+    """热更事件出口:经 schedule_emit 排程(保留 task 引用,异常可审计)。"""
     bus = holder.bus
     if bus is None:
-        try:
-            from pyharness.bus import EventBus     # 惰性:bus 模块与 config 同阶段
-            bus = EventBus()
-        except Exception as exc:                   # noqa: BLE001 bus 未装配
-            log.warning("config.updated 事件未落:bus 未装配 (%s)", exc)
-            return
+        log.warning("config.updated 事件未落:bus 未装配")
+        return
+    from pyharness.bus import schedule_emit
     try:
-        bus.emit(event, payload)
+        schedule_emit(bus, event, payload)
     except Exception as exc:                       # noqa: BLE001 事件失败不阻断热更生效
         log.warning("config.updated 事件写失败:%s", exc)
 
@@ -508,9 +512,11 @@ class UnitPriceCfg(BaseModel):
     out_per_million: float = Field(..., ge=0)
 
 
-def _default_unit_price() -> dict[str, Any]:
-    return {"deepseek-chat": {"in_per_million": 2.0, "out_per_million": 8.0},
-            "qwen-max": {"in_per_million": 4.0, "out_per_million": 12.0}}
+def _default_unit_price() -> dict[str, UnitPriceCfg]:
+    return {
+        "deepseek-chat": UnitPriceCfg(in_per_million=2.0, out_per_million=8.0),
+        "qwen-max": UnitPriceCfg(in_per_million=4.0, out_per_million=12.0),
+    }
 
 
 class TimeoutCfg(BaseModel):
@@ -592,6 +598,7 @@ class LoopCfg(BaseModel):
     thread_pool_size: int = Field(4, ge=1, le=32)
     max_arg_failures_per_round: int = Field(2, ge=1, le=5)
     max_context_tokens: int = Field(65536, ge=1024, le=1048576)
+    streaming: bool = Field(False)   # F027:agent-loop 出网走 chat_stream(桌面 SSE 实时)
     compact: CompactCfg = Field(default_factory=CompactCfg)
     content: ContentCfg = Field(default_factory=ContentCfg)
     message_edit_window_s: int = Field(1800, ge=60, le=86400)
@@ -608,12 +615,17 @@ class NetworkCfg(BaseModel):
     """security.network — 外发 allowlist(F023/N13/F037)。"""
     allowed_domains: list[str] = Field(default_factory=list)
     web_search_per_session: int = Field(20, ge=0, le=1000)
+    search_backend: Literal["disabled", "bing", "duckduckgo"] = "bing"
+    search_endpoint: str = "https://cn.bing.com/search"
 
 
 class PolicyCfg(BaseModel):
     """security.policy — 权限预设基集上只增的 deny/只读例外(F023/F055)。"""
     deny_tools_extra: list[str] = Field(default_factory=list)
     read_extra_dirs: list[str] = Field(default_factory=list)
+    preset: Literal["locked", "readonly", "standard", "strict"] = "strict"
+    # 档位语义(engine._apply_preset):strict=默认最小权限;standard=放宽域约束
+    # (危险级仍由 guard/审批管);readonly=除只读/自管理外全禁;locked=仅对话
 
 
 class GuardsCfg(BaseModel):
@@ -727,6 +739,22 @@ class StorageCfg(BaseModel):
     fts: FtsCfg = Field(default_factory=FtsCfg)
 
 
+class McpServerCfg(BaseModel):
+    """MCP stdio server 配置;command 为 argv,不经过 shell。"""
+    name: str = Field(min_length=1, max_length=64)
+    command: list[str] = Field(min_length=1, max_length=64)
+    enabled: bool = True
+    timeout_s: int = Field(30, ge=1, le=600)
+
+
+class SkillsCfg(BaseModel):
+    """skills.* — local skill root and optional remote registry."""
+    dir: str = "~/.pyharness/skills"
+    registry_url: str = ""
+    max_package_bytes: int = Field(5242880, ge=1024, le=104857600)
+    max_files: int = Field(200, ge=1, le=10000)
+
+
 class PluginsCfg(BaseModel):
     """plugins.* — 插件域(F001-F006;装载序 DIS-SEAM §4.6)。"""
     enabled: list[str] = Field(default_factory=list)     # 空 = 只装内置
@@ -734,6 +762,7 @@ class PluginsCfg(BaseModel):
     ctx_lazy: bool = True
     pre_activate: list[str] = Field(
         default_factory=lambda: ["storage.spill", "credentials", "storage.kv"])
+    mcp_servers: list[McpServerCfg] = Field(default_factory=list)
     priority: dict[str, int] = Field(default_factory=dict)
     backpressure_limit: int = Field(1000, ge=1, le=100000)   # 总线背压(F005)
     deadletter_samples: int = Field(100, ge=0, le=10000)
@@ -768,5 +797,6 @@ class Settings(BaseModel):
     budget: BudgetCfg = Field(default_factory=BudgetCfg)
     log: LogCfg = Field(default_factory=LogCfg)
     storage: StorageCfg = Field(default_factory=StorageCfg)
+    skills: SkillsCfg = Field(default_factory=SkillsCfg)
     plugins: PluginsCfg = Field(default_factory=PluginsCfg)
     shell: ShellCfg = Field(default_factory=ShellCfg)

@@ -10,11 +10,11 @@ g1-g7 表)、ERR.md §2.5(GRD-401)/§2.11(POL-*)、SECURITY.md §4(L0-L4 单调�
 waterfall,任一 guard 可拒绝且拒绝不可被后续覆盖)+ g1-g7 内置 guard + danger
 分级(L0-L4)默认策略;决策三值 allow/reject/approval(**无 bypass 值**,不存在
 "跳过 guard"标记位);每个 reject 必出强同步 guard.rejected,审计可证"拦了且
-没执行"(INV-04/05)。guard 只有拒绝和请示两条非放行路径,**永远没有"放行"
+没执行"(INV-05)。guard 只有拒绝和请示两条非放行路径,**永远没有"放行"
 API**——全链 allow 只是"本 guard 不反对",最终执行权在 executor 管道
 (DIS-CORE §7.3.2 关3 Provider)。
 
-单调性三层结构防线(原则 3 / INV-03):
+单调性三层结构防线(原则 3 / INV-04):
 1. waterfall 短路:evaluate 按注册序求值,首个非 allow 即终局返回,后续 guard
    不再求值(测试断言短路后链尾 guard.check 零调用);
 2. 无续跑/回翻 API:拒绝后本模块不提供任何把 reject 翻回 allow 的通道(无
@@ -609,7 +609,7 @@ class GuardChain:
 
     结构不可变纪律:chain 注册序 = 求值序,只增不改(插件追加链尾);disabled
     仅经 disable()(config 显式声明 + guard.disabled 留痕)写入;运行期无任何
-    API 可移除/重排/回翻一次拒绝(INV-03,测试钉死方法面)。唯一状态 = 链装配
+    API 可移除/重排/回翻一次拒绝(INV-04,测试钉死方法面)。唯一状态 = 链装配
     (chain/disabled/_snapshot_seq),求值本身无状态残留(取消/重入语义 = 重新
     evaluate 一次,以新策略为准,GRD-403)。
     """
@@ -764,11 +764,11 @@ class GuardChain:
         return self._snapshot_seq
 
     def __getattr__(self, name: str) -> Any:
-        """结构防线:禁 bypass/放行/执行类方法面(INV-03 测试钉死)。"""
+        """结构防线:禁 bypass/放行/执行类方法面(INV-04 测试钉死)。"""
         if name in self._FORBIDDEN_API:
             raise AttributeError(
                 f"GuardChain 无 {name} API:guard 只有拒绝和请示,永远没有"
-                f"放行/执行路径(单调拒绝,INV-03);执行权归 executor 关3")
+                f"放行/执行路径(单调拒绝,INV-04);执行权归 executor 关3")
         raise AttributeError(f"{type(self).__name__!r} object has no "
                              f"attribute {name!r}")
 
@@ -853,13 +853,9 @@ class GuardChain:
         bus = self._bus
         if bus is None:
             return
+        from pyharness.bus import schedule_emit
         try:
-            r = bus.emit(type_, payload)
-            if inspect.isawaitable(r):
-                try:
-                    asyncio.get_running_loop().create_task(r)
-                except RuntimeError:
-                    log.warning("guard 无运行中事件循环,%s 未投递", type_)
+            schedule_emit(bus, type_, payload)
         except Exception as exc:                    # noqa: BLE001 未注册类型等
             log.warning("guard emit %s 失败: %s", type_, exc)
 

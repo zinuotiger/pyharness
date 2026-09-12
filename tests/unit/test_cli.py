@@ -203,11 +203,12 @@ async def _new_inmem_session(sid: str = SID) -> SessionLog:
 
 # ============================================================== 子命令解析
 class TestParseArgs:
-    """F064 分发解析:14 叶子全可解析;未知/缺参退 2(--help 0);旗标前后置合法。"""
+    """F064 分发解析:16 叶子全可解析;未知/缺参退 2(--help 0);旗标前后置合法。"""
 
     @pytest.mark.parametrize("cmd,args", [
         (c, []) for c in ("chat", "run", "schedule", "job", "session", "repair",
-                          "desktop", "acp", "config", "budget", "stats")
+                          "desktop", "acp", "config", "budget", "stats",
+                          "workflow", "skill")
     ] + [("plan", ["目标"]), ("search", ["备份"]), ("fork", [SID])])
     def test_all_leaf_parsable(self, cmd, args):
         r = cli.parse_args([cmd] + args)

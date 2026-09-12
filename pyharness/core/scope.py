@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from pyharness.errors import PyHError, raise_code
 from pyharness.core.llm_fallback import BudgetState, TaskUsage  # noqa: F401 类型复用
@@ -96,9 +96,16 @@ DEFAULT_ROLE: str = "user"
 """会话角色兜底(config 无 scope.role 键,见偏离 1)。"""
 
 # strict 沙箱下视作"workspace 域内"的工具名前缀(g3 g-fs-path 单点路径约束)
-WORKSPACE_DOMAINS: frozenset = frozenset({"fs", "workspace"})
+WORKSPACE_DOMAINS: frozenset = frozenset({"fs", "workspace", "storage"})
+# storage.*(spill 私有区/kv)与 fs.* 同为会话私有文件面,strict 下放行(F039)
 # 需域名 allowlist(非空)才在 strict 下可见的工具名前缀(g5 g-net-outbound URL 级复核)
 ALLOWLIST_DOMAINS: frozenset = frozenset({"web", "net"})
+# 会话内部自管理域:无外部副作用(目标/待办/计划/实用),strict 下恒可见
+SELF_DOMAINS: frozenset = frozenset({"goal", "todo", "plan", "util", "user",
+                                     "skill", "session"})
+# session.* = 只读检索自身会话日志(F057 session.fts_query),无外部副作用,与
+# goal/todo 同族 → strict 下恒可见(2026-09-12 装配 FTS 工具时补,原缺此域导致
+# 索引工具在默认 strict 档被域显隐静默隐藏)
 
 # 内置危险分级默认表(F023 同源示意;can_use 只消费 critical——不可审批直接不可用;
 # high 级转审批由 guard 链 g-danger 按工具定义处理,scope 层不拦)。
@@ -272,6 +279,9 @@ class Scope:
         p = self.policy
         if tool_name in p.deny_tools:               # 显式禁止(只增,单调)
             return False
+        domain = tool_name.split(".", 1)[0] if "." in tool_name else tool_name
+        if domain in SELF_DOMAINS:                  # 会话内自管理(目标/待办等)
+            return True                             # 零外部副作用,不随沙箱收紧
         if (p.sandbox_level == "strict"
                 and not self._inside_workspace_domain(tool_name)):
             return False                            # strict:仅 workspace 域 + allowlist 网络
@@ -292,6 +302,20 @@ class Scope:
             return                                  # 无新增:幂等返回,不落事件
         self.policy.deny_tools |= deny              # 只追加(单调)
         self._record("scope.updated", {"op": "tighten", "added": sorted(deny),
+                                       "reason": reason})
+
+    def note_tighten(self, deny: Iterable[str], *, reason: str) -> None:
+        """装配期收紧留痕(幂等落 scope.updated,不改策略读面)。
+
+        用于**同步装配段**(engine.build_runner_components 无法 await);策略本身
+        已由装配方直接写入 policy.deny_tools,本方法只补审计事件——不这样做时
+        预设档位切换(locked/readonly)在日志里无痕,违反"动作以事件留痕"。
+        deny 与现有集合无新增时静默返回(与 tighten 同幂等语义)。
+        """
+        added = set(deny)
+        if not added:
+            return
+        self._record("scope.updated", {"op": "tighten", "added": sorted(added),
                                        "reason": reason})
 
     # ============================================================ 预算硬闸
@@ -461,14 +485,9 @@ class Scope:
         bus = self._bus
         if bus is None:
             return
+        from pyharness.bus import schedule_emit
         try:
-            r = bus.emit(type_, payload)
-            if inspect.isawaitable(r):
-                try:
-                    asyncio.get_running_loop().create_task(r)
-                except RuntimeError:                # 无运行中事件循环:日志降级
-                    log.warning("scope=%s 无运行中事件循环,%s 未投递",
-                                self.session_id, type_)
+            schedule_emit(bus, type_, payload)
         except Exception as exc:                     # noqa: BLE001 未注册类型等
             log.warning("scope emit %s 失败: %s", type_, exc)
 

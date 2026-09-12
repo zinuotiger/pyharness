@@ -283,6 +283,24 @@ async def test_replay_aprid_503_and_unknown():
     with pytest.raises(PyHError) as ei:
         prov.approve(aid, by="bob")
     assert ei.value.code == "APR-503"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_only_one_outcome():
+    """并发批准同一审批只允许一个请求进入落盘,另一个立即 APR-503。"""
+    prov, log, store, _ = _make_stack()
+    await _boot(log)
+    task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
+    await _wait_pending(prov)
+    aid = _by_type(store, "approval.requested")[0].seq
+    results = await asyncio.gather(
+        prov.approve_async(aid, by="alice"),
+        prov.approve_async(aid, by="alice"),
+        return_exceptions=True)
+    assert await asyncio.wait_for(task, 5) == "granted"
+    assert len(_by_type(store, "approval.granted")) == 1
+    assert sum(isinstance(r, PyHError) and r.code == "APR-503"
+               for r in results) == 1
     with pytest.raises(PyHError) as ei2:
         prov.deny(aid, by="bob")
     assert ei2.value.code == "APR-503"

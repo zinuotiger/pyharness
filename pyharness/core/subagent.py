@@ -310,7 +310,8 @@ class SubagentManager:
                 if isinstance(v, (int, float)) and float(v) > 0:
                     return float(v)
             except Exception:  # noqa: BLE001 第三方配置对象 getattr 钩子异常
-                pass
+                log.debug("subagent budget ratio config unavailable",
+                          exc_info=True)
         return DEFAULT_BUDGET_RATIO
 
     def _ensure_session(self) -> Any:
@@ -641,12 +642,12 @@ class SubagentManager:
                 try:
                     delattr(ns, key)
                 except Exception:              # noqa: BLE001
-                    pass
+                    log.debug("subagent namespace unmount failed", exc_info=True)
             else:
                 try:
                     setattr(ns, key, self._mount_prev)
                 except Exception:              # noqa: BLE001
-                    pass
+                    log.debug("subagent namespace restore failed", exc_info=True)
         self._mount_ns = None
         self._mount_prev = None
 

@@ -767,5 +767,6 @@ async def test_real_sessionlog_append_chain():
     assert "schedule.updated" in types
     assert "schedule.trigger" in types
     assert "schedule.removed" in types
+    assert "user.message" in types                   # trigger 后可被引擎 runner 定位
     stats = log.stats()
-    assert stats["event_count"] == 6                 # created+4 管理+trigger
+    assert stats["event_count"] == 7                 # created+4 管理+trigger+user

@@ -238,9 +238,10 @@ class PluginManager:
         self.registry.register("plugin", pid, record)
         try:
             await ctx.session.append("plugin.installed",
-                                     plugin_id=pid,
-                                     version=manifest["version"],
-                                     api_version=manifest["api_version"])
+                                     {"plugin_id": pid,
+                                      "version": manifest["version"],
+                                      "api_version": manifest["api_version"]},
+                                     actor="plugin")
         except Exception:                        # 留痕失败:回滚,不留半装态
             self.registry.unregister("plugin", pid)
             self._manifest.pop(pid, None)
@@ -336,7 +337,8 @@ class PluginManager:
         self._manifest.pop(plugin_id, None)      # 记录摘除 → state(pid) 回落 absent
         self._state.pop(plugin_id, None)
         try:
-            await ctx.session.append("plugin.uninstalled", plugin_id=plugin_id)
+            await ctx.session.append("plugin.uninstalled",
+                                     {"plugin_id": plugin_id}, actor="plugin")
         except Exception as exc:                 # 卸载已完成,留痕失败告警不阻断
             log.error("plugin.uninstalled 留痕失败 plugin_id=%s: %s",
                       plugin_id, exc)

@@ -385,4 +385,43 @@ class EventBus:
             self._inflight.discard(sub.owner)
 
 
-__all__ = ["EventBus", "Subscription", "STOP"]
+_PENDING_EMITS: set[asyncio.Task] = set()
+"""已排程的 emit 协程引用:防 task 被 GC,回调自动摘除。"""
+
+
+async def _await_dispatch(coro: Any) -> dict:
+    """排程协程消费:await 真正分发,异常兜底记录(不静默丢事件)。"""
+    try:
+        return await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                # noqa: BLE001 分发兜底
+        log.exception("scheduled event dispatch failed")
+        return {"delivered": 0, "errored": 1}
+
+
+def schedule_emit(bus: EventBus, type_: str, payload: dict, *,
+                  mode: str = "sequential") -> Optional[asyncio.Task]:
+    """同步调用方安全调度 emit:类型校验同步抛 EVT-102,分发协程排入运行中循环。
+
+    emit() 返回协程,裸调用会丢弃;本助手保留 task 引用并统一收口异常,供
+    config/approval/scope/guard 等 fire-and-forget 出口使用。无运行中事件循环
+    时关闭协程并记警告(事件不投递但不泄漏协程)。
+    """
+    result = (bus.emit(type_, payload, mode=mode)
+              if mode != "sequential" else bus.emit(type_, payload))
+    if not asyncio.iscoroutine(result):
+        return result
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.warning("schedule_emit: 无运行中事件循环,%s 未投递", type_)
+        coro.close()
+        return None
+    task = loop.create_task(_await_dispatch(result))
+    _PENDING_EMITS.add(task)
+    task.add_done_callback(_PENDING_EMITS.discard)
+    return task
+
+
+__all__ = ["EventBus", "Subscription", "STOP", "schedule_emit"]

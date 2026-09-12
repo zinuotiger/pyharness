@@ -429,7 +429,7 @@ class SessionQueryIndex:
         self._announce_ctx = ctx
         try:
             registry = None
-            for attr in ("tools", "registry"):
+            for attr in ("tool_registry", "tools", "registry"):
                 cand = getattr(ctx, attr, None)
                 if cand is not None and callable(getattr(cand, "register_tool", None)):
                     registry = cand
@@ -713,6 +713,27 @@ class SessionQueryIndex:
             self._pending_edits = edits + self._pending_edits
             raise
         return n
+
+    # ------------------------------------------------------------ 对账读数
+    def max_seq(self, session_id: str) -> int:
+        """该会话在索引里已落库的最大 seq(派生视图末位,F060 落后对账用)。
+
+        只读;索引未装载 → 0(调用方据 0 判定"未索引",不算落后);与攒批 flush
+        共用连接锁,避免读数与写批交错。修复:此前 SessionQueryIndex 未暴露该
+        读数面,导致 repair.scan_session 的 index_stale 检测在装配后仍无法启用。
+        """
+        db = self._db
+        if db is None:
+            return 0
+        with self._lock:
+            try:
+                row = db.execute(
+                    "SELECT MAX(seq) FROM fts_rows WHERE session_id=?",
+                    (str(session_id),)).fetchone()
+            except sqlite3.Error as e:
+                raise_code("PERS-202", op="fts_max_seq",
+                           hint=f"索引末 seq 读数失败: {e}")
+        return int(row[0] or 0) if row else 0
 
     # ------------------------------------------------------------ 全文查询
     async def query(self, q: str, *, limit: int = 20,

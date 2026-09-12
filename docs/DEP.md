@@ -110,7 +110,7 @@ cd ~/Desktop/mini-harness
 ```bash
 cd ~/Desktop/mini-harness
 uv python install 3.11        # 首次;已有可跳过
-uv sync                       # ①读 pyproject.toml ②建 .venv ③装依赖写 uv.lock
+uv sync --all-extras          # ①读 pyproject.toml ②建 .venv ③装基础+dev+desktop 依赖
 uv run python -c "import pydantic, openai, yaml; print('deps ok')"
 uv run pyharness --help       # 控制台入口可用;等价 python -m pyharness --help
 ```

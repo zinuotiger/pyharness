@@ -536,5 +536,70 @@ class SyscheckFailPayload(_PayloadBase):
     trigger: Optional[str] = None
 
 
+class BudgetPausedPayload(_PayloadBase):
+    """budget.paused:F032 预算硬闸首达 exhausted 落事件(事件即事实,防刷)。"""
+    state: str = Field(min_length=1)
+    used: dict = Field(default_factory=dict)
+
+
+class UserQuestionPayload(_PayloadBase):
+    """user.question:#38 agent 反问用户(带选项);ask_id = 本事件 seq。"""
+    question: str = Field(min_length=1)
+    options: list[str] = Field(default_factory=list, max_length=10)
+    ttl_s: int = Field(120, ge=5, le=3600)
+
+
+class UserAnswerPayload(_PayloadBase):
+    """user.answer:人对 user.question 的答复(choice 命中选项/自由文本)。"""
+    ask_id: int = Field(ge=1)
+    choice: Optional[str] = Field(default=None, max_length=500)
+    text: Optional[str] = Field(default=None, max_length=2000)
+    by: str = Field(default="user", min_length=1)
+
+
+class ScopeUpdatedPayload(_PayloadBase):
+    """scope.updated:F014 策略单调收紧留痕(op=tighten;只增不改,防刷日志)。"""
+    op: str = Field(min_length=1)
+    added: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class SkillInstalledPayload(_PayloadBase):
+    """skill.installed: remote skill safely verified and activated."""
+    name: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=64)
+    sha256: str = Field(min_length=64, max_length=64)
+    source: str = Field(default="", max_length=2000)
+    approved_by: str = Field(default="user", min_length=1, max_length=64)
+
+
+class SkillRemovedPayload(_PayloadBase):
+    """skill.removed: installed skill removed from active root."""
+    name: str = Field(min_length=1, max_length=64)
+    version: str = Field(default="", max_length=64)
+    approved_by: str = Field(default="user", min_length=1, max_length=64)
+
+
+class SkillRolledBackPayload(_PayloadBase):
+    """skill.rollback: active skill switched to a previous verified version."""
+    name: str = Field(min_length=1, max_length=64)
+    from_version: str = Field(default="", max_length=64)
+    to_version: str = Field(min_length=1, max_length=64)
+    approved_by: str = Field(default="user", min_length=1, max_length=64)
+
+
+class SkillUsedPayload(_PayloadBase):
+    """skill.used:F073 技能装载审计(谁在何时用了哪个技能;body 不进日志防刷)。"""
+    name: str = Field(min_length=1, max_length=64)
+
+
+class ConfigUpdatedPayload(_PayloadBase):
+    """config.updated(瞬时,仅总线):热更审计,值已脱敏,防刷屏限长。"""
+    key: str = Field(min_length=1, max_length=128)
+    old: str = Field(default="", max_length=2000)
+    new: str = Field(default="", max_length=2000)
+    by: str = Field(default="system", min_length=1, max_length=64)
+
+
 __all__ = [name for name in globals()
            if name.endswith("Payload") or name in ("PlanStep", "TodoItem")]

@@ -514,9 +514,11 @@ class Scheduler:
         if q is None:                         # 未装配队列:宁失败不假装入队
             raise_code("CYC-999", hint=f"schedule:{job.name} 未注入 task_queue,"
                        "到点任务无法入队")
+        intent = job.template["intent"]
+        await sess.append("user.message", {"content": intent}, actor="user",
+                           origin=f"schedule:{job.name}", sync=True)
         try:
-            await q.submit(job.template["intent"],
-                           meta={"source": f"schedule:{job.name}"})
+            await q.submit(intent, meta={"source": f"schedule:{job.name}"})
         except PyHError as e:                 # QUE-001 队满等:显式事件化不吞
             try:
                 await sess.append("system.error", {
@@ -687,6 +689,26 @@ class Scheduler:
                 # cron:fired 之后最近的匹配分钟
                 job.next_fire_at = m.next_fire(job, fired)
         return m                                # 内存态 ≡ 日志派生态(INV-01)
+
+    @classmethod
+    def rebuild_for_session(cls, session: Any, *,
+                            task_queue: Any = None,
+                            auto_ticker: bool = False) -> "Scheduler":
+        """事件回放重建并绑定会话(命令层/装配层入口,INV-01)。"""
+        events: list[Any] = []
+        if session is not None:
+            ea = getattr(session, "events_after", None)
+            if callable(ea):
+                events = list(ea(0))
+            elif hasattr(session, "replay"):
+                events = list(session.replay())
+        m = cls._rebuild_from(events)
+        m.session = session
+        m.task_queue = task_queue
+        m._auto_ticker = bool(auto_ticker)
+        m._stopped = not auto_ticker
+        m._ticker_task = None
+        return m
 
     # ========================================================== 分钟泵
     def _ensure_ticker(self, ctx: Any = None) -> None:

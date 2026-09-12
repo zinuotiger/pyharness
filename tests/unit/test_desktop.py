@@ -1,4 +1,4 @@
-"""pyharness/desktop.py 单测 — 契约:specs/desktop.py.md(F065 桌面壳,面试主演示)+ ADR-011(/api
+"""pyharness/desktop 包单测 — 契约:specs/desktop.py.md(F065 桌面壳,面试主演示)+ ADR-011(/api
 错误体复用错误码)+ ADR-012(窗口 = 只读事件投影)+ EVENT-SCHEMA §1.3(轨迹只取持久事件)。
 
 覆盖面(任务要求:时间线逻辑测透 + GUI/服务器全 mock):
@@ -38,6 +38,10 @@ from fastapi.testclient import TestClient
 
 import pyharness.desktop as d
 from pyharness.bus import EventBus
+from pyharness.desktop import app as desktop_app
+from pyharness.desktop import bridge as desktop_bridge
+from pyharness.desktop import launcher as desktop_launcher
+from pyharness.desktop import net as desktop_net
 from pyharness.core.session import open_session
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import Envelope
@@ -326,6 +330,93 @@ async def test_create_message_appends_and_submits():
     assert e.value.code == "EVT-100"
 
 
+def test_session_path_rejects_traversal(tmp_path):
+    """会话 id 只能使用安全字符,反斜杠/点路径绝不能进入 store 路径。"""
+    mgr = d.DesktopSessionManager(dir=tmp_path, bus=None)
+    with pytest.raises(PyHError) as e:
+        mgr._path("s-..\\..\\outside")
+    assert e.value.code == "EVT-100"
+
+
+async def test_same_approval_id_can_be_disambiguated_by_session():
+    """两个会话同 seq 时,新接口必须裁决指定会话的 provider。"""
+    app = await _async_app(_sample_events())
+    sid_a, sid_b = "s-session-a", "s-session-b"
+    called: list[str] = []
+
+    class _Provider:
+        def __init__(self, sid):
+            self.sid = sid
+            self._pending = {7: SimpleNamespace(session_id=sid)}
+
+        def approve(self, aid, *, by):
+            called.append(self.sid)
+
+        def deny(self, aid, *, by):
+            called.append(f"deny:{self.sid}")
+
+    app._approvals = {"a": _Provider(sid_a), "b": _Provider(sid_b)}
+    await app.decide_approval_for(sid_a, 7, {"decision": "approve"})
+    assert called == [sid_a]
+    with pytest.raises(PyHError) as e:
+        await app.decide_approval(7, {"decision": "approve"})
+    assert e.value.code == "EVT-101"
+
+
+async def test_same_ask_id_can_be_disambiguated_by_session():
+    """反问与审批同源修复:同 seq 的多会话问题必须按 sid 路由。"""
+    app = await _async_app(_sample_events())
+    sid_a, sid_b = "s-session-a", "s-session-b"
+    called: list[str] = []
+
+    class _AskProvider:
+        def __init__(self, sid):
+            self._pending = {7: object()}
+            self._session = SimpleNamespace(sid=sid)
+
+        async def answer_async(self, ask_id, *, choice=None, text=None, by="user"):
+            called.append(self._session.sid)
+            return True
+
+    app._engines = {
+        sid_a: SimpleNamespace(ask=_AskProvider(sid_a)),
+        sid_b: SimpleNamespace(ask=_AskProvider(sid_b)),
+    }
+    await app.answer_ask_for(sid_a, 7, {"choice": "A"})
+    assert called == [sid_a]
+    with pytest.raises(PyHError) as e:
+        await app.answer_ask(7, {"choice": "A"})
+    assert e.value.code == "EVT-101"
+
+
+async def test_last_user_routes_registered_before_dynamic_seq():
+    """固定 last-user 路由必须先于 {seq},否则会被 int 校验截获。"""
+    app = await _async_app(_sample_events())
+    paths = [getattr(r, "path", "") for r in app.api.routes]
+    assert paths.index("/api/sessions/{sid}/messages/last-user") < paths.index(
+        "/api/sessions/{sid}/messages/{seq}")
+
+
+async def test_desktop_manager_shutdown_awaits_async_flush():
+    """关闭必须 await store.flush,不能再创建未 await 的协程。"""
+    mgr = d.DesktopSessionManager(dir=Path("."), bus=None)
+
+    class _Store:
+        flushed = False
+        closed = False
+
+        async def flush(self):
+            self.flushed = True
+
+        def close(self):
+            self.closed = True
+
+    store = _Store()
+    mgr._stores["s-abc12345"] = store
+    await mgr.shutdown_all()
+    assert store.flushed is True and store.closed is True
+
+
 async def test_budget_dashboard_disabled_without_gate():
     """无预算闸装配 → disabled 标志(前端隐藏面板),不炸不伪造。"""
     app = await _async_app(_sample_events())
@@ -422,7 +513,7 @@ async def test_pending_approvals_aggregates_sorted():
 def test_route_timeline_http_and_error_body():
     """真实路由:/timeline 200 全 kind 序列 + 查询参数;kinds/after_seq 生效。"""
     app = _app(_sample_events())
-    with TestClient(app.api) as client:
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
         r = client.get(f"/api/sessions/{SID}/timeline")
         assert r.status_code == 200
         body = r.json()
@@ -443,23 +534,167 @@ def test_route_approval_http():
     """审批弹窗裁决 POST:200 ok;非法 decision → 400 code 体。"""
     fake = _FakeApproval(pending={42: object()})
     app = _app(_sample_events(), approval=fake)
-    with TestClient(app.api) as client:
-        r = client.post("/api/approvals/42", json={"decision": "approve"})
+    hdrs = {"X-PyHarness-Token": app._api_token}
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        r = client.post("/api/approvals/42", json={"decision": "approve"},
+                        headers=hdrs)
         assert r.status_code == 200 and r.json() == {"ok": True, "approval_id": 42}
         assert fake.calls == [("approve", 42, "desktop")]
-        r2 = client.post("/api/approvals/42", json={"decision": "maybe"})
+        r2 = client.post("/api/approvals/42", json={"decision": "maybe"},
+                         headers=hdrs)
         assert r2.status_code == 400 and r2.json()["code"] == "EVT-100"
+
+
+def test_route_mutating_requires_api_token():
+    """写端点必须带进程 token:缺失/错误 → 401 CRED-701;正确则进入引擎语义。"""
+    app = _app(_sample_events())
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        r0 = client.post("/api/approvals/42", json={"decision": "approve"})
+        assert r0.status_code == 401 and r0.json()["code"] == "CRED-701"
+        r1 = client.post("/api/approvals/42", json={"decision": "approve"},
+                         headers={"X-PyHarness-Token": "bad-token"})
+        assert r1.status_code == 401 and r1.json()["code"] == "CRED-701"
+        r2 = client.post("/api/approvals/7", json={"decision": "approve"},
+                         headers={"X-PyHarness-Token": app._api_token})
+        assert r2.status_code == 404 and r2.json()["code"] == "APR-503"
+
+
+def test_route_webhook_accepts_token_and_rejects_without():
+    """webhook:缺 token 401;header/body 任一 token 通过后按业务校验(EVT-100)。"""
+    app = _app(_sample_events())
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        r0 = client.post("/api/webhook", json={"content": "hi"})
+        assert r0.status_code == 401 and r0.json()["code"] == "CRED-701"
+        hdrs = {"X-Webhook-Token": app._api_token}
+        r1 = client.post("/api/webhook", json={"content": "hi"}, headers=hdrs)
+        # 单日志测试门面不能新建会话;404 表示鉴权已通过并进入业务校验。
+        assert r1.status_code == 404 and r1.json()["code"] == "EVT-106"
+        r2 = client.post("/api/webhook",
+                         json={"content": "hi", "token": app._api_token})
+        assert r2.status_code == 404 and r2.json()["code"] == "EVT-106"
+
+
+async def test_plugin_load_rejects_path_outside_configured_roots(tmp_path):
+    """HTTP 插件装载只允许 examples/plugins 与 plugins.dir 白名单根内目录。"""
+    plugin_root = tmp_path / "plugins"
+    plugin_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    cfg = SimpleNamespace(plugins=SimpleNamespace(dir=str(plugin_root)))
+    app = await _async_app(_sample_events(), config=cfg)
+    app._engines[SID] = SimpleNamespace(
+        plugins=SimpleNamespace(state=lambda pid: "inactive"),
+        tool_registry=object(), plugin_state={}, settings=cfg)
+    out = await app.plugin_load({"id": "evil", "dir": str(outside)})
+    assert out["ok"] is False
+    assert "插件根目录" in out["error"]
+
+
+def test_index_page_injects_api_token():
+    """前端页注入进程 token,页面写请求可自动携带鉴权头。"""
+    app = _app(_sample_events())
+    html = app._index_page().body.decode("utf-8")
+    assert f'<meta name="pyharness-token" content="{app._api_token}">' in html
 
 
 def test_route_list_sessions_empty_dir(tmp_path: Path):
     """自装配会话管理器:空目录 → 会话列表空(不炸不造文件)。"""
     app = d.DesktopApp(SimpleNamespace(
         session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
-    with TestClient(app.api) as client:
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
         r = client.get("/api/sessions")
         assert r.status_code == 200
         assert r.json() == {"sessions": [], "count": 0}
     assert list(tmp_path.iterdir()) == []           # 只读:零落盘
+
+
+def test_route_orchestration_management_lists_http():
+    """Jobs/定时/子 Agent 管理面:只读列表返回前端可直接渲染的结构。"""
+    app = _app(_sample_events())
+
+    class _Jobs:
+        def list_owned(self, by):
+            assert by == f"desktop:{SID}"
+            return ["j-1"]
+
+        async def status(self, job_id, *, by):
+            return SimpleNamespace(job_id=job_id, state="completed", owner=by,
+                                   progress=1.0, todo_summary="1/1 项",
+                                   elapsed_ms=12, log_tail=[], error=None)
+
+    class _Schedules:
+        async def list_jobs(self):
+            return [SimpleNamespace(name="daily", kind="cron", expr="0 9 * * *",
+                                    paused=False, next_fire_at=None,
+                                    last_fired_at=None, triggered=2, missed=1)]
+
+    class _Subagents:
+        def status(self):
+            return SimpleNamespace(running=1, limit=8, active_children=[
+                {"sub_id": "s-sub0001", "state": "running", "age_s": 3}])
+
+    app._engines[SID] = SimpleNamespace(jobs=_Jobs(), schedule=_Schedules(),
+                                        subagent=_Subagents())
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        jobs = client.get(f"/api/sessions/{SID}/jobs")
+        schedules = client.get(f"/api/sessions/{SID}/schedules")
+        subagents = client.get(f"/api/sessions/{SID}/subagents")
+        assert jobs.status_code == 200 and jobs.json()["jobs"][0]["job_id"] == "j-1"
+        assert schedules.status_code == 200
+        assert schedules.json()["schedules"][0]["triggered"] == 2
+        assert subagents.status_code == 200
+        assert subagents.json()["status"]["active_children"][0]["state"] == "running"
+
+
+def test_route_orchestration_management_actions_http():
+    """编排动作:取消 job、暂停/删除 schedule、取消子 Agent 均经鉴权端点。"""
+    app = _app(_sample_events())
+
+    class _Jobs:
+        async def cancel(self, job_id, *, by):
+            assert (job_id, by) == ("j-1", f"desktop:{SID}")
+            return True
+
+    class _Schedules:
+        def __init__(self):
+            self.calls = []
+
+        async def pause(self, name, *, ctx=None):
+            self.calls.append(("pause", name))
+
+        async def remove(self, name, *, ctx=None):
+            self.calls.append(("remove", name))
+
+    class _Subagents:
+        async def cancel(self, sub_id, *, by):
+            assert (sub_id, by) == ("s-sub0001", f"desktop:{SID}")
+            return True
+
+    schedules = _Schedules()
+    app._engines[SID] = SimpleNamespace(jobs=_Jobs(), schedule=schedules,
+                                        subagent=_Subagents())
+    hdrs = {"X-PyHarness-Token": app._api_token}
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        r1 = client.post(f"/api/sessions/{SID}/jobs/j-1/cancel", json={}, headers=hdrs)
+        r2 = client.post(f"/api/sessions/{SID}/schedules/action",
+                         json={"action": "pause", "name": "daily"}, headers=hdrs)
+        r3 = client.post(f"/api/sessions/{SID}/schedules/action",
+                         json={"action": "remove", "name": "daily"}, headers=hdrs)
+        r4 = client.post(f"/api/sessions/{SID}/subagents/s-sub0001/cancel",
+                         json={}, headers=hdrs)
+        assert r1.json()["cancelled"] is True
+        assert r2.status_code == 200 and r3.status_code == 200
+        assert schedules.calls == [("pause", "daily"), ("remove", "daily")]
+        assert r4.json()["cancelled"] is True
+
+
+def test_route_rejects_untrusted_host(tmp_path):
+    """DNS rebinding 防护:非 loopback Host 不允许访问桌面 API。"""
+    app = d.DesktopApp(SimpleNamespace(
+        session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
+    with TestClient(app.api, base_url="http://evil.example") as client:
+        r = client.get("/api/sessions")
+        assert r.status_code == 400
 
 
 # ===================================================================== EventStreamHub
@@ -489,6 +724,13 @@ async def test_hub_fanout_session_filter_and_cursor():
             assert body["type"] == "llm.chunk"
             assert body["payload"]["text"] == "流式"
         assert me_a.last_seq == 5                        # 瞬时事件无 seq,游标不动
+        # 带 session_id 的 chunk 按会话路由,不再把 A 的正文广播给 B。
+        await hub.forward("llm.chunk", {"session_id": SID, "delta": "A-only"})
+        scoped = json.loads(me_a.queue.get_nowait()[1])
+        assert scoped["type"] == "llm.chunk"
+        assert scoped["payload"]["delta"] == "A-only"
+        assert me_b.queue.empty()
+        assert json.loads(me_all.queue.get_nowait()[1])["payload"]["delta"] == "A-only"
     assert hub.clients == set()                          # 上下文退出即注销
 
 
@@ -551,7 +793,7 @@ async def test_sse_stream_delivers_events_then_clean_exit():
 
 async def test_sse_stream_heartbeat_ping(monkeypatch):
     """SSE 心跳注释行保活(15s 超时无事件 → ': ping';测速压到 0.05s)。"""
-    monkeypatch.setattr(d, "SSE_HEARTBEAT_S", 0.05)
+    monkeypatch.setattr(desktop_app, "SSE_HEARTBEAT_S", 0.05)
     app = await _async_app()
     resp = await app.stream_sse(_FakeRequest(), sid="")
     gen = resp.body_iterator
@@ -598,9 +840,9 @@ def test_pick_free_port_loopback_random():
 
 def test_wait_until_listening_probe(monkeypatch):
     """就绪探测:可连即 True;超时 False(开窗前不弹空窗,调用方退 1)。"""
-    monkeypatch.setattr(d, "_probe_port", lambda port: True)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: True)
     assert d.wait_until_listening(9999, timeout=0.3) is True
-    monkeypatch.setattr(d, "_probe_port", lambda port: False)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: False)
     assert d.wait_until_listening(9999, timeout=0.15) is False
 
 
@@ -622,7 +864,7 @@ def test_run_uvicorn_single_worker_no_reload(monkeypatch):
             captured["kw"] = kw
 
     fake_uvicorn = SimpleNamespace(Config=_FakeConfig, Server=_FakeServer)
-    monkeypatch.setattr(d, "uvicorn", fake_uvicorn)
+    monkeypatch.setattr(desktop_net, "uvicorn", fake_uvicorn)
     app = SimpleNamespace(api=object(), server=None, loop=None)
     d.run_uvicorn(app, 43210)
     assert captured["served"] is True
@@ -633,7 +875,7 @@ def test_run_uvicorn_single_worker_no_reload(monkeypatch):
 
 async def test_wait_listening_async_timeout_raises(monkeypatch):
     """异步就绪探测超时 → CYC-999(启动取消,不弹空窗)。"""
-    monkeypatch.setattr(d, "_probe_port", lambda port: False)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: False)
     app = await _async_app()
     with pytest.raises(PyHError) as e:
         await d.wait_listening_async(app, 9999, timeout=0.15)
@@ -681,7 +923,7 @@ def test_shutdown_gracefully_sequence_and_idempotent(monkeypatch):
     server = SimpleNamespace(should_exit=False)
     app.server = server
     fake_wv = _FakeWvDestroy()
-    monkeypatch.setattr(d, "_load_webview", lambda: fake_wv)
+    monkeypatch.setattr(desktop_launcher, "_load_webview", lambda: fake_wv)
 
     app.shutdown_gracefully()
     app.shutdown_gracefully()                             # 第二次 = 幂等空转
@@ -802,7 +1044,7 @@ def test_bridge_engine_error_returns_code_body():
 
 def test_bridge_timeout_returns_busy(monkeypatch):
     """引擎忙超时(60s 缺省)→ 本地 BUSY 错误体,不悬挂(测速压到 0.05s)。"""
-    monkeypatch.setattr(d, "BRIDGE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(desktop_bridge, "BRIDGE_TIMEOUT_S", 0.05)
     with _LoopThread() as loop:
         target = _BridgeTarget()
         target.loop = loop
@@ -864,16 +1106,16 @@ def _stub_entry(monkeypatch, *, wv=_UNSET, listening=True, ctx=None):
         ctx = SimpleNamespace(bus=EventBus())
     recorded = {}
 
-    monkeypatch.setattr(d, "_bootstrap_desktop", lambda cfg_path: ctx)
-    monkeypatch.setattr(d, "run_uvicorn", lambda app, port: recorded.setdefault(
+    monkeypatch.setattr(desktop_launcher, "_bootstrap_desktop", lambda cfg_path: ctx)
+    monkeypatch.setattr(desktop_launcher, "run_uvicorn", lambda app, port: recorded.setdefault(
         "ran", (app, port)))
-    monkeypatch.setattr(d, "wait_until_listening", lambda port, timeout=15: listening)
+    monkeypatch.setattr(desktop_launcher, "wait_until_listening", lambda port, timeout=15: listening)
     if wv is _UNSET:                                   # 缺省:可用假窗
         wv = _FakeWv()
     if wv is None:
-        monkeypatch.setattr(d, "_load_webview", lambda: None)
+        monkeypatch.setattr(desktop_launcher, "_load_webview", lambda: None)
     else:
-        monkeypatch.setattr(d, "_load_webview", lambda: wv)
+        monkeypatch.setattr(desktop_launcher, "_load_webview", lambda: wv)
     return recorded, wv
 
 
@@ -898,7 +1140,7 @@ def test_main_bootstrap_failure_returns_1(monkeypatch, capsys):
     def _boom(cfg_path):
         raise PyHError("CFG-601", ctx={"advice": "配置非法字段:llm.model"})
 
-    monkeypatch.setattr(d, "_bootstrap_desktop", _boom)
+    monkeypatch.setattr(desktop_launcher, "_bootstrap_desktop", _boom)
     assert d.main() == 1
     assert "CFG-601" in capsys.readouterr().err
 
@@ -937,16 +1179,16 @@ async def test_run_desktop_cli_bridge_returns_0(monkeypatch):
     """CLI desktop 子命令桥:复用已装配 ctx,同一生命周期,返回 0。"""
     ctx = SimpleNamespace(bus=EventBus())
     recorded = {}
-    monkeypatch.setattr(d, "run_uvicorn", lambda app, port: recorded.setdefault(
+    monkeypatch.setattr(desktop_launcher, "run_uvicorn", lambda app, port: recorded.setdefault(
         "ran", (app, port)))
-    monkeypatch.setattr(d, "_load_webview", lambda: _FakeWv())
-    monkeypatch.setattr(d, "wait_listening_async", _null_async)
+    monkeypatch.setattr(desktop_launcher, "_load_webview", lambda: _FakeWv())
+    monkeypatch.setattr(desktop_launcher, "wait_listening_async", _null_async)
     fake_wv_holder = {}
 
     def _fake_create(wv, app, bridge):
         fake_wv_holder["wv"] = wv
 
-    monkeypatch.setattr(d, "_create_window", _fake_create)
+    monkeypatch.setattr(desktop_launcher, "_create_window", _fake_create)
     assert await d.run_desktop(ctx) == 0
     assert recorded["ran"][0].stopping.is_set()
     assert fake_wv_holder["wv"].started is True        # 窗口 start 后优雅停服

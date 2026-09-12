@@ -1,7 +1,7 @@
 """pyharness/events/vocab.py — 事件词表注册 (specs/events.py.md)
 
 _EVENT_REGISTRY 类型 → payload 模型注册表;register_event_type/payload_model_for/
-validate_payload 三函数 = 校验链第 2、3 步。64 个核心类型在模块导入期一次性注册
+validate_payload 三函数 = 校验链第 2、3 步。70 个核心类型在模块导入期一次性注册
 (EVENT-SCHEMA §3 的 57 基线 + 词表外扩展:llm.retry/plan.done/plan.aborted/
 schedule.registered/updated/removed/blocked/missed,按 §7 规则登记);
 插件运行时以 plugin.<id>.<name> 命名空间注册,只增不改。
@@ -19,7 +19,9 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     AgentMessagePayload,
     ApprovalOutcomePayload,
     ApprovalRequestedPayload,
+    BudgetPausedPayload,
     BusBackpressurePayload,
+    ConfigUpdatedPayload,
     ContextCompactedPayload,
     ForkCreatedPayload,
     GoalCompletedPayload,
@@ -52,12 +54,17 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     ScheduleRemovedPayload,
     ScheduleTriggerPayload,
     ScheduleUpdatedPayload,
+    ScopeUpdatedPayload,
     SegmentEndPayload,
     SegmentStartPayload,
     SessionCreatedPayload,
     SessionFinishedPayload,
     SessionRecoveredPayload,
     SessionRenamedPayload,
+    SkillInstalledPayload,
+    SkillRemovedPayload,
+    SkillRolledBackPayload,
+    SkillUsedPayload,
     SubagentFailedPayload,
     SubagentJoinedPayload,
     SubagentSpawnedPayload,
@@ -72,11 +79,13 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     ToolCallPayload,
     ToolErrorPayload,
     ToolResultPayload,
+    UserAnswerPayload,
     UserAttachmentImagePayload,
     UserCommandPayload,
     UserFeedbackPayload,
     UserMessageEditedPayload,
     UserMessagePayload,
+    UserQuestionPayload,
     WorkflowStepPayload,
 )
 
@@ -92,7 +101,7 @@ SYNC_TYPES = frozenset({
 })
 
 # 瞬时事件(仅总线,禁 append 入日志;registry.updated 为总线内部广播,无 payload 模型)
-TRANSIENT_TYPES = frozenset({"llm.chunk", "registry.updated"})
+TRANSIENT_TYPES = frozenset({"llm.chunk", "registry.updated", "config.updated"})
 
 _EVENT_REGISTRY: dict[str, type[BaseModel]] = {}
 _TRANSIENT: set[str] = set(TRANSIENT_TYPES)
@@ -100,7 +109,7 @@ _TRANSIENT: set[str] = set(TRANSIENT_TYPES)
 
 def register_event_type(type_: str, model: type[BaseModel], *,
                         transient: bool = False) -> None:
-    """词表注册(框架 64 类型启动期注册;插件运行时注册 plugin.<id>.<name>)。
+    """词表注册(框架 70 类型启动期注册;插件运行时注册 plugin.<id>.<name>)。
 
     重复注册拒绝(EVT-102,§3.8 只增不改):破坏性变更 = 新类型名,旧类型冻结。
     """
@@ -164,7 +173,7 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 64 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 7 项
+# 70 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 13 项
 # 按 §7 登记:llm.retry F028 / plan.done·plan.aborted F046 / schedule.registered·
 # updated·removed·blocked·missed F048;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
@@ -242,11 +251,24 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     ("system.error", SystemErrorPayload, False),
     ("todo.updated", TodoUpdatedPayload, False),
     ("syscheck.fail", SyscheckFailPayload, False),
+    # F032/F014 策略与预算事件(F032 预算闸/BudgetGuard 与 scope 单调收紧同源落盘)
+    ("scope.updated", ScopeUpdatedPayload, False),
+    ("budget.paused", BudgetPausedPayload, False),
+    # #38 agent 反问(F063 词表外新增:user.question/answer 对,ask_id=question seq)
+    ("user.question", UserQuestionPayload, False),
+    ("user.answer", UserAnswerPayload, False),
+    # F073 技能系统装载审计(skill.load 工具调用留痕;目录注入另走 sysprompt 段)
+    ("skill.used", SkillUsedPayload, False),
+    ("skill.installed", SkillInstalledPayload, False),
+    ("skill.removed", SkillRemovedPayload, False),
+    ("skill.rollback", SkillRolledBackPayload, False),
+    # 配置热更审计(瞬时,仅总线:无会话维度,不进 JSONL)
+    ("config.updated", ConfigUpdatedPayload, True),
 )
 
 
 def _install_core_vocabulary() -> None:
-    """框架 64 类型启动期注册(模块导入即完成;只增不改)。"""
+    """框架 70 类型启动期注册(模块导入即完成;只增不改)。"""
     for type_, model, transient in _CORE_EVENT_TYPES:
         register_event_type(type_, model, transient=transient)
 

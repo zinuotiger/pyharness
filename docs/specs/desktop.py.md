@@ -113,7 +113,8 @@ class DesktopApp:
         a.add_api_route("/api/stream", stream_sse, methods=["GET"])                 # SSE 事件流
         a.add_api_route("/api/sessions", create_message, methods=["POST"])          # 门面写:task_queue
         a.add_api_route("/api/approvals/pending", pending_approvals, methods=["GET"])
-        a.add_api_route("/api/approvals/{aid}", decide_approval, methods=["POST"])  # 审批弹窗裁决
+        a.add_api_route("/api/approvals/{sid}/{aid}", decide_approval_for, methods=["POST"])
+        a.add_api_route("/api/approvals/{aid}", decide_approval, methods=["POST"])  # 兼容单会话
         a.add_api_route("/api/budget/{sid}", budget_dashboard, methods=["GET"])     # 预算仪表盘
         a.add_api_route("/api/attachments", upload_attachment, methods=["POST"])    # F061 图片(可选)
         a.add_exception_handler(PyHError, api_error_handler)

@@ -225,8 +225,17 @@ class AgentLoop:
         由 llm 内部消化;llm.request/usage 事件由 llm 层落日志,本函数不越权。
         """
         hist = ctx.session.derive_messages(ctx.scope.window_tokens)  # 日志现派生(INV-01)
-        resp = await ctx.llm.chat(hist, tools=ctx.tools.schemas_for(ctx.scope),
-                                  ctx=ctx)          # llm.chat 须 ctx(落 request/usage 事件)
+        # F010:装配器在岗(engine 注入 ctx.sysprompt)则先装配——system 段恒首、
+        # 护栏段恒末、超窗头部截断(装配器内部,见 system_prompt.py);缺位 = 裸历史
+        sysprompt = getattr(ctx, "sysprompt", None)
+        if sysprompt is not None:
+            hist = sysprompt.assemble(hist, ctx=ctx)
+        # F027:ctx.streaming(桌面 SSE)走 chat_stream——chunk 仅上总线不入日志,
+        # 聚合后与 chat 同型返回(append-only 不变式不受影响);CLI/单测默认非流式
+        chat_fn = ("chat_stream" if getattr(ctx, "streaming", False) else "chat")
+        resp = await getattr(ctx.llm, chat_fn)(
+            hist, tools=ctx.tools.schemas_for(ctx.scope), ctx=ctx)
+        # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""
             if not content:                           # llm 双空响应:模型域未预期
@@ -364,6 +373,14 @@ class AgentLoop:
                 raise PyHError("CYC-999",
                                ctx={"hint": "wake 拉起 run 前 loop 未绑定 ctx"
                                             "(请先经 run(ctx) 或 wake(env, ctx))"})
+            # F058 压缩在请求边界执行(loop idle;compactor 内部再判双条件/忙态):
+            # 折叠旧段为摘要 → context.compacted 强同步声明 → 本轮 derive 即压缩视图
+            comp = getattr(ctx, "compactor", None)
+            if comp is not None and callable(getattr(comp, "run_if_needed", None)):
+                try:
+                    await comp.run_if_needed(ctx)
+                except PyHError as e:                 # 压缩失败不阻断对话(截窗兜底)
+                    log.warning("pre-run compaction skipped code=%s", e.code)
             return await self.run(ctx)
         return None                                   # running:当前 run 结束自动取下一件
 

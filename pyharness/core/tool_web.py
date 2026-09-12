@@ -40,10 +40,9 @@ CFG.md §3.2(loop.content.search_result_chars=8000、fetch_max_chars=32768)/§3.
 7. html_to_markdown 命名与防御上限:_Extractor/_TextExtractor 伪码两处并存,取
    _TextExtractor;_MAX_MD 伪码引用未列值,与 RAW_HTML_MAX 同为 2MB(HTML 原文本
    就 ≤2MB,Markdown 为其子集,超限由调用方 spill 兜底)。
-8. _DEFAULT_SEARCH_ENDPOINT 为契约占位:CFG.md 未登记实现级端点键(规格原文:
-   『需用户可配时按 CFG 登记流程补入』)→ 常量只作错误 ctx/日志的后端标识,搜索
-   执行完全依赖装配注入的 ctx.search_backend;未接线 = 装配 bug → CYC-999 fail-
-   closed(绝不回落进程外默认端点,防误外发)。
+8. 搜索后端:默认装配 BingRssBackend(无 key,稳定 XML),保留 DuckDuckGoBackend
+   作为可选 HTML 后端;端点由 security.network.search_backend/search_endpoint
+   控制。web.* 仍受 scope 的 allowed_domains 显隐约束,未配置时 fail-closed。
 
 依赖方向(INV-08):本文件 → errors(raise_code)、tools_registry(ToolDefinition 五
 要素)、httpx(唯一外发传输,openai 传输层同库)、urllib.parse/html.parser(标准库
@@ -55,9 +54,11 @@ import html.parser
 import inspect
 import logging
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import (parse_qs, urlencode, urljoin, urlsplit,
+                           unquote)
 
 import httpx
 
@@ -93,9 +94,6 @@ BINARY_SAMPLE: int = 8192
 
 _MAX_MD: int = 2_097_152
 """html_to_markdown 防御性输出上限(= RAW_HTML_MAX;超限由调用方 spill,偏离 7)。"""
-
-_DEFAULT_SEARCH_ENDPOINT: str = "builtin-search-endpoint(ctx.search_backend 装配注入)"
-"""内置搜索服务端点占位(CFG 未登记实现级键,偏离 8;仅供 ctx/错误标识)。"""
 
 _MAX_REDIRECT_ADVICE: str = "重定向超过 3 跳,已停止"
 """超跳数回喂文案(spec 伪码 advice)。"""
@@ -305,10 +303,12 @@ async def web_search(args: dict, ctx: Any) -> dict:
                    policy_ref="PRD F037 / CFG security.network.web_search_per_session",
                    advice=f"本会话搜索次数已达上限({limit});"
                           "改用 web.fetch 直抓已知 URL 或新开会话")
-    key = _get_secret(ctx, "SEARCH_API_KEY")    # F016 单一读取口
-    if key is None:
-        raise_code("CRED-701", hint="配置 SEARCH_API_KEY(F016)")
     backend = getattr(ctx, "search_backend", None)
+    key = _get_secret(ctx, "SEARCH_API_KEY")    # F016 单一读取口
+    needs_key = True if backend is None else bool(
+        getattr(backend, "requires_key", True))
+    if needs_key and key is None:
+        raise_code("CRED-701", hint="配置 SEARCH_API_KEY(F016)")
     if backend is None or not callable(getattr(backend, "search", None)):
         raise_code("CYC-999", module="tool_web",
                    hint="ctx.search_backend 未接线:搜索服务后端缺失"
@@ -351,6 +351,110 @@ def _summarize_search(hits: list, *, max_chars: int) -> dict:
         out.append(item)
         budget -= cost
     return {"results": out, "truncated": truncated, "total": len(hits or [])}
+
+
+# ------------------------------------------------------------ 默认搜索后端
+class _DuckDuckGoParser(html.parser.HTMLParser):
+    """Small parser for DuckDuckGo's no-JS HTML result page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hits: list[dict] = []
+        self._mode: Optional[str] = None
+        self._buf: list[str] = []
+        self._href = ""
+
+    @staticmethod
+    def _is(attrs: list, needle: str) -> bool:
+        return needle in " ".join(
+            str(v) for k, v in attrs if k in ("class", "id") and v)
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag != "a":
+            return
+        if self._is(attrs, "result__a"):
+            href = next((str(v) for k, v in attrs if k == "href" and v), "")
+            parsed = urlsplit(href)
+            qs = parse_qs(parsed.query)
+            href = unquote((qs.get("uddg") or [href])[0])
+            self._mode, self._buf, self._href = "title", [], href
+        elif self._is(attrs, "result__snippet"):
+            self._mode, self._buf = "snippet", []
+
+    def handle_data(self, data: str) -> None:
+        if self._mode:
+            self._buf.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or not self._mode:
+            return
+        text = " ".join("".join(self._buf).split())
+        if self._mode == "title" and text and self._href:
+            self.hits.append({"title": text, "url": self._href,
+                              "snippet": ""})
+        elif self._mode == "snippet" and text and self.hits:
+            if not self.hits[-1]["snippet"]:
+                self.hits[-1]["snippet"] = text
+        self._mode, self._buf, self._href = None, [], ""
+
+
+class DuckDuckGoBackend:
+    """No-key HTML search backend for local/agent use.
+
+    ``web.search`` still requires a non-empty domain allowlist at scope level so
+    the default security posture remains fail-closed.  Once a caller explicitly
+    enables the network domain, this backend provides a working search without
+    an API key.
+    """
+
+    requires_key = False
+
+    def __init__(self, endpoint: str = "https://html.duckduckgo.com/html/") -> None:
+        self.endpoint = endpoint
+
+    async def search(self, *, query: str, top_k: int, key: Optional[str] = None) -> list:
+        url = f"{self.endpoint}?{urlencode({'q': query})}"
+        resp = await _http_once(None, url, max_bytes=RAW_HTML_MAX)
+        if resp.status >= 400:
+            raise_code("TLB-805", url=url, http_status=resp.status,
+                       advice=f"DuckDuckGo HTML 搜索返回 HTTP {resp.status}")
+        parser = _DuckDuckGoParser()
+        parser.feed(resp.raw.decode("utf-8", errors="replace"))
+        parser.close()
+        return parser.hits[:max(1, int(top_k))]
+
+
+
+
+class BingRssBackend:
+    """No-key Bing RSS backend (stable XML, no HTML scraping)."""
+
+    requires_key = False
+
+    def __init__(self, endpoint: str = "https://cn.bing.com/search") -> None:
+        self.endpoint = endpoint
+
+    async def search(self, *, query: str, top_k: int, key: Optional[str] = None) -> list:
+        url = f"{self.endpoint}?format=rss&{urlencode({'q': query})}"
+        resp = await _http_once(None, url, max_bytes=RAW_HTML_MAX)
+        if resp.status >= 400:
+            raise_code("TLB-805", url=url, http_status=resp.status,
+                       advice=f"Bing RSS 搜索返回 HTTP {resp.status}")
+        try:
+            root = ET.fromstring(resp.raw.decode("utf-8", errors="replace"))
+        except ET.ParseError as exc:
+            raise_code("TLB-805", url=url, stage="parse",
+                       cause=exc, advice="Bing RSS 返回非 XML")
+        out: list[dict] = []
+        for item in root.findall(".//item"):
+            title = " ".join((item.findtext("title") or "").split())
+            link = (item.findtext("link") or "").strip()
+            snippet = " ".join((item.findtext("description") or "").split())
+            if title or link or snippet:
+                out.append({"title": title, "url": link, "snippet": snippet})
+            if len(out) >= max(1, int(top_k)):
+                break
+        return out
 
 
 # ================================================================ web.fetch
@@ -430,12 +534,12 @@ class _RawResponse:
 async def _http_once(ctx: Any, url: str, *, max_bytes: int) -> _RawResponse:
     """单跳 GET(不跟随重定向;传输 seam,偏离 1)——真实路径走 httpx。
 
-    连接 10s/总 15s 超时(httpx.Timeout(10, total=15),F038);3xx/4xx/5xx 只取
+    连接 10s/总 15s 超时(httpx.Timeout(15, connect=10),F038);3xx/4xx/5xx 只取
     头不读体(重定向/错误响应无需下载);2xx 限量读流,读满 max_bytes 即 PERS-223
     (超 2MB 拒,防内存/带宽滥用);httpx 超时/网络错误映射 TLB-805 明确原因。
     测试注入面:monkeypatch 本函数即可(mock transport,零 HTTP 外发,T-SEC-07)。
     """
-    timeout = httpx.Timeout(CONNECT_TIMEOUT, total=HTTP_TIMEOUT)
+    timeout = httpx.Timeout(HTTP_TIMEOUT, connect=CONNECT_TIMEOUT)
     try:
         async with httpx.AsyncClient(timeout=timeout,
                                      follow_redirects=False) as client:
@@ -683,7 +787,9 @@ def register(registry: Any) -> list[str]:
 
 
 __all__ = [
-    "web_search", "web_fetch", "_domain_allowed", "http_get", "html_to_markdown",
+    "web_search", "web_fetch", "BingRssBackend", "DuckDuckGoBackend",
+    "_domain_allowed",
+    "http_get", "html_to_markdown",
     "_summarize_search", "register", "PROVIDERS",
     "SEARCH_PER_SESSION", "SEARCH_RESULT_CHARS", "FETCH_MAX_CHARS",
     "RAW_HTML_MAX", "HTTP_TIMEOUT", "REDIRECT_MAX",

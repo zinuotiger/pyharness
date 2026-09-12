@@ -17,9 +17,10 @@ def test_emit_unregistered_type_rejected():
     with pytest.raises(Exception):
         bus.emit("ghost.event", {})
 
-def test_register_type_then_emit_ok():
-    """注册后 emit 不抛"""
+async def test_register_type_then_emit_ok():
+    """注册后 emit 不抛,分发协程真实 await(不泄漏未等待协程)。"""
     from pyharness.bus import EventBus
     bus = EventBus()
     bus.register_type("user.message", dict)
-    bus.emit("user.message", {"text": "hi"})
+    stats = await bus.emit("user.message", {"text": "hi"})
+    assert stats == {"delivered": 0, "errored": 0}

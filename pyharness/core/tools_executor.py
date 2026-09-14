@@ -606,9 +606,15 @@ class ToolExecutor:
                                        executed=False,
                                        message=f"审批{verdict},未执行")
         # granted ≠ 放行:重入治理授权(第二次求值 → D2;supersedes=D1)
-        # inputs_digest 与首次一致(同 call/同 args → 同绑定指纹)。
+        # inputs_digest 与首次一致(同 call/同 args → 同绑定指纹)。approval_ref =
+        # 本次 approval lifecycle 的**真实 identity**(= approval.requested 的 seq),
+        # 由 approval 侧只读访问器提供;D1 无此值(它在请求产生**之前**已发射),
+        # 属正确语义——见 INV-APPROVAL-REF(S4-P1-2 冻结口径)。
+        get_ref = getattr(ap, "approval_ref_of", None)
+        approval_ref = get_ref(call.call_id) if get_ref is not None else None
         d2 = await ctx.governance.authorize(call, ctx, prior=prior,
-                                            inputs_digest=binding)
+                                            inputs_digest=binding,
+                                            approval_ref=approval_ref)
         if d2 == "reject":                              # 批准时策略收紧 → 作废
             self._rejected.add(call.call_id)
             return ApprovalRoundResult(decision=d2, approved=True, executed=False,

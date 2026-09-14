@@ -1128,3 +1128,189 @@ class TestInputsDigestBinding:
                      call_id="dBAD"), ctx)
         assert not r.ok and "GRD-403" in r.summary
         assert prov.calls == 0
+
+
+# ================================ S4-P1-2:approval_ref 关联真实 approval identity
+class TestApprovalRef:
+    """INV-APPROVAL-REF(冻结口径):
+
+    1. D1(verdict=APPROVAL)是**审批请求决策**,产生于 ``approval.requested``
+       **之前** ⇒ ``approval_ref=None`` 是**正确语义**(approval identity 尚未存在)。
+    2. ``approval.requested`` 产生稳定 ``approval_id``(= 其 seq)。
+    3. ``approval.granted/denied/timeout`` 携带同一 ``approval_id``。
+    4. 审批后重新授权的 **D2** 携带该 ``approval_id`` 作为 ``approval_ref``。
+    5. ``D2.supersedes == D1.decision_id``。
+    """
+
+    @staticmethod
+    def _setup(tmp_path, *, danger="high", cfg=None):
+        defn = mk_defn(name="fs.write_file", danger=danger, schema=WRITE_SCHEMA)
+        prov = Recorder({"ok": True})
+        reg = make_registry(defn, providers={defn.name: prov})
+        sess = AsyncSess()
+        ap = ApprovalProvider(channel="cli", config=cfg)
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), approval=ap)
+        return reg, prov, sess, ap, ctx
+
+    @staticmethod
+    def _call(call_id):
+        return ToolCall(name="fs.write_file",
+                        raw_args={"path": "s/x.txt", "content": "n"},
+                        call_id=call_id)
+
+    async def test_t1_d1_is_approval_with_none_ref(self, tmp_path):
+        """T1:D1 verdict=APPROVAL 且 approval_ref is None(**正确语义**)。"""
+        reg, prov, sess, ap, ctx = self._setup(tmp_path)
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("R1"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        d1 = sess.of("decision.issued")[0]
+        assert d1["payload"]["verdict"] == "approval"
+        assert d1["payload"]["approval_ref"] is None      # 请求前决策 → 无 identity
+        ap.approve(sess.of("approval.requested")[0]["seq"], by="cli:alice")
+        await asyncio.wait_for(task, 5)
+
+    async def test_t2_approval_id_is_requested_seq(self, tmp_path):
+        """T2:approval identity == approval.requested 的 seq(事件本身)。
+
+        只读访问器在**结算后**可查(与 ``grant_binding`` 同型生命周期)。
+        """
+        reg, prov, sess, ap, ctx = self._setup(tmp_path)
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("R2"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        rid = sess.of("approval.requested")[0]["seq"]
+        ap.approve(rid, by="cli:alice")
+        await asyncio.wait_for(task, 5)
+        assert ap.approval_ref_of("R2") == rid            # = 请求事件 seq
+
+    async def test_t3_granted_carries_same_approval_id(self, tmp_path):
+        """T3:approval.granted.approval_id == approval.requested 的 seq。"""
+        reg, prov, sess, ap, ctx = self._setup(tmp_path)
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("R3"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        rid = sess.of("approval.requested")[0]["seq"]
+        ap.approve(rid, by="cli:alice")
+        await asyncio.wait_for(task, 5)
+        assert sess.of("approval.granted")[0]["payload"]["approval_id"] == rid
+
+    async def test_t4_d2_binds_ref_and_supersedes(self, tmp_path):
+        """T4:D2.approval_ref == approval.granted.approval_id;
+        D2.supersedes == D1.decision_id;D2.verdict = 真实 runtime 结果(APPROVAL)。"""
+        reg, prov, sess, ap, ctx = self._setup(tmp_path)
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("R4"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        rid = sess.of("approval.requested")[0]["seq"]
+        ap.approve(rid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok and prov.calls == 1                   # 绑定校验通过 → 执行
+        d1, d2 = (e["payload"] for e in sess.of("decision.issued"))
+        assert d2["verdict"] == "approval"                # 真实 runtime:重入仍判 approval
+        assert d2["approval_ref"] == sess.of(
+            "approval.granted")[0]["payload"]["approval_id"]
+        assert d2["approval_ref"] == rid
+        assert d2["supersedes"] == d1["decision_id"]
+        assert d2["inputs_digest"] == d1["inputs_digest"] and d2["inputs_digest"] != ""
+
+    async def test_t5_denied(self, tmp_path):
+        """T5:denied → D1.approval_ref None;denied 关联同一 identity;零执行。"""
+        reg, prov, sess, ap, ctx = self._setup(tmp_path)
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("R5"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        rid = sess.of("approval.requested")[0]["seq"]
+        ap.deny(rid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert not r.ok and prov.calls == 0               # 零 provider 执行
+        dec = sess.of("decision.issued")
+        assert len(dec) == 1                              # 无 D2
+        assert dec[0]["payload"]["approval_ref"] is None
+        assert sess.of("approval.denied")[0]["payload"]["approval_id"] == rid
+
+    async def test_t6_timeout(self, tmp_path):
+        """T6:timeout → D1.approval_ref None;timeout 关联同一 identity;零执行。"""
+        cfg = types.SimpleNamespace(security=types.SimpleNamespace(
+            approval=types.SimpleNamespace(ttl_ms=30, merge_window_s=60)))
+        reg, prov, sess, ap, ctx = self._setup(tmp_path, cfg=cfg)
+        r = await asyncio.wait_for(
+            ToolExecutor(reg).execute(self._call("R6"), ctx), 5)
+        assert not r.ok and prov.calls == 0
+        dec = sess.of("decision.issued")
+        assert len(dec) == 1
+        assert dec[0]["payload"]["approval_ref"] is None
+        rid = sess.of("approval.requested")[0]["seq"]
+        assert sess.of("approval.timeout")[0]["payload"]["approval_id"] == rid
+
+    async def test_t8_non_approval_paths_have_none_ref(self, tmp_path):
+        """T8:普通 ALLOW / REJECT 不凭空产生 approval_ref。"""
+        s1, p1 = AsyncSess(), Recorder({"content": "hi"})
+        r1 = make_registry(mk_defn(), providers={"fs.read_file": p1})
+        c1 = make_ctx(s1, FakeScope(str(tmp_path)), chain=GuardChain(session=s1))
+        await ToolExecutor(r1).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="R8a"), c1)
+        assert s1.of("decision.issued")[0]["payload"]["approval_ref"] is None
+        assert s1.of("approval.requested") == []          # 无 approval 事件
+
+        s2, p2 = AsyncSess(), Recorder()
+        dn = mk_defn(name="fs.delete", danger="critical", schema=WRITE_SCHEMA)
+        r2 = make_registry(dn, providers={dn.name: p2})
+        c2 = make_ctx(s2, FakeScope(str(tmp_path)), chain=GuardChain(session=s2))
+        await ToolExecutor(r2).execute(
+            ToolCall(name="fs.delete", raw_args={"path": "x"}, call_id="R8b"), c2)
+        assert s2.of("decision.issued")[0]["payload"]["approval_ref"] is None
+        assert s2.of("approval.requested") == []
+
+    async def test_t7_chain_recoverable_from_jsonl(self, tmp_path):
+        """T7:真实 JSONL 落盘 → 关闭 → 重开 replay,四条记录的关联仍可恢复。"""
+        from pyharness.bus import EventBus
+        from pyharness.core.session import SessionLog
+        from pyharness.events import EVENT_TYPES, SYNC_TYPES
+        from pyharness.persistence import open_store
+
+        sid = "s-p12-replay"
+        store = open_store(sid, dir=tmp_path)
+        bus = EventBus()
+
+        async def adapter(t, p):
+            if hasattr(p, "model_dump_json"):
+                await store.append(p, sync=t in SYNC_TYPES)
+
+        for t in EVENT_TYPES:
+            bus.subscribe(t, adapter, owner="persistence")
+        log = SessionLog(sid=sid, persistence=store, bus=bus)
+        # 真实会话须以 session.created 引导(seq=1,EVT-106)
+        await log.append("session.created", {"title": "", "model": "m"},
+                         actor="system")
+        await store.flush()
+        ap = ApprovalProvider(channel="cli")
+        defn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        prov = Recorder({"ok": True})
+        reg = make_registry(defn, providers={defn.name: prov})
+        ctx = make_ctx(log, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=log), approval=ap)
+
+        task = asyncio.create_task(ToolExecutor(reg).execute(self._call("RP"), ctx))
+        await wait_until(lambda: any(
+            e.type == "approval.requested" for e in store.replay()))
+        rid = next(e.seq for e in store.replay()
+                   if e.type == "approval.requested")
+        ap.approve(rid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok
+        await store.flush()
+        store.close()
+
+        # 重启:从 JSONL 重放
+        store2 = open_store(sid, dir=tmp_path)
+        by_type = {}
+        for e in store2.replay():
+            by_type.setdefault(e.type, []).append(e)
+        d1 = by_type["decision.issued"][0]
+        req = by_type["approval.requested"][0]
+        granted = by_type["approval.granted"][0]
+        d2 = by_type["decision.issued"][1]
+        # 关联可恢复:D1(None) → requested.seq → granted.approval_id → D2.approval_ref
+        assert d1.payload["approval_ref"] is None
+        assert granted.payload["approval_id"] == req.seq
+        assert d2.payload["approval_ref"] == req.seq
+        assert d2.payload["supersedes"] == d1.payload["decision_id"]
+        store2.close()

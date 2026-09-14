@@ -216,6 +216,9 @@ class ApprovalProvider:
         self._tasks: set = set()                # fire-and-forget 任务登记(防 GC)
         self._grant_slots: dict[str, str] = {}  # call_id → granted 绑定指纹(executor
         # 重入校验用;call_id 每次调用唯一,单 slot 无生命周期问题)
+        self._ref_slots: dict[str, int] = {}    # call_id → approval identity(S4-P1-2:
+        # = 该次 approval.requested 的 seq(batch lead);结算后仍可查,供治理层把
+        # D2.approval_ref 关联到真实 approval lifecycle——不新造 identity)
         # 裁决事件订阅:approval.granted/denied/timeout → on_verdict(DIS-SEAM §6.2
         # Definition.subscriptions 同款);owner="approval" 供 detach 摘除。
         if self._bus is not None:
@@ -476,6 +479,7 @@ class ApprovalProvider:
         裁决即 APR-503(重放闸)。合并等待者各自 waiter 在此级联解决(每个等待者
         各自配对裁决结果,granted 后各自独立重入 guard 链)。
         """
+        lead_ref = req.approval_id                   # approval identity(仅 lead 有)
         for w in list(req.batch):
             if w.state != "pending":
                 continue
@@ -486,6 +490,11 @@ class ApprovalProvider:
             if verdict == "granted" and w.call_id:
                 # 授权↔执行绑定:executor 重入 approval 决策时按 call_id 取此校验
                 self._grant_slots[w.call_id] = w.binding
+            if w.call_id and lead_ref is not None:
+                # S4-P1-2:绑定 call_id → approval identity(= approval.requested 的
+                # seq)。merged waiter 自身无 approval_id,按批共享 lead 的 identity;
+                # 不新造 uuid,identity 恒来自真实请求事件。
+                self._ref_slots[w.call_id] = lead_ref
             if not w.waiter.done():
                 w.waiter.set_result(verdict)     # 唤醒 request() 等待者
         if req.approval_id is not None and req.approval_id in self._pending:
@@ -612,6 +621,19 @@ class ApprovalProvider:
         即"批准针对异参数",拒绝执行(GRD-403)。
         """
         return self._grant_slots.get(call_id)
+
+    def approval_ref_of(self, call_id: str) -> Optional[int]:
+        """该 call_id 关联的 **approval identity**(S4-P1-2,只读)。
+
+        值 = 该次 ``approval.requested`` 的 seq(60s 合并批内共享 lead 的 identity)。
+        结算后仍可查(与 ``grant_binding`` 同型生命周期)。``None`` = 该 call_id
+        **从未产生过** approval 请求(普通 allow/reject 路径,或信任名单命中路径
+        ——后者不落 ``approval.requested``,故无 identity,属正确语义)。
+
+        治理层经执行侧把该值填入审批后重新授权决策(D2)的 ``approval_ref``;
+        不新造 identity、不用 decision_id/call_id 代替。
+        """
+        return self._ref_slots.get(call_id)
 
     @staticmethod
     def _sid_of(ctx: Any, sess: Any) -> str:

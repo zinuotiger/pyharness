@@ -152,6 +152,28 @@ class ExecResult:
     elapsed_ms: float = 0.0
 
 
+# ========================================================= ApprovalRoundResult
+@dataclass(frozen=True)
+class ApprovalRoundResult:
+    """关2.5 审批编排结果(S3-2-2;取代"allow"/摘要文本的混合字符串返回契约)。
+
+    字段语义(互不等价):
+      - ``decision`` : 本轮治理决策——未获批时为 **D1**;获批重入后为 **D2**
+        (``D2.supersedes == D1.decision_id``);
+      - ``approved`` : **人类是否批准**(granted);
+      - ``executed`` : 是否**放行至关3**(获批 ≠ 放行:重入 reject / 绑定不符时不放行);
+      - ``message``  : 用户可见文案(``executed=False`` 时由调用方原样回喂)。
+
+    边界:``denied``/``timeout``/``APR-501`` 一律 **不产生 D2、不再次 authorize、
+    不执行 provider**(该语义归 approval transport + executor,R1)。
+    """
+
+    decision: Any
+    approved: bool
+    executed: bool
+    message: str = ""
+
+
 # ================================================================ 文本辅助
 def render_result_text(raw: Any) -> str:
     """Provider 原始返回 → 统一文本(dict/list JSON 序列化;str 原样;None → 空)。"""
@@ -442,19 +464,19 @@ class ToolExecutor:
                             "raw_args": dict(call.raw_args or {}),
                             "call_id": call.call_id},
                            actor="tool", trace=self._trace(call))
-        # ---- 关2a scope 前置:不可见 → 终局拒(GRD-401;events 由 _reject 自写)
-        if not ctx.scope.can_use(call.name):
-            return await self._reject(ctx, call, "scope-hidden", "GRD-401")
-        # ---- 关2b guard 单调链(F014;reject 已强同步 guard.rejected,零副作用)
-        d = str(await ctx.guard.evaluate(call, ctx.scope))
-        if d == "reject":
+        # ---- 关2 治理授权(S3-2-2:唯一治理入口):scope 前置 + guard 单调链 +
+        # Decision + decision.issued。scope 前置的运行时**唯一所有者**是
+        # GuardChain._evaluate_full(职责上提,非重复计算);executor 不再自算
+        # scope.can_use,也不再直呼 ctx.guard.evaluate。
+        d = await ctx.governance.authorize(call, ctx)
+        if d == "reject":                               # 终局拒(含 scope-hidden)
             self._rejected.add(call.call_id)            # 广义防重放(偏离 11)
             return ExecResult(ok=False, summary="guard 拒绝,未执行")
         # ---- 关2.5 审批(F015;danger≥high 由链出 approval 决策)
         if d == "approval":
-            d = await self._approval_round(ctx, call, args)
-            if d != "allow":
-                return ExecResult(ok=False, summary=d)  # 非放行 → 不执行
+            round_ = await self._approval_round(ctx, call, args, prior=d)
+            if not round_.executed:
+                return ExecResult(ok=False, summary=round_.message)  # 非放行 → 不执行
         # ---- 关3 Provider 执行(线程池 + 超时掐断 TLB-805)
         timeout = int(defn.timeout_s) or DEFAULT_TOOL_TIMEOUT
         started = False
@@ -533,17 +555,28 @@ class ToolExecutor:
             raise_code("CYC-999", module="tools_executor",
                        hint="ctx.guard 未接线:无 guard.evaluated 的执行非法"
                             "(F031 自检兜底)")
+        if getattr(ctx, "governance", None) is None:
+            raise_code("CYC-999", module="tools_executor",
+                       hint="ctx.governance 未接线:关2 唯一治理入口缺失,"
+                            "拒绝执行(S3-2-2)")
 
     async def _approval_round(self, ctx: Any, call: ToolCall,
-                              args: dict) -> str:
-        """关2.5 审批编排:request → granted 重入链起点 → 放行/拒绝裁决。
+                              args: dict, *, prior: Any) -> ApprovalRoundResult:
+        """关2.5 审批编排(request → granted 重入治理授权 → 放行/拒绝裁决)。
 
-        返回 "allow" = 可执行;否则返回 ExecResult 用 summary 文本(调用方原样
-        返回)。denied/timeout = 不执行;APR-501(headless 运行时无通道)→ 记
-        rejected id 后拒;granted 后重入 guard 链:reject → GRD-403(批准作废,
-        单调性高于人类即时意志);approval(重入仍要审批)== 本次调用同参刚获
-        批准,但须通过绑定校验(本调用参数指纹 == 审批提供器为该 call_id 记录
-        的绑定)才放行,不一致 = 批准针对异参数 → 拒(偏离 3 收紧);allow → 放行。
+        返回 ``ApprovalRoundResult``(S3-2-2:取代混合字符串契约)。语义:
+
+        - ``denied`` / ``timeout``:不产生 D2、不再次 authorize、不执行 provider
+          ——返回 ``decision=prior(D1)``, ``approved=False``, ``executed=False``;
+        - ``APR-501``(headless 无通道):同上,并记 ``_rejected``;
+        - ``granted``:重入治理授权 ``authorize(prior=D1)`` 产生 **D2**;
+          重入 reject → GRD-403(批准作废,单调性高于人类即时意志);
+          重入仍 approval → 须过绑定校验(本调用参数指纹 == 审批提供器为该
+          call_id 记录的绑定)才放行,不一致 = 批准针对异参数 → 拒(偏离 3 收紧);
+          allow/校验通过 → 放行至关3。
+
+        **R1**:``denied``/``timeout`` 的语义归 approval transport + executor,
+        不向 ``DecisionEngine`` 传 ``approval_verdict``。
         """
         ap = getattr(ctx, "approval", None)
         if ap is None:
@@ -556,21 +589,30 @@ class ToolExecutor:
         except PyHError as e:
             if e.code == "APR-501":                     # headless 无通道:直接拒
                 self._rejected.add(call.call_id)
-                return "审批不可用(APR-501),未执行"
+                return ApprovalRoundResult(decision=prior, approved=False,
+                                           executed=False,
+                                           message="审批不可用(APR-501),未执行")
             raise                                       # 其余错误:装配/落盘故障上抛
         if verdict != "granted":                        # denied/timeout = 不执行
-            return f"审批{verdict},未执行"
-        d = str(await ctx.guard.evaluate(call, ctx.scope))  # granted≠放行:重入
-        if d == "reject":                               # 批准时策略收紧 → 作废
+            return ApprovalRoundResult(decision=prior, approved=False,
+                                       executed=False,
+                                       message=f"审批{verdict},未执行")
+        # granted ≠ 放行:重入治理授权(第二次求值 → D2;supersedes=D1)
+        d2 = await ctx.governance.authorize(call, ctx, prior=prior)
+        if d2 == "reject":                              # 批准时策略收紧 → 作废
             self._rejected.add(call.call_id)
-            return "审批后 guard 重入拒绝(GRD-403 语义)"
-        if d == "approval":                             # 重入仍要求审批(同参已批)
+            return ApprovalRoundResult(decision=d2, approved=True, executed=False,
+                                       message="审批后 guard 重入拒绝(GRD-403 语义)")
+        if d2 == "approval":                            # 重入仍要求审批(同参已批)
             check = getattr(ap, "grant_binding", None)
             if check is not None and check(call.call_id) != binding:
                 # 绑定不一致 = 该 grant 不是针对本次参数的授权(篡改/复用)
                 self._rejected.add(call.call_id)
-                return "审批绑定校验失败(GRD-403):批准与本次调用参数不一致,拒绝执行"
-        return "allow"      # allow / approval(绑定校验通过)放行
+                return ApprovalRoundResult(
+                    decision=d2, approved=True, executed=False,
+                    message="审批绑定校验失败(GRD-403):批准与本次调用参数不一致,"
+                            "拒绝执行")
+        return ApprovalRoundResult(decision=d2, approved=True, executed=True)
 
     async def _reject(self, ctx: Any, call: ToolCall, guard_id: str,
                       policy_ref: str) -> ExecResult:

@@ -1,7 +1,7 @@
 """pyharness/events/payload.py — 各事件负载模型 (specs/events.py.md 词表清单)
 
 按 EVENT-SCHEMA §3 词汇总表为每个事件实现一个 pydantic 负载模型
-(extra="forbid",拒多余字段——F026 同纪律);74 事件词表(72 payload 模型) + llm.retry
+(extra="forbid",拒多余字段——F026 同纪律);75 事件词表(73 payload 模型) + llm.retry
 落盘注册见 vocab.py 的 _CORE_EVENT_TYPES。
 
 约定:✓=必填字段不带默认值;—=可选字段 Optional/显式默认;载荷内
@@ -582,6 +582,39 @@ class PolicyUpdatedPayload(_PayloadBase):
     op: str = Field(min_length=1)
     added: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=1)
+
+
+class DecisionIssuedPayload(_PayloadBase):
+    """decision.issued:治理层决策事件(ADR-015;M3/S3-2-2)。
+
+    与 ``guard.evaluated``(**规则级**:哪些规则参与求值)并存,本事件是
+    **治理级**:谁在什么策略下作出什么决定、依据哪些策略引用、针对哪份输入。
+    两者经 ``Envelope.trace.call_id`` 双向关联(与 tool.call 同源)。
+
+    - ``verdict`` ∈ ``allow|reject|approval``——**不得**使用 ``guard.evaluated``
+      载荷的审计别名(``deny`` / ``need_approval``);用 ``str`` 而非 ``Literal``:
+      值域校验在治理层,避免 events 反向依赖 governance 或复制值域成第二真源
+      (与 ``PolicyUpdatedPayload.op`` 同因)。
+    - ``principal_*`` **扁平三字段**:沿用本文件平坦字段风格,不引入嵌套模型,
+      避免复制新的嵌套 schema(嵌套 identity 对象留 S4 Receipt 再议)。
+    - ``call_id`` 走 ``Envelope.trace``(**不入本载荷**)——"传输元数据走 trace"
+      既有先例。
+    - 字段与 ``governance.decision.Decision`` 一一对应;``supersedes`` 表达审批
+      重入时后一决策对前一决策的替代关系(无前序为空)。
+    """
+    decision_id: str = Field(min_length=1)
+    verdict: str = Field(min_length=1)
+    tool: str = ""
+    guard_ids: list[str] = Field(default_factory=list)
+    policy_refs: list[str] = Field(default_factory=list)
+    policy_fingerprint: str = ""
+    inputs_digest: str = ""
+    principal_kind: str = Field(min_length=1)
+    principal_id: str = Field(min_length=1)
+    principal_channel: Optional[str] = None
+    ts: str = ""
+    approval_ref: Optional[int] = None
+    supersedes: Optional[str] = None
 
 
 class SkillInstalledPayload(_PayloadBase):

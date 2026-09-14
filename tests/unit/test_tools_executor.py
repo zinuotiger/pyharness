@@ -37,6 +37,8 @@ from pyharness.core.tools_executor import (ToolExecutor, render_result_text,
 from pyharness.core.tools_guard import GuardChain, ToolCall
 from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
 from pyharness.errors import PyHError
+from pyharness.governance import DecisionEngine, GovernanceContext
+from pyharness.governance.policy import Policy, PolicyEngine, PolicyRegistry
 
 # ===================================================================== 替身
 READ_SCHEMA = {"type": "object",
@@ -180,11 +182,22 @@ def make_registry(*defns, providers: dict | None = None) -> ToolRegistry:
 
 
 def make_ctx(sess: AsyncSess, scope: FakeScope, *, chain=None, approval=None,
-             spill=None, channel: str = "cli", headless: bool = False):
-    """execute 的 ctx 替身(会话门面注入面 = session/scope/guard/approval/storage)。"""
+             spill=None, channel: str = "cli", headless: bool = False,
+             governance: bool = True):
+    """execute 的 ctx 替身(会话门面注入面 = session/scope/guard/approval/storage)。
+
+    S3-2-2:关 2 走 ``ctx.governance.authorize(...)`` 唯一治理入口,故默认按
+    ``chain`` 装配一个真实 ``GovernanceContext``(纯治理编排,无 I/O 追加)。
+    """
     storage = types.SimpleNamespace(spill=spill) if spill is not None else None
+    gov = None
+    if governance and chain is not None:
+        eng = PolicyEngine(policy=Policy("test:v1", "1.0"),
+                           registry=PolicyRegistry(), chain=chain)
+        gov = GovernanceContext(policy=eng, decisions=DecisionEngine())
     return types.SimpleNamespace(session=sess, scope=scope, guard=chain,
                                  approval=approval, storage=storage,
+                                 governance=gov,
                                  channel=channel, headless=headless,
                                  session_id=sess.sid)
 
@@ -257,7 +270,8 @@ class TestParseToolCall:
 # ================================================================ 四关执行
 class TestExecutePipeline:
     async def test_happy_full_pipeline_event_order(self, tmp_path: Path):
-        """GWT-T7-02:事件序 tool.call→guard.evaluated(allow)→tool.result。"""
+        """GWT-T7-02:事件序 tool.call→guard.evaluated(allow)→decision.issued
+        →tool.result(S3-2-2:关2 经 authorize 发治理决策事件,INV-G1)。"""
         sess, prov = AsyncSess(), Recorder({"content": "hi"})
         defn = mk_defn()
         reg = make_registry(defn, providers={defn.name: prov})
@@ -270,7 +284,7 @@ class TestExecutePipeline:
         assert r.ok and r.summary == '{"content":"hi"}'
         assert r.truncated is False and r.elapsed_ms > 0
         assert ordered_types(sess) == ["tool.call", "guard.evaluated",
-                                       "tool.result"]
+                                       "decision.issued", "tool.result"]
         call_ev = sess.of("tool.call")[0]
         assert call_ev["actor"] == "tool"
         assert call_ev["trace"] == {"parent_seq": 3}
@@ -887,3 +901,134 @@ def self_reg(prov: Recorder) -> ToolRegistry:
     reg.register_tool(mk_defn())
     reg.bind_provider("fs.read_file", prov)
     return reg
+
+
+# ==================================== S3-2-2:关2 单一治理入口(authorize)接线
+class TestGovernanceWiring:
+    """S3-2-2:executor 关 2 经 ``ctx.governance.authorize`` 唯一入口;
+    scope-hidden 亦经此入口(scope 前置的唯一运行时所有者 = GuardChain)。"""
+
+    async def test_scope_hidden_goes_through_authorize(self, tmp_path: Path):
+        """scope-hidden → authorize → REJECT Decision → decision.issued;
+        Provider 零执行;``can_use`` 恰一次(无重复计算)。"""
+        sess, prov = AsyncSess(), Recorder()
+        reg = make_registry(mk_defn(), providers={"fs.read_file": prov})
+        scope = FakeScope(str(tmp_path), allowed=[])      # 不可见
+        ctx = make_ctx(sess, scope, chain=GuardChain(session=sess))
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="g1"), ctx)
+        assert not r.ok and r.summary.startswith("guard 拒绝")
+        assert prov.calls == 0
+        assert scope.asked == ["fs.read_file"]            # 单一所有权:恰一次
+        assert len(sess.of("guard.evaluated")) == 1
+        assert len(sess.of("guard.rejected")) == 1
+        dec = sess.of("decision.issued")
+        assert len(dec) == 1                              # 一 Decision 一 Event
+        assert dec[0]["payload"]["verdict"] == "reject"
+        assert dec[0]["payload"]["guard_ids"] == ["scope-hidden"]
+        assert dec[0]["sync"] is True                     # 强同步治理证据
+        assert dec[0]["trace"] == {"call_id": "g1"}
+        assert sess.of("tool.result") == []
+
+    async def test_reject_event_order(self, tmp_path: Path):
+        """reject 序:tool.call → guard.evaluated → guard.rejected
+        → decision.issued → 无 tool.result。"""
+        sess, prov = AsyncSess(), Recorder()
+        defn = mk_defn(name="fs.delete", danger="critical",
+                       schema=WRITE_SCHEMA)
+        reg = make_registry(defn, providers={defn.name: prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess))
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.delete", raw_args={"path": "x"},
+                     call_id="g-order"), ctx)
+        assert not r.ok and r.summary == "guard 拒绝,未执行"
+        assert ordered_types(sess) == ["tool.call", "guard.evaluated",
+                                       "guard.rejected", "decision.issued"]
+        assert sess.of("tool.result") == [] and prov.calls == 0
+        payload = sess.of("decision.issued")[0]["payload"]
+        assert payload["verdict"] == "reject"
+        assert payload["guard_ids"] == ["g-danger"]
+        assert payload["policy_refs"] == ["POL-DGR-1"]
+
+    async def test_require_wiring_fail_closed_without_governance(
+            self, tmp_path: Path):
+        """缺 ctx.governance → fail-closed(CYC-999),绝不退回直呼 guard。"""
+        sess, prov = AsyncSess(), Recorder()
+        reg = make_registry(mk_defn(), providers={"fs.read_file": prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), governance=False)
+        with pytest.raises(PyHError) as ei:
+            await ToolExecutor(reg).execute(
+                ToolCall(name="fs.read_file", raw_args={"path": "a"},
+                         call_id="g2"), ctx)
+        assert ei.value.code == "CYC-999"
+        assert prov.calls == 0
+
+    def test_executor_has_no_direct_guard_evaluate(self):
+        """AST 守卫:executor 生产路径不得直呼 ``ctx.guard.evaluate``(单入口)。"""
+        import ast
+        src = (Path(__file__).resolve().parents[2]
+               / "pyharness" / "core" / "tools_executor.py")
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Attribute) and f.attr == "evaluate"
+                    and isinstance(f.value, ast.Attribute)
+                    and f.value.attr == "guard"):
+                raise AssertionError("executor 仍直呼 ctx.guard.evaluate")
+
+    async def test_approval_granted_two_decisions_linked(self, tmp_path: Path):
+        """D1(APPROVAL) → granted → D2;两条 decision.issued 一一对应且
+        ``D2.supersedes == D1.decision_id``。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        defn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        reg = make_registry(defn, providers={defn.name: prov})
+        ap = ApprovalProvider(channel="cli")
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), approval=ap)
+        task = asyncio.create_task(ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "sub/x.txt", "content": "n"},
+                     call_id="g3"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        ap.approve(sess.of("approval.requested")[-1]["seq"], by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok and prov.calls == 1
+        dec = sess.of("decision.issued")
+        assert len(dec) == 2                              # 一求值一决策一事件
+        d1, d2 = dec[0]["payload"], dec[1]["payload"]
+        assert d1["verdict"] == "approval" and d1["supersedes"] is None
+        assert d2["supersedes"] == d1["decision_id"]
+        assert d1["decision_id"] != d2["decision_id"]
+        assert all(e["sync"] is True for e in dec)
+        assert all(e["trace"] == {"call_id": "g3"} for e in dec)
+        assert all(p["principal_kind"] == "system"
+                   and p["principal_id"] == "pyharness-runtime"
+                   for p in (d1, d2))                     # 临时身份模型
+
+    @pytest.mark.parametrize("verdict", ["denied", "timeout"])
+    async def test_approval_not_granted_single_decision(self, tmp_path: Path,
+                                                        verdict: str):
+        """denied/timeout:D1 恰一条 decision.issued,无 D2,Provider 零执行。"""
+        sess, prov = AsyncSess(), Recorder()
+        defn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        reg = make_registry(defn, providers={defn.name: prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess),
+                       approval=FakeApproval([verdict]))
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "a.txt", "content": "x"},
+                     call_id="g4"), ctx)
+        assert not r.ok and r.summary == f"审批{verdict},未执行"
+        assert prov.calls == 0
+        dec = sess.of("decision.issued")
+        assert len(dec) == 1                              # 无 D2
+        assert dec[0]["payload"]["verdict"] == "approval"
+        assert dec[0]["payload"]["supersedes"] is None
+        assert len(sess.of("guard.evaluated")) == 1       # 未重入求值
+        assert sess.of("tool.result") == []

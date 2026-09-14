@@ -1,8 +1,8 @@
 """events 模块单测 — 契约:specs/events.py.md + EVENT-SCHEMA.md §3
 
-覆盖面:词表完整(74 名全量核对:基线 57 + §7 词表外扩展 17 项,含 llm.retry/
+覆盖面:词表完整(75 名全量核对:基线 57 + §7 词表外扩展 18 项,含 llm.retry/
 plan.done/plan.aborted/schedule.registered/updated/removed/blocked/missed/
-policy.updated)、Envelope 三要素(seq/type/ts UTC)、seq 连续性(EVT-101)、非法
+policy.updated/decision.issued)、Envelope 三要素(seq/type/ts UTC)、seq 连续性(EVT-101)、非法
 输入抛码(EVT-100/102/106)、payload 二次强校验、SeqState 分配器、check_seq_gap
 空洞自检;另含 S2-5 的注释/计数一致性守卫(见本文件末)。
 说明:词表完整性断言必须位于本文件最前(见 test_vocab_full),其后注册类
@@ -61,8 +61,10 @@ EXPECTED_ALL = (
     "config.updated",
     # 治理层策略事件(ADR-020;强同步)
     "policy.updated",
+    # 治理层决策事件(ADR-015;强同步)
+    "decision.issued",
 )
-assert len(EXPECTED_ALL) == 74, "测试词表清单必须恰为 74 名"
+assert len(EXPECTED_ALL) == 75, "测试词表清单必须恰为 75 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -78,8 +80,8 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 # 词表完整
 # =====================================================================
 def test_vocab_full():
-    """词表 74 名(73 核心 + policy.updated 治理层策略事件)。"""
-    assert len(EVENT_TYPES) == 74
+    """词表 75 名(73 核心 + policy.updated/decision.issued 治理层事件)。"""
+    assert len(EVENT_TYPES) == 75
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 
@@ -395,10 +397,49 @@ def test_s25_scope_events_are_registered():
 
 
 def test_s25_channel_counts():
-    """通道计数冻结:强同步 12、瞬时 3(总数 74 由 test_vocab_full 覆盖)。"""
-    assert len(EV.SYNC_TYPES) == 12
+    """通道计数冻结:强同步 13、瞬时 3(总数 75 由 test_vocab_full 覆盖)。"""
+    assert len(EV.SYNC_TYPES) == 13
     assert len(EV.TRANSIENT_TYPES) == 3
     assert "policy.updated" in EV.SYNC_TYPES          # 治理事件:强同步(ADR-020 Q3)
+    assert "decision.issued" in EV.SYNC_TYPES         # 治理决策:强同步(ADR-015)
+    assert "decision.issued" not in EV.TRANSIENT_TYPES
+
+
+def test_s32_decision_issued_payload_contract():
+    """decision.issued 载荷契约(S3-2-2):注册正确、字段面完整、严格模式。
+
+    ``verdict`` 为 ``str``(值域由治理层约束)——故此处只断言**载荷形状**与
+    **禁止审计别名入字段名**;实际产出的值域由 executor/authorize 侧测试锁定。
+    """
+    from pyharness.events.payload import DecisionIssuedPayload
+    model = EV.payload_model_for("decision.issued")
+    assert model is DecisionIssuedPayload
+    assert EV.is_registered("decision.issued") is True
+    assert EV.is_transient("decision.issued") is False
+
+    p = model(decision_id="d1", verdict="allow", tool="fs.read_file",
+              guard_ids=["g-schema"], policy_refs=["POL-FS-1"],
+              policy_fingerprint="fp", inputs_digest="dig",
+              principal_kind="system", principal_id="pyharness-runtime",
+              ts="2026-09-14T00:00:00Z")
+    assert p.verdict == "allow" and p.principal_channel is None
+    assert p.approval_ref is None and p.supersedes is None
+
+    # 必填字段缺失 → 拒
+    for missing in ("decision_id", "verdict", "principal_kind",
+                    "principal_id"):
+        kw = dict(decision_id="d", verdict="allow", principal_kind="system",
+                  principal_id="p")
+        kw.pop(missing)
+        with pytest.raises(Exception):
+            model(**kw)
+    # extra="forbid":未知字段拒
+    with pytest.raises(Exception):
+        model(decision_id="d", verdict="allow", principal_kind="system",
+              principal_id="p", call_id="c1")
+    # 审计别名不得成为字段名(verdict 值域由治理层守)
+    assert "deny" not in DecisionIssuedPayload.model_fields
+    assert "need_approval" not in DecisionIssuedPayload.model_fields
 
 
 def test_s25_scope_and_policy_event_boundary_frozen():

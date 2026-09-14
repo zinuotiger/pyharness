@@ -194,7 +194,7 @@ async def test_t8_authorize_end_to_end_allow():
     assert d.policy_fingerprint == gc.policy.current().fingerprint
     assert d.supersedes is None
     assert d.principal == _principal()
-    # S3-2-1:不得发射 decision.issued
+    # ctx 无 session → 发射降级(不写事件);有 session 的一一对应见 T18
     assert all(t != "decision.issued" for t, _, _ in sess.events)
 
 
@@ -313,3 +313,39 @@ def test_t17_evaluation_result_shape_unchanged():
     er = EvaluationResult(verdict="allow", guard_ids=("g",), policy_refs=("P",))
     assert (er.verdict, er.guard_ids, er.policy_refs) == ("allow", ("g",), ("P",))
     assert EvaluationResult("allow").guard_ids == ()
+
+
+# ============================================ S3-2-2:decision.issued 发射
+async def test_t18_authorize_emits_one_decision_issued():
+    """一次 authorize → 恰一条 decision.issued(sync=True,call_id 走 trace)。"""
+    sess = _Sess()
+    gc = _make_gc(_chain(session=sess))
+    ctx = types.SimpleNamespace(scope=_Scope(), session=sess)
+    d = await gc.authorize(_call("custom.tool", call_id="cA"), ctx,
+                           principal=_principal())
+    evs = [e for e in sess.events if e[0] == "decision.issued"]
+    assert len(evs) == 1
+    _, payload, sync = evs[0]
+    assert sync is True
+    assert payload["decision_id"] == d.decision_id
+    assert payload["verdict"] == "allow"
+    assert payload["principal_kind"] == "human"       # 显式传入者
+    assert payload["principal_id"] == "alice"
+    assert payload["principal_channel"] == "cli"
+    assert payload["supersedes"] is None
+    # call_id 走 trace,不入 payload
+    assert "call_id" not in payload
+
+
+async def test_t19_authorize_emits_for_reject_too():
+    """未传 principal → 临时 SYSTEM 身份模型;reject 同样恰一条事件。"""
+    sess = _Sess()
+    gc = _make_gc(_chain(session=sess))
+    ctx = types.SimpleNamespace(scope=_Scope(allow=False), session=sess)
+    d = await gc.authorize(_call("custom.tool"), ctx)
+    assert d.verdict is Verdict.REJECT
+    evs = [e for e in sess.events if e[0] == "decision.issued"]
+    assert len(evs) == 1 and evs[0][1]["verdict"] == "reject"
+    assert evs[0][1]["guard_ids"] == ["scope-hidden"]
+    assert evs[0][1]["principal_kind"] == "system"    # 临时身份(非 human/agent)
+    assert evs[0][1]["principal_id"] == "pyharness-runtime"

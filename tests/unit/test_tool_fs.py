@@ -29,10 +29,12 @@ import pytest
 
 from pyharness.config import Settings
 from pyharness.core import tool_fs as fs
-from pyharness.core.tools_guard import Decision, ToolCall
+from pyharness.core.tools_guard import Decision, GuardChain, ToolCall
 from pyharness.core.tools_executor import ToolExecutor
 from pyharness.core.tools_registry import ToolRegistry
 from pyharness.errors import PyHError, ToolError
+from pyharness.governance import DecisionEngine, GovernanceContext
+from pyharness.governance.policy import Policy, PolicyEngine, PolicyRegistry
 
 # ===================================================================== 替身
 class FakeScope:
@@ -80,7 +82,12 @@ class FakeSpill:
 
 
 class AllowGuard:
-    """guard 链替身:全 allow(专注关3 Provider 执行与工具自身契约)。"""
+    """guard 链替身:全 allow(专注关3 Provider 执行与工具自身契约)。
+
+    仅用于**不经 ToolExecutor** 的直接 handler 调用;经 executor 的集成用例
+    (``_exec_ctx``)用**真实 ``GuardChain``**(S3-2-2:关 2 的唯一治理入口
+    ``authorize`` 需要真实 ``evaluate_detailed`` 与 scope 前置语义)。
+    """
 
     async def evaluate(self, call, scope) -> Decision:
         return Decision.ALLOW
@@ -654,11 +661,15 @@ def test_register_duplicate_tlb801():
 
 # ================================== 集成:真实 executor 关3(Provider 形态契约)
 def _exec_ctx(ws: Path, scope: FakeScope, session: FakeSession) -> SimpleNamespace:
+    chain = GuardChain(session=session)            # 真实链:scope 前置 + 真实事件
+    eng = PolicyEngine(policy=Policy("test:v1", "1.0"),
+                       registry=PolicyRegistry(), chain=chain)
     return SimpleNamespace(
         scope=scope, cfg=Settings(),
         storage=SimpleNamespace(spill=FakeSpill()),
         redact=None,
-        session=session, guard=AllowGuard())
+        session=session, guard=chain,
+        governance=GovernanceContext(policy=eng, decisions=DecisionEngine()))
 
 
 async def test_executor_pipeline_write_then_read(tmp_path: Path):

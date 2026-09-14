@@ -21,3 +21,6 @@ dist/
 _commit_msg.txt
 collect_only.txt
 pytest_final.txt
+
+# S0/S1 临时证据产物(含本机路径与 junit XML,勿入库:仓库是 PUBLIC)
+tmp/

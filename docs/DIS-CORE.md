@@ -49,7 +49,7 @@ tools → bus/registry + 注入 guard 链(F014)
 
 | 字段 | 类型 | 规则 |
 |---|---|---|
-| state | Literal[idle,running,paused,stopping,terminated] | 状态机现值(§1.4);同会话仅一个 running |
+| state | Literal[idle,running] | 状态机现值(§1.4);同会话仅一个 running。**v1.0 修订(S1-02/ADR-014)**:实现仅 idle/running——原设计稿的 paused/stopping/terminated 全文无赋值点(死态),相关分支已删除;运行时暂停/恢复推迟至 v1.1 Runtime Recovery |
 | pending / queue_limit | deque / int=10 | running 期输入队列;队深>10 拒新(BUSY) |
 | current | Optional[RunContext] | 执行中 run;idle 为 None |
 | max_turns / stall_limit | int=30 / int=3 | 轮数上限/任务;连续 N 轮无新信息→收敛终止 |
@@ -164,6 +164,8 @@ async def _cancel(self, ctx, reason="cancelled"):
 | 任意→terminated | close | finished 仅一次(EVT-104) |
 
 **注释**:PRD F007 三态为顶层语义;PAUSED/STOPPING 为 DIS 显式化的 running 受控子状态(不改 PRD 三态),服务于审批/取消审计。
+
+> **v1.0 修订(S1-02/ADR-014)**:上表 `running→paused` / `paused→running` 两行**未在 v1.0 实现**——`paused` 态与 `AgentLoop.resume()` 均不存在(全文无赋值点/无该方法)。S1 删除了依赖它们的死代码:`wake()` 的 stopping/terminated 拒入分支、`_must_stop` 闸3 的 `"paused"` 判据、`agent._on_bus_event` 的 `approval.granted → loop.resume()` 调用。审批等待现由 `task_queue` 的 `queue.suspended/resumed` 承担,不经 loop 暂停。**运行时暂停/恢复归 v1.1 Runtime Recovery**,届时按新 ADR 重新引入状态与转移,不复用本次删除的形态。
 
 ## 1.5 错误路径
 

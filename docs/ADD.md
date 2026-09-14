@@ -2,7 +2,7 @@
 
 > **项目**:PyHarness——用 Python 3.11 从零复刻 DeepSeek Harness(DSH)全部功能的单进程 Agent 框架(目录沿用 mini-harness)
 > **文档类型**:ADD(架构决策记录,ADR 编号 001 起,不可变递增;记录"为什么这么设计"及"为什么不那么设计")
-> **版本**:v1.0 定稿 | **日期**:2026-09-06 | **状态**:19 条 ADR 全部「已接受」(ADR-001~012 定稿 2026-09-06;ADR-013~019 治理期追加 2026-09-14)
+> **版本**:v1.0 定稿 | **日期**:2026-09-06 | **状态**:20 条 ADR 全部「已接受」(ADR-001~012 定稿 2026-09-06;ADR-013~020 治理期追加 2026-09-14)
 > **读者**:①作者(作者/开发者/面试者——本文件是面试讲深"取舍过程"的底稿)②AI 编码 Agent(实现前先读对应 ADR,避免踩已否决策略的坑)
 > **关联文档**:TECH-ANCHOR.md(技术锚点:禁止表/六原则总纲/66 项范围——本文件是其"原则的取舍理由"层);PRD-Core.md(66 项功能唯一权威规格,含 §4 六原则深度展开、§4.6.2 阶段里程碑、§5 功能清单——本文件每条 ADR 均标注落点 F 编号与原则映射,冲突以 PRD-Core 为准)
 
@@ -10,7 +10,7 @@
 
 # 1 概述
 
-PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = 事件溯源真源(JSONL append-only)+ 能力 seam 三件套 + guard 单调拒绝 + 自研插件总线 + 八模块不可换脊柱,66 项功能沿 6 个"每阶段可运行"的里程碑生长**。每个词都是一次取舍,理由与代价即本文档:ADD 记"决策"、PRD-Core §4 记"原则"、TECH-ANCHOR 记"边界",构成「决策→原则→边界」链条。19 条 ADR 中,ADR-001/002/003/009/005/008 对应 PRD 六原则 1-6,其余为支撑性决策(总线自研/存储分工/降级协议/脊柱边界/错误码契约/外壳形态);ADR-013~019 为 2026-09-14 治理期(Governed Agent Runtime v1.0)追加,记录治理层的取舍与 S1 范围裁定,其正文见 §2.1 所列文件。每条 ADR 固定七节:元信息、【背景/决策/后果/违反它的后果/备选方案对比/关联】,违反后果节必写具体失败场景;压倒性约束是"从零可讲、可逐行审查、可演示","引黑盒换省事"的方案因此被否。
+PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = 事件溯源真源(JSONL append-only)+ 能力 seam 三件套 + guard 单调拒绝 + 自研插件总线 + 八模块不可换脊柱,66 项功能沿 6 个"每阶段可运行"的里程碑生长**。每个词都是一次取舍,理由与代价即本文档:ADD 记"决策"、PRD-Core §4 记"原则"、TECH-ANCHOR 记"边界",构成「决策→原则→边界」链条。20 条 ADR 中,ADR-001/002/003/009/005/008 对应 PRD 六原则 1-6,其余为支撑性决策(总线自研/存储分工/降级协议/脊柱边界/错误码契约/外壳形态);ADR-013~020 为 2026-09-14 治理期(Governed Agent Runtime v1.0)追加,记录治理层的取舍、S1 范围裁定与策略事件边界,其正文见 §2.1 所列文件。每条 ADR 固定七节:元信息、【背景/决策/后果/违反它的后果/备选方案对比/关联】,违反后果节必写具体失败场景;压倒性约束是"从零可讲、可逐行审查、可演示","引黑盒换省事"的方案因此被否。
 
 # 2 ADR 索引表
 
@@ -35,6 +35,7 @@ PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = �
 | ADR-017 | Workflow 保持顺序步骤编排——不做 DAG,治理粒度下移到 segment | 治理粒度下移至 `task_queue` 的 `segment.start/end` 段锚,每个 workflow step 即一个 governed task;故"工作流被治理"无需引入 DAG 引擎 |
 | ADR-018 | 治理层目录与接口契约冻结 | `governance/` 六模块 + 8 组接口 + `ctx.governance` 单实例 + 依赖方向(只许依赖 `events`/`errors`)全部冻结;`inputs_digest` 复用既有绑定指纹算法,禁止第二套 |
 | ADR-019 | S1 范围裁定——四项行为修复构成 S1,剩余项按依赖分流 | S1 实施范围确认为 S1-01~04(即 W1/W2/W4/W5);W3→S1.5、拆分/落盘收敛/repair/`_invoke` 各有承接阶段;不修改既有冻结 ADR 的历史事实 |
+| ADR-020 | 治理层策略事件边界与策略放宽纪律——`policy.updated` 与 `scope.updated` 分工 | `policy.updated.op = {add,enable,disable}`(tighten 归 `scope.updated`);删除 `Policy.with_tightened`;INV-G6 要求放宽必经显式治理动作 + `config_ref` + `policy.updated`(禁静默);`guard.disabled` 不新增、并入 `op=disable`;`from_config` 注入式(源自 ADR-018 依赖方向);`config_ref` 走 trace |
 
 ## 2.1 ADR-013~019 正文位置
 
@@ -44,12 +45,13 @@ PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = �
 |---|---|---|
 | ADR-013 ~ ADR-018 | [../ARCHITECTURE_DECISION_RECORD.md](../ARCHITECTURE_DECISION_RECORD.md) §2「ADR 列表」(每条 `### ADR-01N:…` 独立小节) | 治理期冻结记录;该文件整体 FROZEN,内容不可改 |
 | ADR-019 | [../ADR-019-s1-scope-adjudication.md](../ADR-019-s1-scope-adjudication.md) (全文) | S1 范围裁定;增量记录,不修改既有 ADR 历史 |
+| ADR-020 | [../ADR-020-policy-event-boundary.md](../ADR-020-policy-event-boundary.md) (全文) | 策略事件边界与放宽纪律;增量记录,**声明取代**设计文档 §2.3 的 `op` 枚举与 §3.2 的 `Policy.with_tightened` |
 
 # 3 阅读约定
 
 - **模板**:每条 ADR 固定七节——元信息行(状态/日期/落点/原则映射)、背景、决策、后果、违反它的后果、备选方案对比、关联。「违反它的后果」必写具体失败场景——"回到被否方案会怎么炸",这是区别于泛泛架构描述的核心。
 - **状态语义**:全部为「已接受(Accepted)」;ADR 只增不改,若未来推翻某决策,新建一条 ADR 记录取代关系,旧条目保留原貌(不可变历史,同事件日志纪律)。
-- **编号与落点**:ADR-001 起顺序编号;「落点」= 实现阶段 + 关键 F 编号(阶段0=F001-F006、1=F007-F026、2=F027-F033、3=F034-F042、4=F043-F051、5=F052-F059、6=F060-F066),精确规格以 PRD-Core §5 为准;ADR-013~019 落点为**治理期**(Governed Agent Runtime v1.0 的 S0~S7 开发顺序,见 `ARCHITECTURE_DECISION_RECORD.md` §5),不对应 F 编号。
+- **编号与落点**:ADR-001 起顺序编号;「落点」= 实现阶段 + 关键 F 编号(阶段0=F001-F006、1=F007-F026、2=F027-F033、3=F034-F042、4=F043-F051、5=F052-F059、6=F060-F066),精确规格以 PRD-Core §5 为准;ADR-013~020 落点为**治理期**(Governed Agent Runtime v1.0 的 S0~S7 开发顺序,见 `ARCHITECTURE_DECISION_RECORD.md` §5),不对应 F 编号。
 - **术语先记**:脊柱=8 个不可换核心模块(agent-loop/agent/session/llm/system-prompt/scope/tools/persistence);外围=挂 ctx.* 的可插拔能力;事件=带 Envelope(seq/type/payload/ts/actor/trace)的事实;投影=由事件日志派生的视图(消息列表/UI 时间线/FTS 索引/token 汇总);降级链=主 DeepSeek→备 qwen-max 的自动切换。
 
 ---

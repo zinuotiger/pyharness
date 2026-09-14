@@ -46,6 +46,7 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     PlanRejectedPayload,
     PluginInstalledPayload,
     PluginUninstalledPayload,
+    PolicyUpdatedPayload,
     QueueResumedPayload,
     QueueSuspendedPayload,
     ScheduleBlockedPayload,
@@ -98,6 +99,7 @@ SYNC_TYPES = frozenset({
     "approval.requested", "approval.granted", "approval.denied", "approval.timeout",
     "session.finished", "session.recovered", "segment.start",
     "fork.created", "context.compacted",
+    "policy.updated",                      # 治理层策略事件(ADR-020:强同步)
 })
 
 # 瞬时事件(仅总线,禁 append 入日志;registry.updated 为总线内部广播,无 payload 模型)
@@ -173,9 +175,10 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 70 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 13 项
+# 74 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 14 项
 # 按 §7 登记:llm.retry F028 / plan.done·plan.aborted F046 / schedule.registered·
-# updated·removed·blocked·missed F048;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
+# updated·removed·blocked·missed F048 / policy.updated ADR-020;PARAMETER-ANCHOR
+# 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
 _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # ---- A 会话生命周期(§3.1)
@@ -264,6 +267,9 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     ("skill.rollback", SkillRolledBackPayload, False),
     # 配置热更审计(瞬时,仅总线:无会话维度,不进 JSONL)
     ("config.updated", ConfigUpdatedPayload, True),
+    # 治理层策略事件(ADR-020:op∈{add,enable,disable};tighten 归 scope.updated;
+    # 强同步见 SYNC_TYPES;config_ref 经 Envelope.trace 携带,不入载荷)
+    ("policy.updated", PolicyUpdatedPayload, False),
 )
 
 

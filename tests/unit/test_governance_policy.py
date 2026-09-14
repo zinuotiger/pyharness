@@ -22,11 +22,14 @@ from types import SimpleNamespace
 import pytest
 
 from pyharness.core import tools_guard
+from pyharness.core.session import SessionLog
 from pyharness.errors import PyHError
+from pyharness.events.vocab import SYNC_TYPES as EV_SYNC_TYPES
 from pyharness.governance import (GovernanceContext, Policy, PolicyEngine,
                                   PolicyRegistry, PolicyRule,
                                   compute_fingerprint)
-from pyharness.governance.policy import EVENT_POLICY_UPDATED, POLICY_OPS
+from pyharness.governance.policy import (EVENT_POLICY_UPDATED,
+                                         POLICY_UPDATED_FIELDS, POLICY_OPS)
 
 GOV_DIR = pathlib.Path(__file__).resolve().parents[2] / "pyharness" / "governance"
 
@@ -194,16 +197,45 @@ async def test_t6_emit_updated_validates_op_and_config_ref():
     assert ei2.value.code == "CFG-601"           # Δ-3:禁止静默放宽
 
 
-async def test_t6_emit_updated_degrades_when_unregistered():
-    """词表未注册(S2-1 常态)→ 降级返回 False、不抛;注册(S2-2)后同路径生效。"""
-    from pyharness.events.vocab import is_registered
+async def test_t6_emit_updated_degrades_when_session_unwired():
+    """词表已注册(S2-2)但 session 未接线 → 降级返回 False、不抛(同仓库惯例)。"""
     reg = PolicyRegistry()
     p = _policy([_rule("r1")])
-    if not is_registered(EVENT_POLICY_UPDATED):          # S2-1 阶段前提
-        assert await reg.emit_updated(p, "add", reason="assembly") is False
-        assert await reg.emit_updated(p, "disable", reason="x",
-                                      config_ref="cfg") is False
+    assert EVENT_POLICY_UPDATED in EV_SYNC_TYPES        # S2-2:已注册且强同步
+    assert await reg.emit_updated(p, "add", reason="assembly") is False
     assert POLICY_OPS == frozenset({"add", "enable", "disable"})   # Δ-1
+
+
+async def test_t6_emit_updated_persists_after_registration():
+    """S2-2 落盘断言:policy.updated 已注册 → emit 真落盘(强同步)。
+
+    断言:六字段载荷 + config_ref 经 trace(Δ-6,不入载荷)+ 事件成员资格。
+    """
+    s = SessionLog("s-govemit01")
+    await s.append("session.created", {"title": "", "model": "m"}, actor="system")
+    reg = PolicyRegistry()
+    p = _policy([_rule("r1")])
+    ok = await reg.emit_updated(p, "disable", reason="guard-disabled",
+                                config_ref="security.guards.disabled",
+                                session=s)
+    assert ok is True
+    evs = [e for e in s.events_after(0) if e.type == EVENT_POLICY_UPDATED]
+    assert len(evs) == 1
+    assert evs[0].payload == {"policy_id": "builtin:v1", "version": "1.0.0",
+                              "fingerprint": p.fingerprint, "op": "disable",
+                              "added": [], "reason": "guard-disabled"}
+    assert evs[0].trace == {"config_ref": "security.guards.disabled"}   # Δ-6
+    assert EVENT_POLICY_UPDATED in EV_SYNC_TYPES                        # Q3 强同步
+
+
+def test_t10_payload_fields_match_contract():
+    """X-3 防回归:PolicyUpdatedPayload 字段集 **恰等于** POLICY_UPDATED_FIELDS。
+
+    本次 X-3 冲突(字段清单漏 `added`/`reason`)会在此被当场拦住——若二者漂移,
+    `emit_updated` 的 append 将被 `extra="forbid"` 拒(EVT-100),发射路径静默死亡。
+    """
+    from pyharness.events.payload import PolicyUpdatedPayload
+    assert tuple(PolicyUpdatedPayload.model_fields) == POLICY_UPDATED_FIELDS
 
 
 # ================================================ T7 params 边界(R-A)

@@ -58,8 +58,10 @@ EXPECTED_ALL = (
     "skill.used", "skill.installed", "skill.removed", "skill.rollback",
     # 配置热更审计(瞬时)
     "config.updated",
+    # 治理层策略事件(ADR-020;强同步)
+    "policy.updated",
 )
-assert len(EXPECTED_ALL) == 73, "测试词表清单必须恰为 73 名"
+assert len(EXPECTED_ALL) == 74, "测试词表清单必须恰为 74 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -74,9 +76,9 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 # =====================================================================
 # 词表完整
 # =====================================================================
-def test_vocab_full_64():
-    """词表 73 名(72 核心 + config.updated 瞬时审计)。"""
-    assert len(EVENT_TYPES) == 73
+def test_vocab_full():
+    """词表 74 名(73 核心 + policy.updated 治理层策略事件)。"""
+    assert len(EVENT_TYPES) == 74
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 

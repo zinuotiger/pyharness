@@ -564,6 +564,26 @@ class ScopeUpdatedPayload(_PayloadBase):
     reason: str = Field(min_length=1)
 
 
+class PolicyUpdatedPayload(_PayloadBase):
+    """policy.updated:治理层策略集变化留痕(ADR-020)。
+
+    op ∈ {add, enable, disable}——**tighten 归 scope.updated**,禁止两事件表达同一种
+    策略变化;`guard.disabled` 不单独登记,关闭 guard 统一经 op="disable"。
+    config_ref 经 Envelope.trace 携带(ADR-020 Δ-6),**不入本载荷**——与
+    tools_guard 的 call_id / approval 的 channel 同款"传输元数据走 trace"先例。
+
+    六字段与 governance.policy.POLICY_UPDATED_FIELDS 一致(S2-1 声明,S2-2 对齐);
+    op 用 str 而非 Literal:值域校验在治理层(避免 events 反向依赖 governance,
+    也避免复制 POLICY_OPS 成第二真源);参照 ScopeUpdatedPayload 同型。
+    """
+    policy_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    fingerprint: str = Field(min_length=1)
+    op: str = Field(min_length=1)
+    added: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
 class SkillInstalledPayload(_PayloadBase):
     """skill.installed: remote skill safely verified and activated."""
     name: str = Field(min_length=1, max_length=64)

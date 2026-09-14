@@ -943,6 +943,67 @@ def from_config(cfg: Any, *, credentials: Any = None,
     return chain
 
 
+# ============================================ 规则声明式描述(2026-09-14 S2-1)
+# 供治理层 PolicyEngine 装配消费的**只读描述**面(pyharness/governance/)。
+# 纪律:① **不改 g1-g7 判定逻辑**(G-3 规则实现冻结;本段只读既有 chain 构造);
+#       ② **不 import governance**(反向依赖禁止,ADR-018);
+#       ③ 描述符只含声明与可调用对象引用,不含判定本身。
+
+# rule_id → 该规则可能产出的策略引用(policy_ref)。来源 = 各 g*_check 的返回
+# 字面量;本表是**声明**,不参与判定——判定仍以 check 函数返回为准(只读投影)。
+_RULE_POLICY_REFS: dict[str, tuple[str, ...]] = {
+    "g-schema": ("TLB-803",),
+    "g-fs-path": ("POL-FS-1", "POL-FS-2", "POL-FS-3"),
+    "g-credential-read": ("POL-CRED-1",),
+    "g-exec": ("POL-EXEC-1",),
+    "g-overwrite": ("POL-OVW-1",),
+    "g-net-outbound": ("POL-NET-1",),
+    "g-danger": ("POL-DGR-1",),
+}
+
+
+@dataclass(frozen=True)
+class RuleDescriptor:
+    """内置规则(g1-g7)的**声明式描述**(只读)。
+
+    供治理层构造 Policy 用(治理层不 import 本模块,只按属性读取
+    ``rule_id``/``policy_refs``/``forced``/``match``/``check``)。``match``/``check``
+    是既有 guard 可调用面的**引用**,判定逻辑仍在 Guard 内——本类不含判定。
+    """
+
+    rule_id: str
+    policy_refs: tuple[str, ...]
+    forced: bool
+    match: Callable[[Any], bool]
+    check: Callable[[Any, Any], Any]
+
+
+def describe_rules(*, credential_paths: Optional[Iterable[str]] = None,
+                   validator: Optional[Callable[..., dict]] = None,
+                   approval_channel: Optional[bool] = None,
+                   path_exists: Optional[Callable[[str], bool]] = None,
+                   link_resolver: Optional[Callable[[str], str]] = None
+                   ) -> tuple[RuleDescriptor, ...]:
+    """内置 g1-g7 的声明式描述(求值序 = ``_BUILTIN_IDS``;纯只读)。
+
+    经既有 ``build_builtin_chain`` 取规则实例(注入参数语义与装配完全一致),
+    再投影为纯描述——**不构造 GuardChain、不改动任何判定逻辑**。
+    由**装配层**调用并把结果传给 ``PolicyEngine.from_config(rules=...)``;
+    治理层不 import 本函数(依赖方向单向,ADR-018)。
+    """
+    guards = build_builtin_chain(credential_paths=credential_paths,
+                                 validator=validator,
+                                 approval_channel=approval_channel,
+                                 path_exists=path_exists,
+                                 link_resolver=link_resolver)
+    return tuple(
+        RuleDescriptor(rule_id=g.id,
+                       policy_refs=_RULE_POLICY_REFS.get(g.id, ()),
+                       forced=g.id in FORCED_GUARDS,
+                       match=g.match, check=g.check)
+        for g in guards)
+
+
 # 目录不存在/被误当包 import 时的告警(防装配静默失败;正常 import 无输出)
 _log_ready = log.getEffectiveLevel()
 
@@ -962,6 +1023,8 @@ __all__ = [
     # 装配/工厂
     "build_builtin_chain", "from_config",
     "register_guard_hook", "match_guard_by_hook",
+    # 声明式描述(S2-1;治理层装配消费面——只读,不改判定)
+    "RuleDescriptor", "describe_rules",
     # 常量(审计/测试锚点)
     "FORCED_GUARDS", "DANGER_LEVELS", "_BUILTIN_IDS",
 ]

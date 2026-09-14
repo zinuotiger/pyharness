@@ -11,12 +11,15 @@
     与本包内模块);**禁止** import ``pyharness.core.*``(tools_guard/executor/
     scope/llm)与 ``pyharness.bus.plugin``。规则与执行对象一律**注入**(Δ-4)。
 
-**本步(S2-1)只含 policy/context 两个模块**;``decision.py`` / ``receipt.py`` /
-``evidence.py`` / ``audit.py`` 属 S3~S5(ADR-018 冻结目录),**本步不创建**。
+**S2-1 含 policy/context 两个模块**;**S3-1 追加 decision 数据契约**
+(``Decision`` / ``Verdict`` / ``Principal``)。``receipt.py`` / ``evidence.py`` /
+``audit.py`` 属 S4~S5(ADR-018 冻结目录),**尚未创建**——故本门面
+**不导出** Receipt / Evidence / Audit / Approval 实现等 S3-1 范围外内容。
 """
 from __future__ import annotations
 
 from pyharness.governance.context import GovernanceContext
+from pyharness.governance.decision import Decision, Principal, Verdict
 from pyharness.governance.policy import (POLICY_OPS, EVENT_POLICY_UPDATED,
                                          Policy, PolicyEngine, PolicyRegistry,
                                          PolicyRule, compute_fingerprint)
@@ -25,4 +28,6 @@ __all__ = [
     "GovernanceContext",
     "Policy", "PolicyEngine", "PolicyRegistry", "PolicyRule",
     "compute_fingerprint", "POLICY_OPS", "EVENT_POLICY_UPDATED",
+    # S3-1:决策数据契约(仅此三项;Receipt/Evidence/Audit 不导出)
+    "Decision", "Verdict", "Principal",
 ]

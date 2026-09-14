@@ -11,7 +11,7 @@
 
 # F-SYNC-1 = FIXED / PASS
 
-**改动 1 个生产文件（`pyharness/persistence.py`，+43 / −5）+ 2 个测试文件**；全量回归 **1553 passed / 2 skipped / 0 failed**（较 S3-2-2 基线 1538 **+15**，零回归）。
+**改动 1 个生产文件（`pyharness/persistence.py`，+48 / −5）+ 2 个测试文件**；全量回归 **1553 passed / 2 skipped / 0 failed**（较 S3-2-2 基线 1538 **+15**，零回归）。
 
 ---
 
@@ -160,8 +160,8 @@ def _resolve_by_seq(rows) -> list[tuple[int, str]]:
 
 | 文件 | 增/删 | 性质 |
 |---|---|---|
-| `pyharness/persistence.py` | **+43 / −5** | **唯一生产修改点** |
-| `tests/unit/test_persistence.py` | **+199 / −0** | 测试 |
+| `pyharness/persistence.py` | **+48 / −5** | **唯一生产修改点** |
+| `tests/unit/test_persistence.py` | **+179 / −0** | 测试 |
 | `tests/unit/test_session.py` | **+73 / −1** | 测试（端到端真链） |
 
 **禁止面零修改**：`session.py` · `event_bus.py` · `governance/*` · `tools_executor.py` · `approval.py` · `scope.py` · `events/*` · `ADR` · `REFACTOR_PLAN` · `RECORD` · receipt/evidence/audit。

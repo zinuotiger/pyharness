@@ -32,13 +32,12 @@ from typing import Any, Optional
 
 from pyharness.errors import raise_code
 from pyharness.governance.decision import (Decision, DecisionEngine,
-                                           Principal, PrincipalKind)
+                                           Principal)
 from pyharness.governance.policy import PolicyEngine
 
-# 临时治理主体(S3-2-2):**不是**正式用户身份模型——M5/S4 再引入真正的
-# principal 来源。不使用 actor="tool" 冒充决策主体(actor 是事件归属,非决策者)。
-# approval transport 的通道身份(channel)同样不等于治理 principal。
-_TEMPORARY_PRINCIPAL = Principal(PrincipalKind.SYSTEM, "pyharness-runtime", None)
+# 无通道时的主体(M5/S4-P1-3):headless / 无人类通道 = 框架自身驱动;**沿用**
+# approval 侧 ``by="system"`` 的既有语义(非新规则),经 ``from_legacy_by`` 统一派生。
+_FRAMEWORK_BY = "system"
 
 
 @dataclass
@@ -58,12 +57,23 @@ class GovernanceContext:
 
     @staticmethod
     def principal_of(ctx: Any) -> Principal:
-        """**临时**主体派生(S3-2-2;见 ``_TEMPORARY_PRINCIPAL``)。
+        """正式主体派生(M5/S4-P1-3):取自运行时**真实 caller/channel identity**。
 
-        当前运行时无正式身份来源(M5/Principal 属 S4),故统一返回稳定的
-        SYSTEM 主体——**不伪装** HUMAN/AGENT,也不把 approval 通道当作主体。
+        ``ctx.channel`` 由各外壳在装配时**框架侧**写入(非客户端自报):
+
+        - CLI:``"cli"``;headless → ``None``(``cli.py``)
+        - ACP:``"acp:<client_id>"``(``acp.py``;显式忽略客户端自报 ``by``)
+        - Desktop:``"desktop"``(``application/service.py``)
+
+        经**既有** ``Principal.from_legacy_by`` 统一解析(HUMAN + 通道 + id)。
+
+        ``channel`` 缺失/为空(headless、无人类通道)⇒ **明确的 SYSTEM 主体**
+        ——沿用 approval 侧 ``by="system"`` 的既有语义(非新规则),**绝不伪装**
+        HUMAN/AGENT,也不按 tool/verdict/approval 反推身份。未知通道格式 ⇒
+        ``APR-503`` fail-closed(**不静默降级**)。
         """
-        return _TEMPORARY_PRINCIPAL
+        ch = getattr(ctx, "channel", None)
+        return Principal.from_legacy_by(ch or _FRAMEWORK_BY)
 
     async def authorize(self, call: Any, ctx: Any, *,
                         principal: Optional[Principal] = None,
@@ -125,7 +135,7 @@ class GovernanceContext:
             "policy_fingerprint": decision.policy_fingerprint,
             "inputs_digest": decision.inputs_digest,
             "principal_kind": str(p.kind) if p is not None else "system",
-            "principal_id": p.id if p is not None else "pyharness-runtime",
+            "principal_id": p.id if p is not None else _FRAMEWORK_BY,
             "principal_channel": p.channel if p is not None else None,
             "ts": decision.ts,
             "approval_ref": decision.approval_ref,

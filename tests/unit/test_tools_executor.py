@@ -37,7 +37,8 @@ from pyharness.core.tools_executor import (ToolExecutor, render_result_text,
 from pyharness.core.tools_guard import GuardChain, ToolCall
 from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
 from pyharness.errors import PyHError
-from pyharness.governance import DecisionEngine, GovernanceContext
+from pyharness.governance import (DecisionEngine, GovernanceContext,
+                                  Principal)
 from pyharness.governance.policy import Policy, PolicyEngine, PolicyRegistry
 
 # ===================================================================== 替身
@@ -1006,9 +1007,10 @@ class TestGovernanceWiring:
         assert d1["decision_id"] != d2["decision_id"]
         assert all(e["sync"] is True for e in dec)
         assert all(e["trace"] == {"call_id": "g3"} for e in dec)
-        assert all(p["principal_kind"] == "system"
-                   and p["principal_id"] == "pyharness-runtime"
-                   for p in (d1, d2))                     # 临时身份模型
+        assert all(p["principal_kind"] == "human"
+                   and p["principal_id"] == "cli"
+                   and p["principal_channel"] == "cli"
+                   for p in (d1, d2))                     # M5:真实 ctx.channel 派生
 
     @pytest.mark.parametrize("verdict", ["denied", "timeout"])
     async def test_approval_not_granted_single_decision(self, tmp_path: Path,
@@ -1313,4 +1315,153 @@ class TestApprovalRef:
         assert granted.payload["approval_id"] == req.seq
         assert d2.payload["approval_ref"] == req.seq
         assert d2.payload["supersedes"] == d1.payload["decision_id"]
+        store2.close()
+
+
+# ==================================== S4-P1-3:M5 正式 runtime principal identity
+class TestPrincipalIdentity:
+    """M5/S4-P1-3:``Decision.principal`` 取自运行时**真实 caller/channel identity**
+    (``ctx.channel``,由外壳框架侧写入),经既有 ``Principal.from_legacy_by`` 派生。
+
+    不再使用固定临时身份(``SYSTEM / pyharness-runtime``);``channel`` 缺失
+    (headless)⇒ 明确的 SYSTEM 主体(沿用 approval 侧 ``by="system"`` 语义)。
+    """
+
+    @staticmethod
+    def _run(tmp_path, *, channel, call_id="P1", danger="none"):
+        defn = mk_defn(name="fs.read_file", danger=danger, schema=READ_SCHEMA)
+        prov = Recorder({"content": "hi"})
+        reg = make_registry(defn, providers={defn.name: prov})
+        sess = AsyncSess()
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), channel=channel)
+        return reg, prov, sess, ctx
+
+    async def test_t1_real_caller_identity_reaches_decision(self, tmp_path):
+        """T1:真实 ctx.channel 进入 Decision.principal,不再是临时身份。"""
+        reg, prov, sess, ctx = self._run(tmp_path, channel="cli")
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="P1"), ctx)
+        assert r.ok
+        p = sess.of("decision.issued")[0]["payload"]
+        assert p["principal_kind"] == "human"             # 非 system
+        assert p["principal_id"] == "cli"
+        assert p["principal_channel"] == "cli"
+        assert p["principal_id"] != "pyharness-runtime"   # 临时身份已消失
+
+    @pytest.mark.parametrize("channel,kind,pid,pch", [
+        ("cli", "human", "cli", "cli"),
+        ("desktop", "human", "desktop", "desktop"),
+        ("acp:alice", "human", "alice", "acp"),
+    ])
+    async def test_t2_t3_existing_channels_map_stably(self, tmp_path, channel,
+                                                      kind, pid, pch):
+        """T2/T3:已存在的真实通道(cli/desktop/acp:<client>)稳定映射到 Principal。"""
+        reg, prov, sess, ctx = self._run(tmp_path, channel=channel, call_id="P2")
+        await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="P2"), ctx)
+        p = sess.of("decision.issued")[0]["payload"]
+        assert (p["principal_kind"], p["principal_id"],
+                p["principal_channel"]) == (kind, pid, pch)
+
+    async def test_t4_approval_lifecycle_same_principal(self, tmp_path):
+        """T4:D1.principal == D2.principal;approval_ref / inputs_digest 不变。"""
+        defn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        prov = Recorder({"ok": True})
+        reg = make_registry(defn, providers={defn.name: prov})
+        sess = AsyncSess()
+        ap = ApprovalProvider(channel="cli")
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), approval=ap,
+                       channel="cli")
+        task = asyncio.create_task(ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "s/x.txt", "content": "n"},
+                     call_id="P4"), ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        rid = sess.of("approval.requested")[0]["seq"]
+        ap.approve(rid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok and prov.calls == 1
+        d1, d2 = (e["payload"] for e in sess.of("decision.issued"))
+        assert (d1["principal_kind"], d1["principal_id"], d1["principal_channel"]) \
+            == (d2["principal_kind"], d2["principal_id"], d2["principal_channel"]) \
+            == ("human", "cli", "cli")
+        # approval_ref / inputs_digest / supersedes 行为不变
+        assert d1["approval_ref"] is None
+        assert d2["approval_ref"] == rid
+        assert d2["supersedes"] == d1["decision_id"]
+        assert d2["inputs_digest"] == d1["inputs_digest"] != ""
+
+    async def test_t6_missing_identity_is_explicit_system(self, tmp_path):
+        """T6:channel 缺失(headless)⇒ **明确的 SYSTEM fallback**(非静默猜)。"""
+        reg, prov, sess, ctx = self._run(tmp_path, channel=None, call_id="P6")
+        await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="P6"), ctx)
+        p = sess.of("decision.issued")[0]["payload"]
+        assert p["principal_kind"] == "system"            # 不伪装 human
+        assert p["principal_id"] == "system"
+        assert p["principal_channel"] is None
+
+    def test_t7_principal_legacy_roundtrip_no_regression(self):
+        """T7:既有 from_legacy_by / to_legacy_by 往返无回归。"""
+        for by in ("system", "cli", "desktop", "acp:alice", "cli:alice",
+                   "llm:c1", "tool:web.fetch", "plugin:hello_time"):
+            p = Principal.from_legacy_by(by)
+            assert p.to_legacy_by() == by
+        p = Principal.from_legacy_by("acp:alice")
+        assert (str(p.kind), p.id, p.channel) == ("human", "alice", "acp")
+
+    async def test_t8_approval_ref_and_digest_unaffected(self, tmp_path):
+        """T8:非 approval 路径 approval_ref 仍为 None;digest 仍非空。"""
+        reg, prov, sess, ctx = self._run(tmp_path, channel="desktop",
+                                         call_id="P8")
+        await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="P8"), ctx)
+        p = sess.of("decision.issued")[0]["payload"]
+        assert p["approval_ref"] is None
+        assert p["supersedes"] is None
+        assert p["inputs_digest"] != ""
+
+    async def test_t5_principal_recoverable_from_jsonl(self, tmp_path):
+        """T5:真实 JSONL 落盘 → 关闭 → 重开 replay,Decision.principal 可恢复。"""
+        from pyharness.bus import EventBus
+        from pyharness.core.session import SessionLog
+        from pyharness.events import EVENT_TYPES, SYNC_TYPES
+        from pyharness.persistence import open_store
+
+        sid = "s-p13-replay"
+        store = open_store(sid, dir=tmp_path)
+        bus = EventBus()
+
+        async def adapter(t, p):
+            if hasattr(p, "model_dump_json"):
+                await store.append(p, sync=t in SYNC_TYPES)
+
+        for t in EVENT_TYPES:
+            bus.subscribe(t, adapter, owner="persistence")
+        log = SessionLog(sid=sid, persistence=store, bus=bus)
+        await log.append("session.created", {"title": "", "model": "m"},
+                         actor="system")
+        await store.flush()
+        defn = mk_defn(name="fs.read_file", danger="none", schema=READ_SCHEMA)
+        prov = Recorder({"content": "hi"})
+        reg = make_registry(defn, providers={defn.name: prov})
+        ctx = make_ctx(log, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=log), channel="acp:bob")
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="P5"), ctx)
+        assert r.ok
+        await store.flush()
+        store.close()
+
+        store2 = open_store(sid, dir=tmp_path)
+        dec = [e for e in store2.replay() if e.type == "decision.issued"][0]
+        assert (dec.payload["principal_kind"], dec.payload["principal_id"],
+                dec.payload["principal_channel"]) == ("human", "bob", "acp")
         store2.close()

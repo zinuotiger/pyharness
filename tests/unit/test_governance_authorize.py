@@ -347,5 +347,6 @@ async def test_t19_authorize_emits_for_reject_too():
     evs = [e for e in sess.events if e[0] == "decision.issued"]
     assert len(evs) == 1 and evs[0][1]["verdict"] == "reject"
     assert evs[0][1]["guard_ids"] == ["scope-hidden"]
-    assert evs[0][1]["principal_kind"] == "system"    # 临时身份(非 human/agent)
-    assert evs[0][1]["principal_id"] == "pyharness-runtime"
+    # M5/S4-P1-3:ctx **无 channel**(headless)⇒ 明确的 SYSTEM 主体(非 human)
+    assert evs[0][1]["principal_kind"] == "system"
+    assert evs[0][1]["principal_id"] == "system"

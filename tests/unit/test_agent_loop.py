@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyharness.core.agent_loop import (AgentLoop, BudgetExhausted,
+from pyharness.core.agent_loop import (AgentLoop, BudgetExhausted, LoopState,
                                        RunContext, RunResult)
 from pyharness.core.session import SessionLog
 from pyharness.errors import PyHError
@@ -95,15 +95,33 @@ class FakeLLM:
 
 class FakeTools:
     """工具执行替身:execute 落 tool.call + tool.result 事件(tools 层职责),
-    可 gate(测取消传播);summaries = 逐次摘要脚本(空 = 恒 "ok")。"""
+    可 gate(测取消传播);summaries = 逐次摘要脚本(空 = 恒 "ok")。
+
+    S1-03:补 reset_turn_failures/mark_turn_failure(F026 轮内连败计数面,与
+    tools_executor 同构)+ results 脚本(返回 ExecResult 替身);缺省 execute
+    仍返回 None → _turn_failure_capped 恒 False,既有用例行为不变。
+    """
 
     def __init__(self, *, gate: asyncio.Event = None, summaries=None,
-                 raise_exc: Exception = None, before: list = None) -> None:
+                 raise_exc: Exception = None, before: list = None,
+                 results=None) -> None:
         self.gate = gate
         self.summaries = list(summaries or [])
         self.raise_exc = raise_exc            # execute 抛(测引擎兜底)
         self.before = before or []            # execute 先跑(如置 started 标志)
         self.executed: list = []              # 已执行 call 记录
+        self.results = list(results or [])    # ExecResult 替身脚本(F026)
+        self.fail_counts: dict[str, int] = {} # 轮内连败计数(与 executor 同构)
+        self.resets = 0                       # 轮起点清零次数
+
+    def reset_turn_failures(self) -> None:
+        self.fail_counts.clear()
+        self.resets += 1
+
+    def mark_turn_failure(self, name: str) -> int:
+        n = self.fail_counts.get(str(name), 0) + 1
+        self.fail_counts[str(name)] = n
+        return n
 
     def schemas_for(self, scope):
         return [{"type": "function", "function": {"name": "mock_tool"}}]
@@ -127,6 +145,9 @@ class FakeTools:
                            {"name": call.name, "call_id": call.call_id,
                             "ok": True, "summary": summary, "truncated": False},
                            actor="tool")
+        if self.results:                      # F026 用例:返回 ExecResult 替身
+            return self.results[i] if i < len(self.results) else self.results[-1]
+        return None
 
 
 class FakeScope:
@@ -484,17 +505,28 @@ async def test_run_busy_when_state_not_idle():
     assert loop.state == "idle"
 
 
-async def test_wake_stopping_terminated_busy():
-    """stopping/terminated 态 wake → BUSY 拒(会话正在关闭/已结束)。"""
+async def test_loop_state_space_is_reachable_only():
+    """S1-02/ADR-014:声明的 LoopState 只含可达态(idle/running)。
+
+    原声明含 paused/stopping/terminated,但全文无赋值点——死态会衍生死分支
+    (wake 的 stopping/terminated 拒入、_must_stop 闸3 的 paused 判据),并曾
+    掩盖 agent.py 对不存在方法 loop.resume() 的调用。本用例钉死状态空间,
+    防止死态被重新引入;运行时暂停/恢复留待 v1.1 Runtime Recovery。
+    """
+    from typing import get_args
+
+    assert set(get_args(LoopState)) == {"idle", "running"}
+
+
+async def test_wake_accepts_from_any_reachable_state():
+    """可运行态下 wake 正常入队/拉起(不再有 stopping/terminated 拒入分支)。"""
     s = await _session()
     loop = AgentLoop()
     loop._ctx = FakeCtx(s, FakeLLM(), FakeTools())
     env = await _user_message(s, "hi")
-    for bad in ("stopping", "terminated"):
-        loop.state = bad
-        with pytest.raises(PyHError) as ei:
-            await loop.wake(env)
-        assert ei.value.code == "BUSY"
+    # idle:idle → 拉起 run(替身 LLM 纯文本终态),回 idle
+    result = await loop.wake(env, loop._ctx)
+    assert result is not None and loop.state == "idle"
 
 
 # ===================================================================== LLM 异常降级路径
@@ -621,7 +653,11 @@ async def test_must_stop_three_gates_readonly():
     assert loop._must_stop(ctx, run) == "cancelled"
     run.cancelled = False
     assert loop._must_stop(ctx, run) is None
-    ctx.scope.budget = "paused"               # 闸3 预算(paused 亦触发)
+    # 闸3 预算(S1-02):scope.budget_state 只产 ok/warn/exhausted → 仅 exhausted 触发;
+    # 原 "paused" 判据已按 ADR-014 删除(死字面量,永不成立)。
+    ctx.scope.budget = "warn"                 # 告警不拦
+    assert loop._must_stop(ctx, run) is None
+    ctx.scope.budget = "exhausted"
     assert loop._must_stop(ctx, run) == "budget"
     ctx.scope.budget = "ok"
     assert loop._must_stop(ctx, run) is None
@@ -664,3 +700,48 @@ async def test_llm_chat_only_entry_point_inv02():
     assert users0 == ["一"]                   # 首轮上下文只含自己的输入
     assert users1 == ["一", "二"]             # 次轮含全部输入(日志折叠,INV-01)
     assert any(m["role"] == "assistant" for m in llm.calls[1][0])  # 上轮回复入上下文
+
+
+# ===================================================== F026 轮内连败计数(S1-03)
+async def test_turn_failure_streak_terminates_turn_on_single_step_path():
+    """F026(S1-03 修复):单步路径(run_step→execute)参与轮内连败计数 —— 同工具
+    累计失败 ≥2 → 终止本轮,剩余 tool_calls 不再执行。
+
+    修复前:计数仅在批量入口 execute_tool_calls 生效,而 agent-loop 走逐个
+    run_step → 计数恒为 0,F026 在实际主循环路径上完全失效。
+    """
+    s = await _session()
+    calls = [_make_call(name="mock_tool", call_id=f"c{i}") for i in range(1, 4)]
+    fail = SimpleNamespace(ok=False, summary="guard 拒绝:g-fs-path(POL-FS-1),未执行")
+    tools = FakeTools(results=[fail, fail, fail])
+    llm = FakeLLM([_make_resp(content="", tool_calls=calls)])
+    ctx = FakeCtx(s, llm, tools)
+    loop = AgentLoop()
+    env = await _user_message(s, "hi")
+
+    await loop.wake(env, ctx)
+
+    assert len(tools.executed) == 2, \
+        f"连败封顶应终止本轮(第 3 个调用不执行);实际执行={len(tools.executed)}"
+    assert tools.fail_counts["mock_tool"] == 2     # 恰好计数到封顶阈值
+    assert tools.resets >= 1                        # 轮起点已清零(计入本轮)
+
+
+async def test_turn_failure_streak_not_counted_for_other_failures():
+    """计入口径与批量入口一致:仅"参数校验/guard"失败计入;超时等不计。
+
+    (超时/Provider 异常 summary 不以"参数校验"/"guard" 开头 → 不封顶。)
+    """
+    s = await _session()
+    calls = [_make_call(name="mock_tool", call_id=f"d{i}") for i in range(1, 4)]
+    slow = SimpleNamespace(ok=False, summary="执行超时(60s)")
+    tools = FakeTools(results=[slow, slow, slow])
+    llm = FakeLLM([_make_resp(content="", tool_calls=calls)])
+    ctx = FakeCtx(s, llm, tools)
+    loop = AgentLoop()
+    env = await _user_message(s, "hi")
+
+    await loop.wake(env, ctx)
+
+    assert len(tools.executed) == 3, "超时类失败不应触发 F026 封顶"
+    assert tools.fail_counts == {}

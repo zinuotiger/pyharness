@@ -59,8 +59,13 @@ from pyharness.events import Envelope
 
 log = logging.getLogger("pyharness.agent_loop")
 
-# 顶层三态 + running 受控子态(DIS §1.4:PAUSED/STOPPING 不改顶层三态语义)
-LoopState = Literal["idle", "running", "paused", "stopping", "terminated"]
+# 顶层状态(2026-09-14 S1-02 按 ADR-014 收敛):v1.0 只声明**可达**状态集。
+# 原声明含 paused/stopping/terminated(DIS §1.4),但全文无任何赋值点——是死态,
+# 且衍生出死分支:wake() 的 "stopping"/"terminated" 拒入、_must_stop 闸3 的
+# "paused" 判据、agent.close 对 "paused" 的判断。依赖它们的代码已一并删除。
+# 运行时暂停/恢复(paused + resume())推迟至 v1.1 Runtime Recovery(ADR-014),
+# 届时按新 ADR 重新引入状态与转移,不得复用本次删除的形态。
+LoopState = Literal["idle", "running"]
 
 # RunResult.reason 终态枚举(与 close 枚举对齐,DIS §1.2)
 _REASONS = ("complete", "max_turns", "budget", "cancelled", "stall",
@@ -247,8 +252,11 @@ class AgentLoop:
         # 工具轮:校验/guard/审批/Provider 全在 tools.execute 内;单步失败→事件化
         # 回喂(tool.error/guard.rejected),不中断本轮(见 run_step)
         start_seq = ctx.session.stats()["seq"]        # 工具步前日志水位(指纹基)
+        self._reset_turn_failures(ctx)                # F026 轮内连败计数起点
         for call in resp.tool_calls:
-            await self.run_step(ctx, run, call)       # 逐工具步执行(顺序,阶段1)
+            res = await self.run_step(ctx, run, call)  # 逐工具步执行(顺序,阶段1)
+            if self._turn_failure_capped(ctx, call, res):
+                break                                 # F026:同工具连败≥2 → 终止本轮
         run.turn += 1
         fp = self._outcome_fingerprint(ctx, start_seq)  # 指纹=(name,summary,ok)序列
         run.stall_streak = run.stall_streak + 1 if fp == run.last_fp else 0
@@ -258,23 +266,55 @@ class AgentLoop:
         return None                                   # 下一轮
 
     # ======================================================== 单工具步
-    async def run_step(self, ctx: Any, run: RunContext, call: Any) -> None:
-        """单工具步:登记子任务执行 ctx.tools.execute(call, ctx)。
+    async def run_step(self, ctx: Any, run: RunContext, call: Any) -> Any:
+        """单工具步:登记子任务执行 ctx.tools.execute(call, ctx),返回 ExecResult。
 
         call = llm 响应解析出的 ToolCall(name/raw_args/call_id);TLB-802/803/805
         等失败已由 tools.execute 捕获写 tool.error 回喂 LLM,不向主循环抛——本轮
         继续。协作式取消:子任务被 cancel() 取消时置 run.cancelled 并 re-raise,
         已开始工具如实留 partial(副作用不假装回滚)。
+
+        返回值:ExecResult(ok/summary)供 run_turn 做 F026 轮内连败判定(S1-03);
+        取消路径不返回(await 抛 CancelledError 后 re-raise)。
         """
         t = asyncio.create_task(ctx.tools.execute(call, ctx))
         self._child_tasks.add(t)                      # 登记:取消可传播(F025)
         try:
-            await t                                   # 60s 工具超时在 tools 内部(F017)
+            return await t                            # 60s 工具超时在 tools 内部(F017)
         except asyncio.CancelledError:
             run.cancelled = True                      # 协作式取消:不吞,继续传播
             raise
         finally:
             self._child_tasks.discard(t)
+
+    # ================================================ F026 轮内连败计数(S1-03)
+    @staticmethod
+    def _reset_turn_failures(ctx: Any) -> None:
+        """轮内连败计数清零(每轮起点;tools 层能力,未装配则跳过)。
+
+        与 tools_executor.execute_tool_calls 的 reset 同源。单步路径
+        (run_step → execute)此前完全不参与计数与终止,致 F026 在**实际主循环
+        路径**失效(仅批量入口生效)——本函数与 _turn_failure_capped 即修复。
+        """
+        fn = getattr(ctx.tools, "reset_turn_failures", None)
+        if callable(fn):
+            fn()
+
+    @staticmethod
+    def _turn_failure_capped(ctx: Any, call: Any, res: Any) -> bool:
+        """单步失败是否触发轮内连败封顶(同工具累计 ≥2)→ True = 终止本轮。
+
+        计入口径与 execute_tool_calls **逐条一致**(F026 spec 连败锚):仅
+        "参数校验失败"与"guard 拒绝"两类计入;超时/Provider 异常/审批 denied
+        不计。tools 层未提供 API(替身/旧装配)→ 恒 False,退化为修复前行为。
+        """
+        mark = getattr(ctx.tools, "mark_turn_failure", None)
+        if not callable(mark) or res is None or getattr(res, "ok", True):
+            return False
+        summary = str(getattr(res, "summary", "") or "")
+        if not summary.startswith(("参数校验", "guard")):
+            return False
+        return int(mark(str(getattr(call, "name", "") or ""))) >= 2
 
     # ======================================================== 三闸只读判定
     def _must_stop(self, ctx: Any, run: RunContext) -> Optional[str]:
@@ -285,7 +325,9 @@ class AgentLoop:
             return "max_turns"
         if run.cancelled:                             # 闸2 取消(声明式置位,F025)
             return "cancelled"
-        if ctx.scope.budget_state() in ("paused", "exhausted"):  # 闸3 预算(F032)
+        # 闸3 预算(F032):scope.budget_state 只产 ok/warn/exhausted(S1-02 删除
+        # 原 "paused" 死判据——该值不在 scope 返回面,永不成立)。
+        if ctx.scope.budget_state() == "exhausted":
             return "budget"
         return None
 
@@ -347,12 +389,11 @@ class AgentLoop:
 
         idle → 入队并拉起排水 run(await 至队空/边界终态,返回 RunResult);
         running → 入队(FIFO),返回 None,当前 run 结束后自动取下一件;
-        队满(>queue_limit)→ system.error[BUSY] 强同步 + 拒新(BUSY);
-        stopping/terminated → BUSY 拒(会话正在关闭/已结束)。
+        队满(>queue_limit)→ system.error[BUSY] 强同步 + 拒新(BUSY)。
         ctx:本 loop 尚未经 run() 绑定时显式注入(1:1 绑定后可不传,偏离说明 3)。
+        会话关闭态拒入归 agent.submit(agent.state ∈ stopping/closed 时 BUSY),
+        本函数不再判 loop 自身的 stopping/terminated(S1-02 删除该死态分支)。
         """
-        if self.state in ("stopping", "terminated"):
-            raise PyHError("BUSY", ctx={"advice": "会话正在关闭/已结束,请新开会话"})
         if ctx is None:
             ctx = self._ctx                           # 已绑定(1:1)则复用
         if self.state == "running" and len(self.pending) >= self.queue_limit:

@@ -39,8 +39,10 @@ DIS-SEAM announce 语义的消费侧入口)。
    尽力而为,单步失败记日志不阻断终局达成。
 7. _on_bus_event 的订阅模式 session:{sid}:* 按阶段 0 总线语义(按事件 type 前缀
    匹配)实际不命中任何会话事件——事件由 session 分发/落盘,此处订阅仅为
-   规范占位 + 未来恢复信号(approval.granted → loop.resume)预留;resume 语义
-   在单测中直接驱动 handler 验证。
+   规范占位 + 会话语义兜底过滤。2026-09-14 S1-02(ADR-014):原"approval.granted
+   + loop.state=paused → loop.resume()"分支已删除——AgentLoop 从无 paused 态、
+   亦无 resume() 方法,该分支不可达且一旦可达即 AttributeError。运行时暂停/
+   恢复推迟至 v1.1 Runtime Recovery。
 """
 from __future__ import annotations
 
@@ -301,8 +303,9 @@ class Agent:
         if self.state in ("stopping", "closed"):
             return                                  # 幂等:双触发(外壳/repair)安全
         prev, self.state = self.state, "stopping"
-        # 1) 有在途 run(running/paused)→ 先声明式取消(协作式,不杀进程)
-        if getattr(self.ctx.loop, "state", None) in ("running", "paused"):
+        # 1) 有在途 run → 先声明式取消(协作式,不杀进程)。S1-02:原判据含 "paused",
+        #    但 loop 无该态(ADR-014),收敛为唯一在途态 "running"。
+        if getattr(self.ctx.loop, "state", None) == "running":
             await self.ctx.loop.cancel(reason="close")
         # 2) finished 唯一写路径:失败回滚 state → close 可重入(见偏离 6)
         try:
@@ -401,15 +404,13 @@ class Agent:
     async def _on_bus_event(self, type_: str, env: Any) -> None:
         """会话事件订阅入口(owner=agent_id;按 session:{sid}:* 前缀投递)。
 
-        前缀订阅兜底过滤(env.session_id 必须为本会话);普通事件仅可见性钩子,
-        事实已在日志,禁止改动状态;loop paused + approval.granted → resume
-        (审批通过 → 重入 guard 链起点)。订阅者异常由总线 EVT-103 封装隔离。
+        前缀订阅兜底过滤(env.session_id 必须为本会话);事件事实已在日志,
+        本钩子只做可见性判定,**绝不改动状态**(S1-02 删除原 approval.granted →
+        loop.resume 分支,该分支不可达且引用了不存在的方法,见模块 docstring 7)。
+        订阅者异常由总线 EVT-103 封装隔离。
         """
         if getattr(env, "session_id", None) != self.session_id:
             return                                   # 前缀订阅兜底过滤
-        if (type_ == "approval.granted"
-                and getattr(self.ctx.loop, "state", None) == "paused"):
-            await self.ctx.loop.resume()             # 审批通过 → 重入 guard 链
         # 其余事件:事实已在日志,此处只做可见性钩子,禁止改动状态
 
     # ========================================================== 只读查询

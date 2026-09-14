@@ -59,14 +59,18 @@ class FakeStore:
 
 
 class FakeLoop:
-    """agent_loop 阶段前替身:state/wake/cancel/resume/pending 契约面。"""
+    """agent_loop 阶段前替身:state/wake/cancel/pending 契约面。
+
+    S1-02(ADR-014):不再提供 resume()——生产 AgentLoop 无该方法,替身若保留
+    会掩盖"调用不存在方法"的缺陷(此前 test_on_bus_event_*_resume* 长期假绿)。
+    替身面须与生产契约一致。
+    """
 
     def __init__(self, state: str = "idle", result=None) -> None:
         self.state = state
         self.pending = []
         self.woken: list[Envelope] = []
         self.cancel_calls: list[str] = []
-        self.resumes = 0
         self._result = result          # wake 返回值(模拟同步完成的 RunResult)
 
     async def wake(self, env):
@@ -76,10 +80,6 @@ class FakeLoop:
     async def cancel(self, reason: str = "cancelled") -> None:
         self.cancel_calls.append(reason)
         self.state = "idle"
-
-    async def resume(self) -> None:
-        self.resumes += 1
-        self.state = "running"
 
 
 class FakeTools:
@@ -503,24 +503,41 @@ async def test_detach_capability_idempotent_cleans_ctx_and_tools():
 
 # ================================================================ 事件订阅
 async def test_on_bus_event_ignores_foreign_session():
-    """前缀订阅兜底过滤:异会话事件不触发 resume。"""
-    loop = FakeLoop(state="paused")
+    """前缀订阅兜底过滤:异会话事件不改动任何 loop 状态(只读可见性钩子)。"""
+    loop = FakeLoop()
     ag, *_ = await _make_agent(loop=loop)
     foreign = types.SimpleNamespace(session_id=SID2, seq=99)
     await ag._on_bus_event("approval.granted", foreign)
-    assert loop.resumes == 0
+    assert loop.state == "idle"                  # 未因异会话事件被驱动
+    assert loop.cancel_calls == [] and loop.woken == []
 
 
-async def test_on_bus_event_approval_granted_resumes_paused_loop():
-    """approval.granted + loop paused → loop.resume(重入 guard 链起点)。"""
-    loop = FakeLoop(state="paused")
+async def test_agent_loop_has_no_resume_api():
+    """S1-02/ADR-014:v1.0 无运行时暂停/恢复——AgentLoop 不含 resume。
+
+    此前 _on_bus_event 会在 approval.granted + loop.state=paused 时调
+    loop.resume(),而该方法从不存在(paused 态亦永不成立);替身自带 resume
+    长期掩盖该缺陷。本用例以"生产类无此 API"钉死新契约,取代旧的 resume 断言。
+    """
+    from pyharness.core.agent_loop import AgentLoop
+
+    assert not hasattr(AgentLoop, "resume"), \
+        "v1.0 不实现运行时恢复(ADR-014);resume 留待 v1.1 Runtime Recovery"
+
+
+async def test_on_bus_event_approval_granted_does_not_mutate():
+    """approval.granted 属"事实已在日志"的可见性钩子——不改 loop 状态。
+
+    (旧契约"paused loop → resume"已按 ADR-014 删除,见上一条用例。)
+    """
+    loop = FakeLoop()
     ag, *_ = await _make_agent(loop=loop)
     own = types.SimpleNamespace(session_id=SID1, seq=9)
     await ag._on_bus_event("approval.granted", own)
-    assert loop.resumes == 1
-    # 非恢复事件(事实已在日志):只做可见性钩子,不改状态
+    assert loop.state == "idle"
+    # 非恢复事件(事实已在日志):同样只做可见性钩子,不改状态
     await ag._on_bus_event("user.message", own)
-    assert loop.resumes == 1
+    assert loop.state == "idle"
 
 
 # ================================================================ 只读/隔离

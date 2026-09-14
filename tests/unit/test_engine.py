@@ -198,3 +198,77 @@ async def test_owned_task_message_assigns_each_tasks_own_message():
 async def _enq(log_, task_id: str) -> None:
     await log_.append("task.enqueued", {"task_id": task_id, "pos": 1},
                       actor="system")
+
+
+# ============================================== S1-01 GuardChain 经工厂接线
+async def test_guard_from_config_injects_schema_validator(tmp_path):
+    """S1-01:engine 经 GuardChain.from_config 装配 → g1 g-schema 的 validator
+    真实注入。
+
+    修复前 engine 直构 GuardChain(session,bus) → validator 恒 None →
+    g_schema_check 直接 return allow → "内层复查防旁路"(INV-04)在生产链路上
+    永不生效。证据:畸形参数被 g1 拒、合规参数放行。
+    """
+    from pyharness.core.tools_guard import ToolCall
+
+    cfg = _cfg(tmp_path)
+    spine = await build_spine(cfg, sid="s-eng-gv-000001",
+                              sessions_dir=_sessions_dir(tmp_path))
+    try:
+        # build_spine 不写 session.created(首事件由调用方负责)→ 引导后才能审计
+        await spine.session.append("session.created",
+                                   {"title": "", "model": "deepseek-chat"},
+                                   actor="system")
+        # 畸形:fs.read_file 缺必填 path → g1 复查失败(TLB-803) → 终局拒
+        bad = ToolCall(name="fs.read_file", raw_args={}, call_id="c-bad")
+        assert str(await spine.guard.evaluate(bad, spine.scope)) == "reject", \
+            "g1 未生效:validator 缺失时 g-schema 恒 allow(INV-04 失效)"
+
+        # 合规:path 在 workspace 内 → 全链 allow(证明拒来自 schema 而非误拦)
+        good = ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                        call_id="c-good")
+        assert str(await spine.guard.evaluate(good, spine.scope)) == "allow"
+    finally:
+        _close_spine(spine)
+
+
+async def test_guard_from_config_applies_cfg_disabled(tmp_path):
+    """S1-01:cfg.security.guards.disabled 在**生产装配路径**生效。
+
+    修复前 from_config 零生产调用点 → 禁用声明永不生效(运维以为关了,实际仍
+    在链上)。证据:同一越界调用,默认链被 g-fs-path 拒;禁用后放行。
+    """
+    from pyharness.core.tools_guard import ToolCall
+
+    def _escape() -> object:
+        # danger=none 且不被 g4(读凭据)/g6(exec)/g7(覆写)/g5(外发)管辖
+        return ToolCall(name="fs.list_dir", raw_args={"path": "../../outside"},
+                        call_id="c-esc")
+
+    cfg_on = _cfg(tmp_path)
+    spine_on = await build_spine(cfg_on, sid="s-eng-gd-on-000001",
+                                 sessions_dir=_sessions_dir(tmp_path))
+    try:
+        await spine_on.session.append("session.created",
+                                      {"title": "", "model": "deepseek-chat"},
+                                      actor="system")
+        assert "g-fs-path" in spine_on.guard.enabled_guard_ids()
+        assert str(await spine_on.guard.evaluate(_escape(), spine_on.scope)) \
+            == "reject", "默认链应由 g-fs-path 拒越界路径"
+    finally:
+        _close_spine(spine_on)
+
+    cfg_off = _cfg(tmp_path)
+    cfg_off.security.guards.disabled = ["g-fs-path"]
+    spine_off = await build_spine(cfg_off, sid="s-eng-gd-off-000001",
+                                  sessions_dir=_sessions_dir(tmp_path))
+    try:
+        await spine_off.session.append("session.created",
+                                       {"title": "", "model": "deepseek-chat"},
+                                       actor="system")
+        assert "g-fs-path" not in spine_off.guard.enabled_guard_ids(), \
+            "cfg 声明的禁用项未生效(修复前 from_config 未被调用)"
+        assert str(await spine_off.guard.evaluate(_escape(), spine_off.scope)) \
+            == "allow", "禁用 g-fs-path 后该越界调用不应再被 g3 拒"
+    finally:
+        _close_spine(spine_off)

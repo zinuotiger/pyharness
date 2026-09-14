@@ -462,7 +462,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # ---- 工具链(F008/F014/F015 真装配):fs.* 4 工具 + 四关执行器 + guard + 审批
     from pyharness.core.tools_registry import ToolRegistry
     from pyharness.core.tools_executor import ToolExecutor
-    from pyharness.core.tools_guard import GuardChain
+    from pyharness.core.tools_guard import from_config as guard_from_config
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core import tool_fs
 
@@ -471,7 +471,19 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core import spill as spill_mod
     spill_mod.register(tool_reg)               # storage.spill.read(F039 读工具,strict 可见)
     tools = ToolExecutor(tool_reg)             # ctx.tools: schemas_for + execute(四关管道)
-    guard = GuardChain(session=log_, bus=bus)  # 内置 g1-g7(单调,事件落 session)
+    # 内置 g1-g7(单调,事件落 session)——2026-09-14 S1-01 修复:此前直构
+    # GuardChain(session,bus),绕过 from_config,导致三处装配缺口:
+    #   ① validator 恒 None → g1 g-schema 在生产恒 allow(INV-04 内层复查失效);
+    #   ② cfg.security.guards.disabled 永不生效(运维以为关了,实际仍在链上);
+    #   ③ 凭据清单/path_exists/link_resolver 走默认,与 config 声明脱节。
+    # 现经工厂装配并注入 validator=registry.validate_args(关1b 同源校验面)。
+    # approval_channel=True:engine 装配面视同交互通道在位(与修复前 None 的
+    # "视同有通道"语义等价);无通道场景仍由 approval 层 APR-501 兜底拒绝,
+    # 故本项不改变 headless 行为。
+    guard = guard_from_config(
+        cfg, session=log_, bus=bus,
+        validator=tool_reg.validate_args,
+        approval_channel=True)
     approval = ApprovalProvider(session=log_, bus=bus, config=cfg,
                                 channel="desktop")   # 审批请求入 pending,桌面轮询
 

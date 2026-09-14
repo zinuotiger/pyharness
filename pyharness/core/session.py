@@ -276,39 +276,65 @@ class SessionLog:
         if is_transient(type_):
             raise_code("EVT-100", type_=type_, hint="瞬时事件禁止 append 入日志:"
                        "llm.chunk/registry.updated 仅经总线分发")
-        # 3) finished 单次:先置位防并发双写(终态不可逆;EVT-104 由第 1 步接住重复)
-        if type_ == "session.finished":
+        # 3) finished 单次:置位防并发双写(终态不可逆;EVT-104 由第 1 步接住重复)。
+        #    第 1 步至此全为同步段(无 await),同一次事件循环回合内不可能插入第二条
+        #    finished,故置位仍具并发防护力。
+        #    S1-04 修复:置位必须**在失败时回滚**——否则 EVT-100/102(校验)或
+        #    PERS-202(落盘)之后 _closed 永久为真,agent.close 的重试(其自身
+        #    state 已回滚,agent.py:307-314)会被第 1 步 EVT-104 短路,"close
+        #    幂等可重入"不成立。回滚语义:未成功落盘的 finished 不构成事实。
+        finished_inflight = type_ == "session.finished"
+        if finished_inflight:
             self._closed = True
-        # 4) session.created 必须为会话首事件且仅一条(seq=1 引导,EVT-106)
-        if type_ == "session.created" and self._seq > 0:
-            raise_code("EVT-106", type_=type_,
-                       hint="session.created 必须为会话首事件(seq=1),同会话仅一条")
-        # 5) 引用锚点预检:edited→user.message / feedback→agent.message(BadTarget)
-        if type_ == "user.message_edited" and not self._ref_exists(
-                payload.get("target_seq", 0), "user.message"):
-            raise_code("EVT-100", type_=type_,
-                       hint=f"BadTarget:target_seq 必须指向已存在的 user.message,"
-                            f"got {payload.get('target_seq')}")
-        if type_ == "user.feedback" and not self._ref_exists(
-                payload.get("target_seq", 0), "agent.message"):
-            raise_code("EVT-100", type_=type_,
-                       hint=f"BadTarget:target_seq 必须指向已存在的 agent.message,"
-                            f"got {payload.get('target_seq')}")
-        # 6) 框架打点 + 五步校验链(失败拒写:EVT-100/102/101/106)
-        env = make_envelope(self.sid, type_, actor, payload,
-                            origin=origin, task_id=task_id, trace=trace,
-                            seq_state=self._seq_state)
-        # 7) 记账 + 入内存:订阅者/派生视图可即时读(先于总线,spec 顺序)
-        self._seq = env.seq
-        self._seq_state.commit(env)           # 分配器前进(防漂移;失败由 repair 收尾)
-        if env.type == "session.created":
-            self._seq_state.open.add(self.sid)  # pending → active 开闸
-        self._absorb(env)
-        # 8) 总线分发:日志订阅者(§8)负责物理落盘
-        await self._dispatch(env)
-        # 9) 强同步三类/显式 sync:落盘成功才返回(PERS-202 上抛,repair 后重试)
-        if sync or env.type in SYNC_TYPES:
-            await self._flush(env)
+        absorbed = False
+        try:
+            # 4) session.created 必须为会话首事件且仅一条(seq=1 引导,EVT-106)
+            if type_ == "session.created" and self._seq > 0:
+                raise_code("EVT-106", type_=type_,
+                           hint="session.created 必须为会话首事件(seq=1),"
+                                "同会话仅一条")
+            # 5) 引用锚点预检:edited→user.message / feedback→agent.message(BadTarget)
+            if type_ == "user.message_edited" and not self._ref_exists(
+                    payload.get("target_seq", 0), "user.message"):
+                raise_code("EVT-100", type_=type_,
+                           hint=f"BadTarget:target_seq 必须指向已存在的 "
+                                f"user.message,got {payload.get('target_seq')}")
+            if type_ == "user.feedback" and not self._ref_exists(
+                    payload.get("target_seq", 0), "agent.message"):
+                raise_code("EVT-100", type_=type_,
+                           hint=f"BadTarget:target_seq 必须指向已存在的 "
+                                f"agent.message,got {payload.get('target_seq')}")
+            # 6) 框架打点 + 五步校验链(失败拒写:EVT-100/102/101/106)
+            env = make_envelope(self.sid, type_, actor, payload,
+                                origin=origin, task_id=task_id, trace=trace,
+                                seq_state=self._seq_state)
+            # 7) 记账 + 入内存:订阅者/派生视图可即时读(先于总线,spec 顺序)
+            self._seq = env.seq
+            self._seq_state.commit(env)       # 分配器前进(防漂移;失败由 repair 收尾)
+            if env.type == "session.created":
+                self._seq_state.open.add(self.sid)  # pending → active 开闸
+            self._absorb(env)
+            absorbed = True
+            # 8) 总线分发:日志订阅者(§8)负责物理落盘
+            await self._dispatch(env)
+            # 9) 强同步三类/显式 sync:落盘成功才返回(PERS-202 上抛,repair 后重试)
+            if sync or env.type in SYNC_TYPES:
+                await self._flush(env)
+        except BaseException:
+            if finished_inflight:
+                # 回滚语义:未成功的 finished 不构成事实。判据取**内存事实**——
+                # absorbed 且缓存尾已是 finished(事件确已入内存并已分发,总线
+                # 订阅者可能已落盘)→ 保持终态位,维持"缓存有 finished ⇔ _closed"
+                # 的一致;否则(校验 EVT-100/102 等在入缓存前失败)→ 回滚置位,
+                # 使 agent.close 的重试可重入(修复目标)。
+                # 残留边界:同进程内"已分发但 flush 失败"仍为终态(retry 会 EVT-104),
+                # 跨进程 repair 后按日志事实重算 → 重试可入;与 agent.close
+                # docstring 6 的"repair 后重试"口径一致(非本次修复范围)。
+                absorbed_finished = (
+                    absorbed and bool(self._cache)
+                    and self._cache[-1].type == "session.finished")
+                self._closed = absorbed_finished
+            raise
         # 10) 派生缓存整体失效(INV-03:缓存纪律)
         self.history_cache = None
         self._needs_rebuild = False

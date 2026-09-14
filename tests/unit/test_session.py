@@ -65,6 +65,91 @@ async def _bootstrap(log: SessionLog) -> None:
                      actor="system")
 
 
+# ================================================== S1-04 终态置位失败回滚
+class _PendingBufferStore(FakeStore):
+    """真源模型对齐 persistence:record 入待刷缓冲,**flush 成功才落 replay 面**。
+
+    真实 SessionStore.append 即"入 _pending → flush 才 write";未 flush 的事件
+    不在真源,replay 看不到 —— 这是"落盘失败 ⇒ 未发生"的物理依据。
+    fail_after: 放行 N 次 flush 后失败一次(模拟 PERS-202)。
+    """
+
+    def __init__(self, *, fail_after: int = 0) -> None:
+        super().__init__()
+        self.remaining = fail_after
+        self.failures = 0
+        self._pending: list[Envelope] = []
+
+    def record(self, type_, payload) -> None:
+        if isinstance(payload, Envelope):
+            self._pending.append(payload)          # 入缓冲(尚未落盘)
+
+    async def flush(self, seq: int) -> None:
+        if self.remaining <= 0:
+            self.remaining = 10 ** 9               # 只失败一次,便于验证
+            self.failures += 1
+            raise PyHError("PERS-202", ctx={"hint": "模拟落盘失败"})
+        self.remaining -= 1
+        self.flushed.append(seq)
+        self._rows.extend(self._pending)            # 落盘:缓冲 → 真源
+        self._pending.clear()
+
+
+async def test_finished_validation_failure_rolls_back_closed():
+    """S1-04 主修复:finished 因**校验失败**未落盘 → _closed 回滚 → 关闭可重入。
+
+    修复前 _closed 在"第 3 步"先置位,校验失败(EVT-100/102)后永久为真 →
+    agent.close 的重试(其自身 state 已回滚)被第 1 步 EVT-104 短路,
+    "close 幂等可重入"(agent.py docstring 6)不成立。本用例 = 缺陷复现 + 修复验证。
+    """
+    log, _store = _store_wired()
+    await _bootstrap(log)
+
+    # payload 非法(reason 必填)→ make_envelope 抛 EVT-100,事件未入缓存
+    with pytest.raises(PyHError) as ei:
+        await log.append("session.finished", {}, actor="system", sync=True)
+    assert ei.value.code == "EVT-100"
+    assert log._closed is False, \
+        "校验失败后 _closed 必须回滚(否则关闭不可重入)"
+
+    # 同一进程内重试成功(修复目标;修复前此处即 EVT-104)
+    await log.append("session.finished", {"reason": "idle"},
+                     actor="system", sync=True)
+    assert log._closed is True
+    # finished 仍只写一次:再次 append → EVT-104
+    with pytest.raises(PyHError) as ei2:
+        await log.append("session.finished", {"reason": "idle"},
+                         actor="system", sync=True)
+    assert ei2.value.code == "EVT-104"
+
+
+async def test_finished_flush_failure_keeps_closed_but_log_empty():
+    """S1-04 边界锁定 + 残留说明:finished 已入内存后 flush 失败。
+
+    断言两点(均为**刻意**语义,非缺陷):
+      ① `_closed` 保持 True —— 与内存事实一致(缓存尾已是 finished),避免
+         "缓存有 finished ⇔ _closed" 脱钩,不给二次 finished 写入留口;
+      ② 真源为空(缓冲未落盘)—— 物理上 finished 并未发生。
+    残留边界:`_closed=True` 而真源为空时,同进程内重试仍 EVT-104;跨进程由
+    repair/重启按日志事实重算(与 agent.close docstring 6 "repair 后重试可重入"
+    口径一致)。该边界超出本次修复范围,已在 S1_CHANGE_REPORT 登记。
+    """
+    store = _PendingBufferStore(fail_after=0)
+    bus = EventBus()
+    for t in EVENT_TYPES:
+        bus.subscribe(t, store.record, owner="persistence")
+    log = SessionLog(sid=SID, persistence=store, bus=bus)
+    await _bootstrap(log)                           # created → 缓冲(非 sync 不 flush)
+
+    with pytest.raises(PyHError) as ei:
+        await log.append("session.finished", {"reason": "idle"},
+                         actor="system", sync=True)
+    assert ei.value.code == "PERS-202"
+    assert store.failures == 1
+    assert log._closed is True, "已入内存(缓存尾=finished)→ 保持终态位(边界语义)"
+    assert store._rows == [], "flush 失败 ⇒ 真源为空(缓冲未落盘,未发生)"
+
+
 # ===================================================================== INV-01
 # 方法面钉死:append-only,无任何 update/delete/改写/清空 API(spec:方法面 grep 断言)
 _FORBIDDEN_FRAGMENTS = ("update", "delete", "remove", "pop", "clear",

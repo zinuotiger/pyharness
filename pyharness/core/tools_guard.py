@@ -906,7 +906,10 @@ def match_guard_by_hook(defn: Any) -> list[Guard]:
 def from_config(cfg: Any, *, credentials: Any = None,
                 workspace: Any = None, session: Any = None,
                 bus: Any = None,
-                approval_channel: Optional[bool] = None) -> GuardChain:
+                approval_channel: Optional[bool] = None,
+                validator: Optional[Callable[..., dict]] = None,
+                path_exists: Optional[Callable[[str], bool]] = None,
+                link_resolver: Optional[Callable[[str], str]] = None) -> GuardChain:
     """启动第④步装配:内置 g1-g7(固定序)+ config 显式禁用项(DIS-SEAM §2.5)。
 
     读取:cfg.security.guards.disabled(五内置真子集,越权在 config 层已拒
@@ -916,6 +919,12 @@ def from_config(cfg: Any, *, credentials: Any = None,
     签名差异(spec 伪码含 scope 参数):链按 call 绑定 scope,装配不消费 scope
     → 移除;credentials/workspace 参数保留为注入位(见偏离 5/7)。
     异常:CFG-601(装配序违反/非法禁用项)、TLB-801(链装配重名)。
+
+    注入位(2026-09-14 S1-01 补齐):validator/path_exists/link_resolver 原经
+    GuardChain 构造注入,但本工厂此前不透传 → 装配层若改用本入口,则 g1 的
+    validator 恒 None(g-schema 空转,INV-04 的内层复查失效)、g4 落到兜底清单、
+    g7 用默认 os.path.exists。现全部透传(关键字可选,缺省 None = 既有行为,
+    API 向后兼容);validator 生产值 = registry.validate_args(engine 装配注入)。
     """
     cred_paths: list[str] = []
     if credentials is not None:
@@ -926,7 +935,8 @@ def from_config(cfg: Any, *, credentials: Any = None,
         cred_paths = [str(getattr(f, "file", DEFAULT_CREDENTIAL_FILES[0]))]
     chain = GuardChain(
         credential_paths=cred_paths, session=session, bus=bus,
-        approval_channel=approval_channel)
+        approval_channel=approval_channel, validator=validator,
+        path_exists=path_exists, link_resolver=link_resolver)
     for gid in (getattr(getattr(cfg, "security", None), "guards", None)
                 and getattr(cfg.security.guards, "disabled", None)) or []:
         chain.disable(str(gid), config_ref="security.guards.disabled")

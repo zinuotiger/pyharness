@@ -80,6 +80,10 @@ READ_SPILL_BYTES: int = 65536
 WRITE_MAX_BYTES: int = 1_048_576
 """写文件上限 1MB(schema maxLength 契约层拒,TLB-803 零执行,F035/PARAMETER-ANCHOR)。"""
 
+_APPEND_MAX_BYTES: int = WRITE_MAX_BYTES
+"""mode=append 的目标文件上限(=写入上限):append 实现为整读+重写,超限则 TLB-805 拒,
+防对超大文件做无界整读(P3:append 无界整读)。"""
+
 LIST_MAX_ENTRIES: int = 500
 """目录列举条目上限(F036;>500 截断留痕,防巨目录打爆上下文)。"""
 
@@ -352,10 +356,14 @@ async def write_file(args: dict, ctx: Any) -> dict:
     content = args["content"]                    # 契约已验 ≤1MB
     if args.get("mode", "write") == "append" and p.exists():
         try:
+            if p.stat().st_size > _APPEND_MAX_BYTES:
+                raise_code("TLB-805", path=str(p),
+                           advice=f"追加目标超过 {_APPEND_MAX_BYTES} 字节上限"
+                                  "(整读+重写代价过大);改用 write 或分段")
             content = p.read_text(encoding="utf-8") + content  # append=复制+追加
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             raise_code("TLB-805", path=str(p), cause=e,
-                       advice="追加读取原文件失败(权限/IO),请重试")
+                       advice="追加读取原文件失败(权限/IO/编码非 UTF-8),请重试")
     try:
         p.parent.mkdir(parents=True, exist_ok=True)   # 自动建目录
     except OSError as e:

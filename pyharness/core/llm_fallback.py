@@ -58,6 +58,7 @@ log = logging.getLogger("pyharness.llm_fallback")
 # 304 业务错不降级直抛;301 超时只在退避内消化。
 _DEGRADE_CODES: tuple[str, ...] = ("LLM-302", "LLM-303")
 _RETRYABLE_CODES: tuple[str, ...] = ("LLM-301", "LLM-303")
+_MAX_CHAIN_BACKOFF_S: float = 60.0     # 链级退避总预算:全链重试 sleep 累计上限(P3)
 
 
 # ------------------------------------------------------------------ 类型别名
@@ -217,6 +218,7 @@ class FallbackChain:
         # 降级总开关(CFG llm.degrade.enabled):关 = 只走当前 idx 适配器,败即 LLM-310
         end = len(self.chain) if enabled else min(self.idx + 1, len(self.chain))
         start = self.idx
+        sleep_left = [_MAX_CHAIN_BACKOFF_S]   # 全链退避总预算(跨适配器共享,P3)
         for i in range(start, end):
             name = self.chain[i]
             # 探针 down → 跳过(仅跳过循环起始位之后的;起始位不跳:仍尝试以测恢复,
@@ -226,7 +228,8 @@ class FallbackChain:
             await BudgetGuard.check(ctx)      # 每请求前置预算闸(F032)
             try:
                 return await self._retry_adapter(name, messages, tools, ctx,
-                                                 method=method)
+                                                 method=method,
+                                                 sleep_left=sleep_left)
             except PyHError as e:
                 err_hist.append((name, e.code))
                 if (e.code in _DEGRADE_CODES and enabled
@@ -244,10 +247,12 @@ class FallbackChain:
 
     # ====================================================== 指数退避(F028)
     async def _retry_adapter(self, name: str, messages, tools, ctx, *,
-                             method: str = "chat") -> Any:
+                             method: str = "chat", sleep_left=None) -> Any:
         """单适配器内重试循环:只重试 LLM-301/303;基数 1s×2 递增、上限 attempts
         (默认 4)、±jitter(默认 30%)抖动;每次等待落 llm.retry 事件(sleep 可被取消
         F025);退避耗尽 → LLM-303(exhausted)交 chat_with_fallback 降级决策。
+        sleep_left = 链级退避总预算 [剩余秒] 可变单元(chat_with_fallback 跨适配器共享),
+        累计 sleep 不得超过;耗尽即视为该层退避失败,交降级(P3:退避 sleep 在总闸外)。
         """
         cfg = ctx.config.llm.retry
         n_attempts = max(1, int(cfg.attempts))        # 0 视同 1(偏离 9)
@@ -274,7 +279,13 @@ class FallbackChain:
                      "delay_ms": int(delay * 1000)},
                     actor="llm")
                 # sleep 可被取消(F025);总重试时长计入请求预算
-                await asyncio.sleep(delay * random.uniform(1 - jitter, 1 + jitter))
+                wait = delay * random.uniform(1 - jitter, 1 + jitter)
+                if sleep_left is not None:            # 链级退避总预算闸
+                    if sleep_left[0] <= 0:
+                        raise_code("LLM-303", model=name, exhausted=True)
+                    wait = min(wait, sleep_left[0])
+                    sleep_left[0] -= wait
+                await asyncio.sleep(wait)
                 delay *= 2
 
     # ====================================================== 降级条件判定(ADI §3.3)
@@ -299,6 +310,13 @@ class FallbackChain:
         chat() 落(见 llm.py 职责)——此处只计数留痕,事件尽力而为(偏离 8)。
         """
         n = ctx.counters.degrade_add(failed, to)      # 会话级降级计数(可重建)
+        # CND-08 Producer→State:置"承接适配器"的降级来源,使其后续 chat() 的
+        # llm.request 携带 degraded_from(否则该字段恒缺失 = dead trigger)。守卫式
+        # 调用,兼容无该方法的测试替身。
+        ad = (self.adapters or {}).get(to)
+        mark = getattr(ad, "mark_degraded_from", None)
+        if callable(mark):
+            mark(failed)
         if n > int(ctx.config.llm.degrade.max_per_session):
             _fire_emit(self.bus, "system.error", {
                 "code": "LLM-310",

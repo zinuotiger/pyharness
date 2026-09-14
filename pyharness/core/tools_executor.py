@@ -12,8 +12,9 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
       失败 = Provider 零调用,INV-06)→ 落 tool.call(args+raw_args 双份存档)
   关2 scope 前置(GRD-401)→ guard 单调链 evaluate(F014;reject 终局零副作用,
       guard.rejected 强同步)→ 审批(F015,granted 重入链起点,GRD-403 语义)
-  关3 Provider 执行(同步 handler 经 asyncio.to_thread 跑线程池;总超时 =
+  关3 Provider 执行(同步 handler 经**每次调用独立**单工线程池承载;总超时 =
       defn.timeout_s or 60s(TLB-805,TLB-805 码即默认超时参数锚);wait_for 掐断;
+      超时/取消后该线程池被驱逐不复用(线程后台跑完,见偏离 13);
       CancelledError 不吞——已发生副作用如实写 partial 后 re-raise(F025))
   关4 结果检查 finalize(输出 schema 校验 → 超长转 spill(F039)→ ≤2KB 摘要 →
       tool.result;每调用恰一条 result 或 error,trace.parent_seq 关联父响应)
@@ -37,9 +38,11 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
    将使 danger=high 工具(链上 g-danger 恒判 approval)与覆写转审批工具(g-overwrite
    目标仍存在恒判 approval)在人类批准后永远无法执行——F015 核心用途失效。落地为:
    重入 decision=reject(新拒/策略收紧)→ GRD-403(记录 rejected id,批准作废);
-   decision=approval(链仍要求人类,而本次调用同参刚获 granted)→ 视为已授权放行;
-   decision=allow → 正常执行。GRD-403 语义只落在"新拒"(errors.py 登记:批准后被
-   新拒),approval 决策不是拒绝、不存在被"翻回"问题(单调性指拒绝不可被批准覆盖)。
+   decision=approval(链仍要求人类,而本次调用同参刚获 granted)→ 经绑定指纹校验
+   (本轮参数指纹 == approval 提供器为该 call_id 记录的 binding)一致才放行,不一致
+   = 批准针对异参数(篡改/复用)→ GRD-403 拒;decision=allow → 正常执行。GRD-403
+   语义只落在"新拒"(errors.py 登记:批准后被新拒),approval 决策不是拒绝、不存在
+   被"翻回"问题(单调性指拒绝不可被批准覆盖)。
 4. tool.error 事件与 payload 模型对齐(extra=forbid 实测超字段 append → EVT-100):
    payload 仅 {name, call_id, code, message}(无 reason/明细字段);解析失败
    (call=None,尚无 ToolCall)时 name/call_id 取 raw 中的尝试名/补生成 id,保证
@@ -54,11 +57,11 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
    "ok=True,truncated=True" 为另一口径,以 executor spec 职责 4(ok=False,
    partial=true)为准。仅 Provider 已启动(invoke 已进入)才写 partial;取消落在
    执行前则直接 re-raise(无副作用即无事可记)。
-7. Provider 调用面:spec 伪码 `provider.handle(args, ctx)` 为同步函数由 to_thread
-   承载;落地兼容两形态——同步 handle/裸 callable 经 asyncio.to_thread(线程池),
-   async handle 直接协程 wait_for(异步 handler 不应占用线程池)。两者同样受
-   timeout 掐断与取消语义。Provider 缺 handle 且不可调用 → TLB-802(契约在但实现
-   损坏,拒绝执行)。
+7. Provider 调用面:spec 伪码 `provider.handle(args, ctx)` 为同步函数由线程池
+   承载;落地兼容两形态——同步 handle/裸 callable 经**每次调用独立**的
+   ThreadPoolExecutor(单工),async handle 直接协程 wait_for(异步 handler 不应
+   占用线程池)。两者同样受 timeout 掐断与取消语义。Provider 缺 handle 且不可
+   调用 → TLB-802(契约在但实现损坏,拒绝执行)。
 8. 输出契约编译复用 tools_registry 的 schema→pydantic 编译器(私有 _compile_model
    同包借用,单向依赖不变;避免复制第二套编译器造成双源漂移)。_finalize 对
    compile/校验失败(ValidationError/ValueError)统一转 tool.error(TLB-803,
@@ -75,6 +78,12 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
 12. 超时/异常消息用动态实际超时值(spec 伪码字面 "60s" 在 timeout_s 覆盖时失真),
    错误文本经 e.to_model_message()(errors.py 落地名;spec 伪码 to_llm_text 为
    ERR.md 文档名,同一函数两处命名,以实现为准)。
+13. 超时"杀"同步 Provider 线程的落地语义:Python 无法安全终止运行中线程,故不做
+   真杀,改为**驱逐不复用**——同步 Provider 经每次调用独立单工线程池执行,超时/取消
+   掐断后线程在后台把副作用跑完(已发生副作用仍如实 error/partial 标注,不假装回滚),
+   但该线程池 `shutdown(wait=False)` 且不入共享池,绝不被复用于后续调用。此举消除
+   "超时线程回共享池 → mark_idle 后新调用复用到同一物理线程 → 重叠副作用"的竞态;
+   驱逐池保留引用(防 GC 半途回收线程),超过 _ZOMBIE_POOL_LIMIT 时裁剪已空闲池。
 
 依赖方向(单向,INV-08):本文件 → tools_registry(lookup/validate_args/lookup_provider/
 register_tool/schemas_for)、tools_guard(ToolCall/Decision)、errors(raise_code)、
@@ -85,11 +94,13 @@ approval/agent/llm(审批/消费方经 ctx 注入)。本文件被 tools_guard/to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 
@@ -108,12 +119,21 @@ DEFAULT_TOOL_TIMEOUT: int = 60          # F017 工具默认超时(PARAMETER-ANCH
 SPILL_THRESHOLD: int = 2048             # 结果文本 >2KB → spill(F039,DIS-SEAM §6.1 G1)
 SUMMARY_MAX_CHARS: int = 2000           # tool.result summary ≤2KB(payload max 2048)
 PARSE_FAIL_NAME: str = "?"              # 解析失败事件 name 回落值(缺工具名时,审计占位)
+_ZOMBIE_POOL_LIMIT: int = 32            # 僵尸线程池保留上限(超出即裁剪已空闲池)
 
 # 参数摘要化优先展示键(审批展示用:先动作后其余,按风险/动作语义排序)
 _SUMMARY_PRIORITY: tuple[str, ...] = (
     "url", "domain", "host", "target", "path", "src", "dst", "dir",
     "mode", "command", "cmd", "shell", "message", "content",
 )
+
+# 动作/内容承载键:审批展示时头尾双展示(防恶意尾部被截断隐藏——人类只看到
+# >80 字命令的开头就批准,危险命令段若在尾部则被省略号吞掉)
+_SUMMARY_TAIL_KEYS: frozenset = frozenset(
+    {"command", "cmd", "code", "input", "content", "text", "script",
+     "prompt", "message", "args", "path", "query"})
+
+_TAIL_KEEP: int = 24              # 尾部保留宽度(头尾双展示:尾 ≥24 字符可见)
 
 
 # ================================================================ ExecResult
@@ -154,8 +174,12 @@ def summarize_text(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
     return text[: max_chars - 1] + "…"
 
 
-def _short_value(v: Any, width: int = 80) -> str:
-    """摘要值短化:dict/list 只报结构;字符串截断;None/bool/int 直写。"""
+def _short_value(v: Any, width: int = 80, key: Optional[str] = None) -> str:
+    """摘要值短化:dict/list 只报结构;字符串截断;None/bool/int 直写。
+
+    内容承载键(key ∈ _SUMMARY_TAIL_KEYS)超宽时头尾双展示(保留尾部 _TAIL_KEEP
+    字符)——审批视图不得把危险命令段藏在省略号后;普通键单侧截断。
+    """
     if isinstance(v, dict):
         return f"<dict {len(v)}键>"
     if isinstance(v, (list, tuple)):
@@ -163,16 +187,19 @@ def _short_value(v: Any, width: int = 80) -> str:
     if v is None:
         return "null"
     s = str(v)
-    if len(s) > width:
-        return s[: width - 1] + "…"
-    return s
+    if len(s) <= width:
+        return s
+    if key is not None and key in _SUMMARY_TAIL_KEYS:
+        head = s[: max(0, width - _TAIL_KEEP - 2)]
+        return f"{head} … {s[-_TAIL_KEEP:]}"
+    return s[: width - 1] + "…"
 
 
 def summarize(args: Any, *, max_chars: int = 400) -> str:
     """Consumer 层参数摘要化(审批展示用;spec 速览表 def summarize(args))。
 
     不由 Provider/LLM 生成(防注入操纵摘要,SECURITY §5):只做键值短化 + 动作
-    键优先排序;超长截断。敏感值仅截断不语义化(人类审批通道,摘要可完整展示)。
+    键优先排序;超长截断。content/command 类键头尾双展示(尾部可见,防截断隐藏)。
     """
     if not isinstance(args, dict) or not args:
         return "(无参数)"
@@ -180,12 +207,25 @@ def summarize(args: Any, *, max_chars: int = 400) -> str:
                                           if k in _SUMMARY_PRIORITY else 99, k))
     parts: list[str] = []
     for k in ordered:
-        seg = f"{k}={_short_value(args[k])}"
+        seg = f"{k}={_short_value(args[k], key=k)}"
         if sum(len(p) for p in parts) + len(seg) > max_chars:
             parts.append("…")
             break
         parts.append(seg)
     return ", ".join(parts)
+
+
+def _approval_binding(call: Any, args: dict) -> str:
+    """审批绑定指纹:sha1(tool + 规范化参数序列化)。
+
+    唯一用途 = 把"人类批准"与"实际执行"绑定到同一调用:granted 后重入 guard
+    得到 approval 决策时,校验本指纹 == 审批提供器为该 call_id 记录的绑定,
+    不一致 = 批准针对的是不同参数(注入/篡改),拒绝执行(GRD-403)。参数序列化
+    用 sort_keys 定序(同一调用内同 args 确定性一致;跨会话信任仍走 approval 层
+    自己的 canonical_json)。
+    """
+    canon = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha1(f"{call.name}\n{canon}".encode("utf-8")).hexdigest()
 
 
 # ================================================================ ToolExecutor
@@ -212,6 +252,9 @@ class ToolExecutor:
         self._fail: dict[str, int] = {}         # F026 轮内连败计数
         self._out_models: dict[int, Any] = {}   # 输出契约编译缓存(id(defn) 键)
         self._active: Optional[asyncio.Future] = None   # cancel_current 在途句柄
+        # 超时/取消后被驱逐的同步 Provider 线程池(线程仍在后台跑完副作用);
+        # 保留引用防 GC 半途回收线程,超过上限时裁剪已空闲池(见 _prune_zombies)
+        self._zombie_pools: set[ThreadPoolExecutor] = set()
 
     # ------------------------------------------------------------ 门面透传
     def register(self, defn: Any, *, provider: Any = None) -> str:
@@ -443,9 +486,12 @@ class ToolExecutor:
         except PyHError as e:                           # Provider 结构化错误
             return await self._on_error(ctx, call, e.code, e.to_model_message())
         except Exception as e:                          # noqa: BLE001 Provider 运行异常
+            # 回喂 LLM 的 tool.error 不含异常原文(str(e) 可能带内部路径/实现细节,
+            # P2 收紧):只报类型名判断失败性质;完整堆栈留本地日志,审计以日志为准。
+            log.exception("tool provider failed name=%s call_id=%s",
+                          call.name, call.call_id)
             return await self._on_error(
-                ctx, call, "TLB-805",
-                f"Provider 运行异常:{type(e).__name__}:{str(e)[:200]}")
+                ctx, call, "TLB-805", f"Provider 运行异常:{type(e).__name__}")
         finally:
             self._r.mark_idle(call.name)
         # ---- 关4 结果检查 + finalize(输出 schema/spill/摘要 → tool.result)
@@ -495,16 +541,18 @@ class ToolExecutor:
         返回 "allow" = 可执行;否则返回 ExecResult 用 summary 文本(调用方原样
         返回)。denied/timeout = 不执行;APR-501(headless 运行时无通道)→ 记
         rejected id 后拒;granted 后重入 guard 链:reject → GRD-403(批准作废,
-        单调性高于人类即时意志);approval(重入仍要审批)== 本调用同参刚获批准
-        → 视为已授权(偏离 3);allow → 放行。
+        单调性高于人类即时意志);approval(重入仍要审批)== 本次调用同参刚获
+        批准,但须通过绑定校验(本调用参数指纹 == 审批提供器为该 call_id 记录
+        的绑定)才放行,不一致 = 批准针对异参数 → 拒(偏离 3 收紧);allow → 放行。
         """
         ap = getattr(ctx, "approval", None)
         if ap is None:
             raise_code("CYC-999", module="tools_executor",
                        hint="ctx.approval 未接线:guard 判 need_approval 但审批"
                             "服务缺失;拒绝执行(fail-closed)")
+        binding = _approval_binding(call, args)         # 绑定指纹:授权↔执行一致性
         try:
-            verdict = await ap.request(call, summarize(args), ctx)
+            verdict = await ap.request(call, summarize(args), ctx, binding=binding)
         except PyHError as e:
             if e.code == "APR-501":                     # headless 无通道:直接拒
                 self._rejected.add(call.call_id)
@@ -516,7 +564,13 @@ class ToolExecutor:
         if d == "reject":                               # 批准时策略收紧 → 作废
             self._rejected.add(call.call_id)
             return "审批后 guard 重入拒绝(GRD-403 语义)"
-        return "allow"      # allow 放行;approval(同参已批)视为已授权(偏离 3)
+        if d == "approval":                             # 重入仍要求审批(同参已批)
+            check = getattr(ap, "grant_binding", None)
+            if check is not None and check(call.call_id) != binding:
+                # 绑定不一致 = 该 grant 不是针对本次参数的授权(篡改/复用)
+                self._rejected.add(call.call_id)
+                return "审批绑定校验失败(GRD-403):批准与本次调用参数不一致,拒绝执行"
+        return "allow"      # allow / approval(绑定校验通过)放行
 
     async def _reject(self, ctx: Any, call: ToolCall, guard_id: str,
                       policy_ref: str) -> ExecResult:
@@ -577,16 +631,50 @@ class ToolExecutor:
                           "能力实现损坏或未激活")
 
     async def _run_provider(self, defn: Any, args: dict, ctx: Any) -> Any:
-        """Provider 执行(runner):async handle 直接协程;同步 handle 经线程池。
+        """Provider 执行(runner):async handle 直接协程;同步 handle 经独立单工线程池。
 
-        同步函数由 asyncio.to_thread 承载(不阻塞事件循环,spec 关3);async
-        handler 走事件循环协作(占用线程池反伤吞吐,偏离 7)。超时掐断/取消由
-        execute 的 wait_for 统一施加。
+        同步函数用**每次调用独立**的 ``ThreadPoolExecutor(max_workers=1)`` 承载
+        (不阻塞事件循环,spec 关3);async handler 走事件循环协作(不占线程池,偏离 7)。
+
+        超时(外层 wait_for 掐断)/取消掐断 → 内部 await 抛 CancelledError → 本函数
+        以 ``shutdown(wait=False)`` **驱逐**该池(线程把副作用在后台跑完),并保留引用
+        防 GC 半途杀线程——该池绝不被复用于后续调用,消除"超时线程回池 + mark_idle
+        后并发重入 → 重叠副作用"(Python 无法安全 kill 运行中线程,只能不复用)。
+        正常完成则 ``shutdown(wait=True)`` 立即收口(线程已结束)。见偏离说明 13。
         """
         handle = self._provider_handle(defn.name)
         if inspect.iscoroutinefunction(handle):
             return await handle(args, ctx)              # wait_for 在外层掐断
-        return await asyncio.to_thread(handle, args, ctx)
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1,
+                                  thread_name_prefix=f"tool:{str(defn.name)[:16]}")
+        try:
+            return await loop.run_in_executor(pool, handle, args, ctx)
+        except BaseException:                           # 超时/取消/异常:驱逐不复用
+            pool.shutdown(wait=False, cancel_futures=True)
+            self._zombie_pools.add(pool)
+            self._prune_zombies()
+            raise
+        else:
+            pool.shutdown(wait=True)                    # 正常完成:线程已结束
+            self._zombie_pools.discard(pool)
+
+    def _prune_zombies(self) -> None:
+        """僵尸池裁剪:超时产生的池,线程跑完后自会空转结束;仅当僵尸池累积超过
+        上限时,丢弃其中线程已全部结束的池(仍在跑的保留引用,防 GC 半途回收)。"""
+        if len(self._zombie_pools) < _ZOMBIE_POOL_LIMIT:
+            return
+        keep: set[ThreadPoolExecutor] = set()
+        for pool in self._zombie_pools:
+            try:
+                threads = getattr(pool, "_threads", ())
+                alive = any(getattr(t, "is_alive", lambda: False)()
+                            for t in threads)
+            except Exception:                           # noqa: BLE001 线程查询异常:保守保留
+                alive = True
+            if alive:
+                keep.add(pool)
+        self._zombie_pools = keep
 
     def _invoke(self, defn: Any, args: dict, ctx: Any) -> Any:
         """spec 速览 _invoke:Provider 实际调用同步入口(to_thread 承载面)。

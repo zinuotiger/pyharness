@@ -231,6 +231,23 @@ class TestScanSession:
         no_provider = await R.scan_session(path)
         assert no_provider.index_stale is False
 
+    async def test_index_ghost_row_detected(self, tmp_path):
+        """幽灵行(视图末 seq 超前日志)也判 stale:dispatch 先于 flush,落盘失败时
+        事件已入总线被 FTS 索引、日志却无该 seq。"""
+        path = _write(tmp_path, SID, _session_events(3))
+        ghost = await R.scan_session(path, fts_last_seq=lambda sid: 9)
+        assert ghost.index_stale is True and ghost.healthy is False
+
+    async def test_index_not_stale_when_tail_is_non_content(self, tmp_path):
+        """CND-06/08 水位同口径:日志尾部为非内容事件(如 session.finished)时,
+        不误判 stale(修复前 last=全部非 recovered 末 seq,含 finished → 恒 stale)。"""
+        evs = [_env(1, "session.created", "system"),
+               _env(2, "user.message", "user", {"content": "m2"}),
+               _env(3, "session.finished", "system", {"reason": "idle"})]
+        path = _write(tmp_path, SID, evs)
+        h = await R.scan_session(path, fts_last_seq=lambda sid: 2)  # 内容末 seq = 2
+        assert h.index_stale is False      # finished(seq3)非内容 → 不计入水位
+
     async def test_missing_file_healthy(self, tmp_path):
         h = await R.scan_session(tmp_path / f"{SID}.jsonl")
         assert h.healthy is True
@@ -418,6 +435,37 @@ class TestRepairSession:
         r2 = await R.repair_session(ctx, SID)
         assert r2.fixed == [] and r2.recovered_seq is None
 
+    async def test_ghost_row_triggers_rebuild_and_purge(self, tmp_path):
+        """幽灵行(视图末 9 > 日志末 3)→ 触发重建,视图从源重置、幽灵行清除。"""
+        _write(tmp_path, SID, _session_events(3))
+
+        class _GhostView:
+            """幽灵行视图桩:末 seq 超前日志;rebuild 从源重置(真实现语义)。"""
+            def __init__(self) -> None:
+                self.m = 9
+                self.rebuilt: list = []
+                self._store = None
+
+            def max_seq(self, sid: str) -> int:
+                return self.m
+
+            def attach_source(self, sid: str, store: object) -> None:
+                self._store = store
+
+            async def rebuild(self, *, session_id=None) -> int:
+                self.rebuilt.append(session_id)
+                seqs = [e.seq for e in self._store.replay()
+                        if e.type != "session.recovered"]
+                self.m = max(seqs) if seqs else 0     # 重置到内容日志末(幽灵行剔除)
+                return len(seqs)
+
+        view = _GhostView()
+        ctx = _ctx(tmp_path, session_query=view)
+        report = await R.repair_session(ctx, SID)
+        assert view.rebuilt == [SID]                  # 幽灵行触发整体重建
+        assert report.fixed == ["views-rebuilt"]
+        assert view.max_seq(SID) == 3                 # 幽灵行已清除,视图追平日志
+
 
 # ===================================================================== quarantine_lines
 class TestQuarantineLines:
@@ -444,6 +492,19 @@ class TestQuarantineLines:
         kept = await R.quarantine_lines(path, [2], pol)
         assert len(kept[0].raw) <= R._QUARANTINE_RAW_CAP
         assert _seqs_of(path) == [1, 2]                       # 重写后好行完整
+
+    async def test_quarantine_preserves_crlf(self, tmp_path):
+        """P3:隔离重写保行尾——好行 CRLF 原样保留,不被归一为 LF。"""
+        path = tmp_path / f"{SID}.jsonl"
+        l1 = _line(_env(1)).encode("utf-8").replace(b"\n", b"\r\n")
+        bad = b'{"garbage": "not-an-envelope"}\r\n'
+        l3 = _line(_env(3)).encode("utf-8").replace(b"\n", b"\r\n")
+        path.write_bytes(l1 + bad + l3)
+        kept = await R.quarantine_lines(path, [2], R.RepairPolicy())
+        assert [e.line_no for e in kept] == [2]
+        out = path.read_bytes()
+        assert out.count(b"\r\n") == 2            # 两条好行行尾仍 CRLF
+        assert b"garbage" not in out              # 坏行已抽离
 
 
 # ===================================================================== locate_holes / declare

@@ -554,9 +554,11 @@ class Scheduler:
                     fired.append(job.name)
                     await self.remove(job.name, ctx)
                     continue
-                job.last_fired_at = now_dt        # 周期型:推进窗口
-                job.next_fire_at = self.next_fire(job, now_dt)
+                # 周期型:先 fire 成功再推进窗口(P2:此前内存窗口先推、事件后落,
+                # _fire 失败时崩溃恢复按事件重推 → 重复/错位触发)
                 await self._fire(ctx, job, now_dt)
+                job.last_fired_at = now_dt
+                job.next_fire_at = self.next_fire(job, now_dt)
                 fired.append(job.name)
             except PyHError as e:                 # 单 job 异常隔离(原码事件化)
                 log.error("schedule tick job=%s code=%s", job.name, e.code)

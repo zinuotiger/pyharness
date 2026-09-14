@@ -473,6 +473,10 @@ async def g_net_outbound_check(call: Any, scope: Any
     args = getattr(call, "safe_args", {}) or {}
     raw = next((args[k] for k in ("url", "domain", "host", "target")
                 if isinstance(args.get(k), str) and args[k].strip()), "")
+    if not raw and call.name == "web.search":
+        # web.search 无 url 参数,g5 无法从 args 取目标 → 取装配期记录的后端 host
+        # (operator 配置的搜索端点;P3:web.search 恒拒)。空=未配后端 → 仍拒。
+        raw = getattr(_policy_of(scope), "search_host", "") or ""
     host = _normalize_domain(raw)
     if not host or host not in {str(d).strip().lower().rstrip(".")
                                 for d in allowed}:
@@ -520,37 +524,42 @@ async def g_overwrite_check(
         call: Any, scope: Any,
         *, path_exists: Optional[Callable[[str], bool]] = None
 ) -> tuple[str, Optional[str]]:
-    """g7 check:目标已存在且 mode=write → approval(POL-OVW-1;覆写转审批)。
+    """g7 check:覆写既有文件(含 append 读改写)→ approval(POL-OVW-1)。
 
-    append/新建(不存在)→ allow;目标探测只读(os.path.exists 注入,测试可
-    替身化);路径先过 g3 几何,越界轮不到 g7(链序保证)。目标存在性探测失败
-    视同不存在(新建路径;安全侧:覆盖写仍会因存在才转审批)。
+    规则:目标不存在(新建)→ allow;目标已存在 → approval(无论 mode=write 整覆
+    还是 mode=append 读改写——append 是 read_text()+整体覆写,同为声明外后门,
+    SECURITY §4.2 A3);目标探测走注入 path_exists(缺省 os.path.exists,测试可
+    替身化),探测失败视同不存在(新建路径)。路径先过 g3 几何,越界轮不到 g7
+    (链序保证)。
     """
     args = getattr(call, "safe_args", {}) or {}
-    if str(args.get("mode", "write")).lower() == "append":
-        return ("allow", None)                    # append = 追加,非覆盖
-    exists = path_exists or os.path.exists
     ws = getattr(_policy_of(scope), "workspace_root", None) or ""
     target, policy = _resolve_geometry(_path_from_args(args), ws)
     if policy:
         return ("reject", policy)
+    probe = path_exists or os.path.exists
     try:
-        if os.path.exists(target):
-            return ("approval", "POL-OVW-1")      # 覆写已有文件 → 人类裁决
+        exists = bool(probe(target))
     except OSError:
-        pass                                       # 探测异常 → 视同不存在
-    return ("allow", None)
+        exists = False                              # 探测异常 → 视同不存在
+    if not exists:
+        return ("allow", None)                      # 新建路径:无覆写面
+    return ("approval", "POL-OVW-1")                # 已存在:write/append 均转审批
 
 
 # ================================================================ 内置链装配
+# 求值序 = 动作形状 guard(g3 路径/g4 凭据/g6 exec 约束/g7 覆写)先行,危险分级
+# (g2)殿后——分级只决定"是否需要人类审批",不短路形状 guard 求值:exec(high)
+# 的 shell/cwd/strict 约束与写工具的覆写审批在任何一次人类批准前已被强制求值
+# (修复前 g-danger 在 g2 短路,使 g6/g7 对 high 工具恒为死代码)。
 _BUILTIN_IDS: tuple[str, ...] = (
     "g-schema",            # g1 schema 复查(恒在)
-    "g-danger",            # g2 danger 分级(恒在)
     "g-fs-path",           # g3 路径几何
     "g-credential-read",   # g4 凭据读拦截
-    "g-net-outbound",      # g5 外发域名 allowlist
     "g-exec",              # g6 exec 约束
     "g-overwrite",         # g7 覆写转审批
+    "g-net-outbound",      # g5 外发域名 allowlist
+    "g-danger",            # g2 danger 分级(恒在,殿后求值)
 )
 
 
@@ -562,26 +571,27 @@ def build_builtin_chain(*, credential_paths: Optional[Iterable[str]] = None,
                         ) -> list[Guard]:
     """装配内置 g1-g7(固定序 = 求值序;DIS-SEAM §2.5 第④步)。
 
-    g1-g5 恒在;g6/g7 与插件 guard 一律按注册序追加链尾(本函数即固定序源)。
-    validator/credential_paths/approval_channel/path_exists/link_resolver 为
-    注入式依赖(见模块 docstring 偏离 1/2/3/5):链实例构造时一次注入,运行期
-    只读(防策略漂移,F021)。
+    g1 恒在首;动作形状 guard(g3/g4/g6/g7/g5)先于危险分级 g-danger 求值,分级
+    只决定是否需要审批、不短路形状拒(见 _BUILTIN_IDS 注释);插件 guard 一律
+    按注册序追加链尾(本函数即固定序源)。validator/credential_paths/
+    approval_channel/path_exists/link_resolver 为注入式依赖(见模块 docstring
+    偏离 1/2/3/5):链实例构造时一次注入,运行期只读(防策略漂移,F021)。
     """
     paths = list(credential_paths) if credential_paths else None
     return [
         _FuncGuard("g-schema", g_schema_match,
                    lambda c, s: g_schema_check(c, s, validator=validator)),
-        _FuncGuard("g-danger", g_danger_match, g_danger_check),
         _FuncGuard("g-fs-path", g_fs_path_match,
                    lambda c, s: g_fs_path_check(c, s, link_resolver=link_resolver)),
         _FuncGuard("g-credential-read", g_credential_read_match,
                    lambda c, s: g_credential_read_check(
                        c, s, credential_paths=paths,
                        link_resolver=link_resolver)),
-        _FuncGuard("g-net-outbound", g_net_outbound_match, g_net_outbound_check),
         _FuncGuard("g-exec", g_exec_match, g_exec_check),
         _FuncGuard("g-overwrite", g_overwrite_match,
                    lambda c, s: g_overwrite_check(c, s, path_exists=path_exists)),
+        _FuncGuard("g-net-outbound", g_net_outbound_match, g_net_outbound_check),
+        _FuncGuard("g-danger", g_danger_match, g_danger_check),
     ]
 
 

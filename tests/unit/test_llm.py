@@ -520,6 +520,48 @@ class TestChat:
         assert ei.value.ctx.get("retryable") == (code in ("LLM-301", "LLM-303"))
         assert _event_types(s) == ["session.created", "llm.request"]   # 失败只留 request
 
+    async def test_llm_303_increments_rate_limit_streak(self) -> None:
+        """修复:适配器归一 LLM-303 时计入连续限流计数(此前 rate_limit_add 无调用 → 恒 0)。"""
+        s = await _session()
+        counters = UsageCounters()
+        adp = _adapter(error=ProviderStatusError(429), counters=counters)
+        with pytest.raises(PyHError) as ei:
+            await adp.chat([{"role": "user", "content": "x"}],
+                           ctx=_ctx(s, counters=counters))
+        assert ei.value.code == "LLM-303"
+        assert counters.rate_limit_streak() == 1                     # 归一时 +1
+
+    async def test_non_303_does_not_increment_rate_limit_streak(self) -> None:
+        """LLM-302/304 不计入连续限流(只有 303 计入)。"""
+        for err in (ProviderStatusError(401), ProviderStatusError(404)):
+            s = await _session()
+            counters = UsageCounters()
+            adp = _adapter(error=err, counters=counters)
+            with pytest.raises(PyHError):
+                await adp.chat([{"role": "user", "content": "x"}],
+                               ctx=_ctx(s, counters=counters))
+            assert counters.rate_limit_streak() == 0
+
+    async def test_degraded_from_wiring_end_to_end(self) -> None:
+        """CND-08 可达性:降级链 Producer→State→Consumer——主 401 → 备用接手,其
+        llm.request 必须携带 degraded_from=主(此前 _deg 无赋值点 → dead trigger)。"""
+        from pyharness.config import load_settings
+        from pyharness.core.llm_fallback import FallbackChain
+        s = await _session()
+        counters = UsageCounters()
+        cfg = load_settings()                       # 含 llm.degrade.* 真默认(enabled/2/5)
+        main = _adapter(error=ProviderStatusError(401), model="m-main", counters=counters)
+        backup = _adapter(result=_raw(content="backup ok"), model="m-backup",
+                          counters=counters)
+        chain = FallbackChain(adapters={"m-main": main, "m-backup": backup},
+                              config=cfg, chain=["m-main", "m-backup"])
+        ctx = SimpleNamespace(config=cfg, session=s, counters=counters, bus=None)
+        await chain.chat_with_fallback([{"role": "user", "content": "x"}], ctx=ctx)
+        assert backup._deg == "m-main"              # Producer 真的改了 State
+        reqs = [e for e in s.events_after(0) if e.type == "llm.request"]
+        assert [r.payload.get("model") for r in reqs] == ["m-main", "m-backup"]
+        assert reqs[-1].payload.get("degraded_from") == "m-main"   # Consumer 读到了
+
     async def test_non_api_error_not_wrapped(self) -> None:
         """内部缺陷(ValueError)不上 LLM 码,原样上抛(上层 CYC-999 兜底)。"""
         s = await _session()
@@ -637,8 +679,9 @@ class TestUsage:
         assert ev.type == "llm.usage"
         p = ev.payload
         assert p["in_tokens"] == 100 and p["out_tokens"] == 50 and p["cache_hit"] == 90
-        # cost = (miss 10 + hit 90×1.0)/1e6×2 + 50/1e6×8
-        assert p["cost_est"] == pytest.approx(100 / 1e6 * 2.0 + 50 / 1e6 * 8.0)
+        # cost = (miss 10 + hit 90×0.1)/1e6×2 + 50/1e6×8(命中按 1/10 折扣,P3 修复默认)
+        assert p["cost_est"] == pytest.approx(
+            (10 + 90 * 0.1) / 1e6 * 2.0 + 50 / 1e6 * 8.0)
         assert counters.snapshot()["in_tokens"] == 100
         assert counters.snapshot()["by_model"][MODEL]["cache_hit"] == 90
 

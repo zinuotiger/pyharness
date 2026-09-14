@@ -479,6 +479,7 @@ async def test_approve_routes_to_provider_and_records():
 
 
 async def test_approve_deny_and_explicit_by():
+    """身份归属(P3 收紧):客户端自报 by 被忽略,恒用 acp:<client>——防冒充人类裁决通道。"""
     log = await _boot(SID)
     approval = _FakeApproval(log)
     ctx, st, _ = await _chat_ctx(approval=approval)
@@ -486,7 +487,7 @@ async def test_approve_deny_and_explicit_by():
                                         {"approval_id": 5, "decision": "deny",
                                          "by": "acp:someone"}))
     assert resp["result"]["decision"] == "deny"
-    assert approval.calls == [("deny", 5, "acp:someone")]
+    assert approval.calls == [("deny", 5, f"acp:{CLIENT}")]   # 自报 by 被忽略
 
 
 async def test_approve_bad_params_evt100():

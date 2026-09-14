@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from pyharness.errors import raise_code
+from pyharness.core import proc as _proc     # 复用树级终止(单源,CND-05)
 
 log = logging.getLogger("pyharness.pty")
 
@@ -42,6 +43,25 @@ READ_CHUNK = 4096
 MAX_OUTPUT_CHARS = 200_000          # 收集上限(超出截断,防打爆上下文)
 GRACE_KILL_S = 3.0                  # 墙钟超时后的收尾宽限
 POLL_S = 0.02                       # 空读轮询间隔
+
+
+def _tree_kill(pid: Optional[int], fallback: Any) -> None:
+    """树级终止(复用 proc._kill_pid_tree:Windows taskkill /T /F、POSIX killpg)。
+
+    CND-05/契约`SECURITY §4`+`CFG F052`:"超时杀进程树防孤儿"——PTY 的 shell 常有
+    子孙进程,只杀直接进程会遗留孤儿(载体未真正驱逐)。PID 缺失/异常 → 回退 fallback
+    (直接进程,kill/terminate 尽力收尾)。
+    """
+    if pid:
+        try:
+            _proc._kill_pid_tree(int(pid))
+            return
+        except Exception:                           # noqa: BLE001 收尾尽力
+            pass
+    try:
+        fallback()
+    except Exception:                               # noqa: BLE001 收尾尽力
+        pass
 
 
 # ------------------------------------------------------------------ Windows
@@ -169,20 +189,16 @@ class _WinPtySession:
     def kill(self) -> None:
         if self._p is None:
             return
-        try:
-            self._p.terminate(force=True)
-        except Exception:                            # noqa: BLE001 收尾尽力
-            pass
+        _tree_kill(getattr(self._p, "pid", None),
+                   lambda: self._p.terminate(force=True))
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         if self._p is not None:
-            try:
-                self._p.terminate(force=True)
-            except Exception:                        # noqa: BLE001
-                pass
+            _tree_kill(getattr(self._p, "pid", None),
+                       lambda: self._p.terminate(force=True))
             try:
                 self._p.close(force=True)
             except Exception:                        # noqa: BLE001
@@ -223,7 +239,8 @@ class _PosixPty:
                 if isinstance(self.command, str) else list(self.command))
         self._proc = subprocess.Popen(
             argv, cwd=str(self.cwd), env=self.env or None,
-            stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+            stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+            start_new_session=True)   # 独立会话/进程组:killpg 方可安全树级终止(CND-05)
         os.close(slave)
 
     def write(self, text: str) -> None:
@@ -285,12 +302,14 @@ class _PosixPty:
 
     def kill(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
-            self._proc.kill()
+            _tree_kill(self._proc.pid, self._proc.kill)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._proc is not None and self._proc.poll() is None:
+            _tree_kill(self._proc.pid, self._proc.kill)   # 退出必释放(F053):树级
         if self._master is not None:
             try:
                 os.close(self._master)

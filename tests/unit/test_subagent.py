@@ -759,6 +759,30 @@ async def test_spawn_tool_provider_handle_full_roundtrip():
     assert ei.value.code == "TLB-802"         # join 上抛原码(executor 落 tool.error)
 
 
+async def test_spawn_provider_depth_increments_from_ctx():
+    """A1:无 args.depth 时,深度由 ctx.subagent_depth 递增;无该字段回落 manager+1。"""
+
+    class _FakeMgr:
+        _depth = 0
+
+        def __init__(self) -> None:
+            self.spec = None
+
+        async def spawn(self, spec, ctx):
+            self.spec = spec
+            return "s-sub"
+
+        async def join(self, sub_id, ctx=None):
+            return "ok"
+
+    mgr = _FakeMgr()
+    prov = SubagentSpawnProvider(mgr)
+    await prov.handle({"task": "t"}, types.SimpleNamespace(subagent_depth=2))
+    assert mgr.spec.depth == 3                      # 子会话 depth=2 → 派发 3
+    await prov.handle({"task": "t"}, types.SimpleNamespace())   # 无字段
+    assert mgr.spec.depth == 1                      # 顶层:manager._depth(0)+1
+
+
 async def test_spawn_provider_tools_subset_gate():
     """Provider 组装 spec 时 tools_subset 过在册闸:幻觉工具名 → TLB-802。"""
     sess = await _parent()

@@ -18,8 +18,11 @@ import asyncio
 import pytest
 
 from pyharness.config import Settings, load_settings
+from pyharness.core.session import SessionLog
+from pyharness.core.task_queue import Task
 from pyharness.engine import (_activate_storage_caps, _agent_ctx_of,
-                              assemble_real_engine, build_spine)
+                              _owned_task_message, assemble_real_engine,
+                              build_spine)
 
 
 def _cfg(tmp_path) -> Settings:
@@ -157,3 +160,41 @@ def _close_spine(spine) -> None:
             spine.scope.release()
     except Exception:                                    # noqa: BLE001 收尾尽力
         pass
+
+
+# =====================================================================
+# _owned_task_message:严格归属窗口(P1-1 修复)
+# =====================================================================
+async def test_owned_task_message_assigns_each_tasks_own_message():
+    """每个任务只拿到自己 (上一个 enqueued, 本 enqueued] 窗口内的 user.message;
+    纯意图任务(无配套消息)返回 None 供 intent 补写。"""
+    log_ = SessionLog("s-owntest01")
+    await log_.append("session.created", {"title": "", "model": "m"},
+                      actor="system")          # seq 1
+    await log_.append("user.message", {"content": "前台问题"},
+                      actor="user")            # seq 2
+    await _enq(log_, "t-1")                    # seq 3
+    await log_.append("user.message", {"content": "调度的意图B"},
+                      actor="user", origin="schedule:jb")  # seq 4
+    await _enq(log_, "t-2")                    # seq 5
+    await _enq(log_, "t-3")                    # seq 6 (纯意图:无配套消息)
+    await log_.append("user.message", {"content": "调度的意图C"},
+                      actor="user", origin="schedule:jc")  # seq 7
+    await _enq(log_, "t-4")                    # seq 8
+
+    # t-1 窗口 (0, 3] → 前台问题
+    assert _owned_task_message(log_, Task("t-1", "x", enqueued_seq=3)).payload["content"] \
+        == "前台问题"
+    # t-2 窗口 (3, 5] → 意图B(修复前会拿 seq2 的"前台问题")
+    assert _owned_task_message(log_, Task("t-2", "x", enqueued_seq=5)).payload["content"] \
+        == "调度的意图B"
+    # t-3 窗口 (5, 6] 无消息 → None(plan 步等纯意图)
+    assert _owned_task_message(log_, Task("t-3", "plan一下", enqueued_seq=6)) is None
+    # t-4 窗口 (5, 8] → 意图C
+    assert _owned_task_message(log_, Task("t-4", "x", enqueued_seq=8)).payload["content"] \
+        == "调度的意图C"
+
+
+async def _enq(log_, task_id: str) -> None:
+    await log_.append("task.enqueued", {"task_id": task_id, "pos": 1},
+                      actor="system")

@@ -338,6 +338,19 @@ def test_session_path_rejects_traversal(tmp_path):
     assert e.value.code == "EVT-100"
 
 
+def test_list_unreadable_session_one_line_warning(tmp_path, caplog):
+    """list() 对不可读会话文件:仍列出(摘要降级),且**只打一行告警、不打整段 traceback**。
+
+    修复前 `log.warning(..., exc_info=True)` → UI 每次轮询会话列表都刷一段 traceback。"""
+    mgr = d.DesktopSessionManager(dir=tmp_path, bus=None)
+    (tmp_path / "s-broken001.jsonl").mkdir()      # 目录冒充会话文件 → open 抛 OSError
+    with caplog.at_level("WARNING"):
+        rows = mgr.list()
+    assert [r["sid"] for r in rows] == ["s-broken001"]           # 仍列出(降级,不丢)
+    rec = [r for r in caplog.records if "list 读" in r.getMessage()]
+    assert rec and rec[-1].exc_info is None                      # 一行告警,无 traceback
+
+
 async def test_same_approval_id_can_be_disambiguated_by_session():
     """两个会话同 seq 时,新接口必须裁决指定会话的 provider。"""
     app = await _async_app(_sample_events())
@@ -511,20 +524,26 @@ async def test_pending_approvals_aggregates_sorted():
 
 # ===================================================================== API 路由(TestClient 真 ASGI)
 def test_route_timeline_http_and_error_body():
-    """真实路由:/timeline 200 全 kind 序列 + 查询参数;kinds/after_seq 生效。"""
+    """真实路由:/timeline 200 全 kind 序列 + 查询参数;kinds/after_seq 生效。
+
+    读端点已强制鉴权(P1-2 收紧)→ 全程带进程 token 头。
+    """
     app = _app(_sample_events())
+    hdrs = {"X-PyHarness-Token": app._api_token}
     with TestClient(app.api, base_url="http://127.0.0.1") as client:
-        r = client.get(f"/api/sessions/{SID}/timeline")
+        # 无 token:读端点 401(此前匿名可读)
+        assert client.get(f"/api/sessions/{SID}/timeline").status_code == 401
+        r = client.get(f"/api/sessions/{SID}/timeline", headers=hdrs)
         assert r.status_code == 200
         body = r.json()
         assert body["sid"] == SID and body["base_seq"] == 0
         assert [n["kind"] for n in body["nodes"]] == [
             "recovery", "user", "message", "tool", "guard", "approval", "budget"]
-        r2 = client.get(f"/api/sessions/{SID}/timeline",
+        r2 = client.get(f"/api/sessions/{SID}/timeline", headers=hdrs,
                         params={"after_seq": 5, "kinds": "approval,budget"})
         assert [n["seq"] for n in r2.json()["nodes"]] == [6, 7]
         # ADR-011:未知会话 → 404 + {code, advice}(远端只回码+建议)
-        r3 = client.get("/api/sessions/s-ghost-001/timeline")
+        r3 = client.get("/api/sessions/s-ghost-001/timeline", headers=hdrs)
         assert r3.status_code == 404
         b = r3.json()
         assert b["code"] == "EVT-106" and b["advice"]
@@ -590,19 +609,25 @@ async def test_plugin_load_rejects_path_outside_configured_roots(tmp_path):
     assert "插件根目录" in out["error"]
 
 
-def test_index_page_injects_api_token():
-    """前端页注入进程 token,页面写请求可自动携带鉴权头。"""
+def test_index_page_no_token_meta_cookie_issued():
+    """P1-2 收紧:token 不再明文进页面 meta;改为 HttpOnly cookie 下发(JS 不可读)。"""
     app = _app(_sample_events())
-    html = app._index_page().body.decode("utf-8")
-    assert f'<meta name="pyharness-token" content="{app._api_token}">' in html
+    resp = app._index_page()
+    html = resp.body.decode("utf-8")
+    assert f'<meta name="pyharness-token" content="{app._api_token}">' not in html
+    assert "meta name=\"pyharness-token\"" not in html
+    # HttpOnly cookie 携带 token(同源 fetch/SSE 自动带上)
+    set_cookie = resp.headers.get("set-cookie") or ""
+    assert "pyharness_token" in set_cookie and "HttpOnly" in set_cookie
 
 
 def test_route_list_sessions_empty_dir(tmp_path: Path):
     """自装配会话管理器:空目录 → 会话列表空(不炸不造文件)。"""
     app = d.DesktopApp(SimpleNamespace(
         session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
+    hdrs = {"X-PyHarness-Token": app._api_token}
     with TestClient(app.api, base_url="http://127.0.0.1") as client:
-        r = client.get("/api/sessions")
+        r = client.get("/api/sessions", headers=hdrs)
         assert r.status_code == 200
         assert r.json() == {"sessions": [], "count": 0}
     assert list(tmp_path.iterdir()) == []           # 只读:零落盘
@@ -635,10 +660,11 @@ def test_route_orchestration_management_lists_http():
 
     app._engines[SID] = SimpleNamespace(jobs=_Jobs(), schedule=_Schedules(),
                                         subagent=_Subagents())
+    hdrs = {"X-PyHarness-Token": app._api_token}
     with TestClient(app.api, base_url="http://127.0.0.1") as client:
-        jobs = client.get(f"/api/sessions/{SID}/jobs")
-        schedules = client.get(f"/api/sessions/{SID}/schedules")
-        subagents = client.get(f"/api/sessions/{SID}/subagents")
+        jobs = client.get(f"/api/sessions/{SID}/jobs", headers=hdrs)
+        schedules = client.get(f"/api/sessions/{SID}/schedules", headers=hdrs)
+        subagents = client.get(f"/api/sessions/{SID}/subagents", headers=hdrs)
         assert jobs.status_code == 200 and jobs.json()["jobs"][0]["job_id"] == "j-1"
         assert schedules.status_code == 200
         assert schedules.json()["schedules"][0]["triggered"] == 2

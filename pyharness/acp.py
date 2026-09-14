@@ -483,10 +483,9 @@ async def cmd_approve(ctx: Any, st: AcpState, params: dict) -> dict:
     if decision not in {"approve", "deny"}:
         raise_code("EVT-100", field="decision", decision=decision,
                    hint="decision 须 approve|deny")
-    by = params.get("by")
-    if by is not None and (not isinstance(by, str) or not by.strip()):
-        raise_code("EVT-100", field="by", hint="by 须非空字符串(缺省 acp:<client>)")
-    by = by or f"acp:{st.client_id}"
+    # 身份归属:恒用 ACP 通道身份,忽略客户端自报 by——否则客户端可传 by="cli"/"web"
+    # 冒充人类裁决通道,绕过审批者白名单(P2 收紧)。审计身份不可由对端指定。
+    by = f"acp:{st.client_id}"
     provider = getattr(ctx, "approval", None)
     fn = getattr(provider, decision, None)    # approve/deny 同构入口
     if not callable(fn):

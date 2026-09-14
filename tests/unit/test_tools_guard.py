@@ -221,11 +221,16 @@ def test_danger_default_policy_full_table():
 
 
 def test_builtin_chain_fixed_order_and_forced_guards():
-    """内置 g1-g7 固定装配序(= 求值序);g-schema/g-danger 恒在不可关。"""
+    """内置 g1-g7 固定装配序(= 求值序);g-schema/g-danger 恒在不可关。
+
+    修复(P0-2 ③):动作形状 guard(g3/g4/g6/g7/g5)先于危险分级 g-danger 求值——
+    分级只决定是否转审批,不短路形状拒(exec 的 shell/cwd/strict 约束与写工具
+    覆写审批在任何人类批准前已被强制求值)。
+    """
     ids = [g.id for g in build_builtin_chain()]
     assert ids == list(_BUILTIN_IDS) == [
-        "g-schema", "g-danger", "g-fs-path", "g-credential-read",
-        "g-net-outbound", "g-exec", "g-overwrite"]
+        "g-schema", "g-fs-path", "g-credential-read",
+        "g-exec", "g-overwrite", "g-net-outbound", "g-danger"]
     assert FORCED_GUARDS == frozenset({"g-schema", "g-danger"})
 
 
@@ -533,6 +538,33 @@ async def test_g2_none_low_allow_and_match():
     assert d == "approval" and policy == "POL-DGR-1"
     d, policy = await g_danger_check(call("x", danger="critical"), None)
     assert d == "reject" and policy == "POL-DGR-1"
+
+
+async def test_g6_shape_before_g2_high_exec_rejected(tmp_path):
+    """P0-2 ③ 修复:形状 guard 先于分级——exec(danger=high)带 shell=True 在
+    basic 档先被 g6 拒(POL-EXEC-1),不再被 g2 的 approval 短路成"转审批"。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sess = FakeSession()
+    gc = chain(session=sess)
+    d = await gc.evaluate(
+        call("exec.shell_run", {"shell": True}, danger="high", call_id="ex-1"),
+        FakeScope(make_policy(sandbox_level="basic", workspace_root=str(ws))))
+    assert d is Decision.REJECT
+    rj = sess.of("guard.rejected")[0]["payload"]
+    assert rj["guard_id"] == "g-exec" and rj["policy_ref"] == "POL-EXEC-1"
+
+
+async def test_g6_strict_high_exec_never_reaches_approval(tmp_path):
+    """strict 档 exec(high)被 g6 直拒,分级段根本不给审批机会。"""
+    sess = FakeSession()
+    gc = chain(session=sess)
+    d = await gc.evaluate(
+        call("exec.shell_run", {}, danger="high", call_id="ex-2"),
+        FakeScope(make_policy(sandbox_level="strict", workspace_root=".")))
+    assert d is Decision.REJECT
+    rj = sess.of("guard.rejected")[0]["payload"]
+    assert rj["guard_id"] == "g-exec" and rj["policy_ref"] == "POL-EXEC-1"
 
 
 # =============================================================== g3 路径几何
@@ -861,24 +893,37 @@ async def test_g7_new_file_allow(tmp_path):
     assert d is Decision.ALLOW
 
 
-async def test_g7_append_mode_allow(tmp_path):
-    """mode=append(追加非覆盖)→ 目标存在也放行。"""
+async def test_g7_append_existing_target_requires_approval(tmp_path):
+    """mode=append 目标已存在 → approval POL-OVW-1(P0-2 ② 修复:append 实为
+    read_text()+整体覆写,此前直接 allow 是覆写审批的声明外后门)。"""
     ws = tmp_path / "ws"
     ws.mkdir()
     target = ws / "log.txt"
     target.write_text("x", encoding="utf-8")
-    gc = chain(session=FakeSession())
+    sess = FakeSession()
+    gc = chain(session=sess)
     d = await gc.evaluate(
         call("fs.write_file", {"path": str(target), "mode": "append"}),
+        FakeScope(make_policy(workspace_root=str(ws))))
+    assert d is Decision.APPROVAL
+    ev = sess.of("guard.evaluated")[0]["payload"]
+    assert ev["reasons"] == ["POL-OVW-1"]
+
+
+async def test_g7_append_new_file_allow(tmp_path):
+    """mode=append 目标不存在(新建)→ allow。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    gc = chain(session=FakeSession())
+    d = await gc.evaluate(
+        call("fs.write_file", {"path": str(ws / "fresh.log"), "mode": "append"}),
         FakeScope(make_policy(workspace_root=str(ws))))
     assert d is Decision.ALLOW
 
 
-async def test_g7_path_exists_injection_is_dead_code(tmp_path):
-    """【发现缺陷钉死】注入 path_exists 回调实际未被消费(实现用 os.path.exists
-    直探,`exists = path_exists or os.path.exists` 为死代码)——回调返回 False
-    但真实文件存在 → 仍 approval。安全方向保守(仅注入缝失效,生产探测仍真),
-    按实现真实行为断言,缺陷已列交付摘要。"""
+async def test_g7_path_exists_callback_consumed(tmp_path):
+    """注入 path_exists 回调被消费(P0-2 ② 修复:此前 `path_exists or os.path.
+    exists` 是死代码,回调生效后按注入判定)。"""
     ws = tmp_path / "ws"
     ws.mkdir()
     target = ws / "hit.txt"
@@ -887,7 +932,7 @@ async def test_g7_path_exists_injection_is_dead_code(tmp_path):
     d = await gc.evaluate(
         call("fs.write_file", {"path": str(target)}),
         FakeScope(make_policy(workspace_root=str(ws))))
-    assert d is Decision.APPROVAL                  # 若注入生效应为 ALLOW
+    assert d is Decision.ALLOW                      # 注入生效:真实文件按探测结果判
 
 
 async def test_g7_outside_path_g3_priority(tmp_path):
@@ -1097,8 +1142,8 @@ async def test_disable_idempotent_no_second_event():
     gc.disable("g-exec", config_ref="c")
     assert len(sess.of("guard.disabled")) == 1
     assert gc.enabled_guard_ids() == [
-        "g-schema", "g-danger", "g-fs-path", "g-credential-read",
-        "g-net-outbound", "g-overwrite"]
+        "g-schema", "g-fs-path", "g-credential-read",
+        "g-overwrite", "g-net-outbound", "g-danger"]
 
 
 # ================================================================== from_config

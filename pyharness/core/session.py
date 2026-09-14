@@ -424,10 +424,17 @@ async def open_session(sid: str,
     """
     log_ = SessionLog(sid=sid, persistence=persistence)
     last: Optional[Envelope] = None
+    first_seq: Optional[int] = None
     for env in persistence.replay():            # 坏行由 replay 记跳隔离,不中断
         if env.session_id != sid:
             continue                            # 多会话文件过滤
-        if last and env.seq != last.seq + 1:
+        if first_seq is None:
+            first_seq = env.seq
+            if env.seq > 1 and not log_._gap_declared(1, env.seq - 1):
+                # 首段连续缺失(轮转文件丢失/坏文件):seq 1..(env.seq-1) 整体缺失,
+                # 旧实现只查相邻差、对前缀失明(P1-5,与 repair.check_seq_gap 对齐)
+                log_.warn_hole(env.seq)
+        elif last and env.seq != last.seq + 1:
             gap_lo, gap_hi = last.seq + 1, env.seq - 1
             if not log_._gap_declared(gap_lo, gap_hi):
                 log_.warn_hole(env.seq)         # 无声明空洞 → 告警(F031)

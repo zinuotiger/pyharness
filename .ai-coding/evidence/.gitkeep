@@ -1,0 +1,6 @@
+# 证据目录
+
+存放任务收尾的证据文件（测试输出、日志、截图、对账结果等），命名建议
+`<TaskID>-<artifact>.<ext>`。
+
+对应 AI Coding Protocol v0.1 §10 Evidence。此目录不承载项目知识（知识归 `docs/`）。

@@ -26,6 +26,32 @@ _MAX_ZIP_BYTES = 5 * 1024 * 1024
 _MAX_FILES = 200
 
 
+def _safe_name(name) -> str:
+    """技能名/版本段安全校验(CND-04:外部输入不得直接作资源路径依据)。
+
+    非空 + `_NAME_RE` + **拒 "."/".."**——`_NAME_RE` 字符集含 `.`,只靠它会放行
+    `name="."/".."` → `dir / ".."` 越界(remove 甚至 `rmtree` 父目录)。
+    """
+    nm = str(name or "")
+    if not _NAME_RE.fullmatch(nm) or nm in (".", ".."):
+        raise_code("EVT-100", field="name", name=nm[:64],
+                   advice="Skill 名称/版本段非法(仅 [A-Za-z0-9._-] 且不得为 . 或 ..)")
+    return nm
+
+
+def _safe_under(root: Path, *segments: str) -> Path:
+    """`root/segments…` 归一后必须仍在 root 内(纵深防御,SECURITY §文件影响域单点归一)。
+
+    防 symlink/junction 越界(POL-FS-3)与拼接绕过;逃逸 → POL-FS-2 拒。
+    """
+    root_r = root.resolve()
+    target = root_r.joinpath(*segments).resolve()
+    if target != root_r and root_r not in target.parents:
+        raise_code("POL-FS-2", path=str(target), root=str(root_r),
+                   advice="Skill 路径逃逸出根目录,拒绝(路径穿越)")
+    return target
+
+
 class SkillInstaller:
     """Download, verify, quarantine and install SKILL.md packages."""
 
@@ -225,8 +251,7 @@ class SkillInstaller:
         if not approved_by:
             raise_code("GRD-401", reason="skill-install-approval",
                        advice="Skill 安装必须由人类显式批准")
-        if not _NAME_RE.fullmatch(str(name or "")):
-            raise_code("EVT-100", field="name", advice="Skill 名称格式非法")
+        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据
         registry = await self.fetch_registry(registry_url)
         entry = self._entry(registry, name)
         selected = self._version_entry(entry, version)
@@ -241,7 +266,7 @@ class SkillInstaller:
             raise_code("GRD-401", reason="skill-hash-mismatch", skill=name,
                        expected=expected, actual=actual,
                        advice="SHA-256 不匹配，拒绝安装")
-        version_id = str(selected.get("version"))
+        version_id = _safe_name(selected.get("version"))   # CND-04:版本段亦外部输入
         with tempfile.TemporaryDirectory(prefix="skill-", dir=self.quarantine_dir) as td:
             extract_root = Path(td) / "extract"
             self._safe_extract(raw, extract_root)
@@ -250,7 +275,7 @@ class SkillInstaller:
             if fm_name != name:
                 raise_code("EVT-100", skill=name, actual=fm_name,
                            advice="Registry name 与 SKILL.md frontmatter 不一致")
-            version_dir = self.versions_dir / name / version_id
+            version_dir = _safe_under(self.versions_dir, name, version_id)
             if version_dir.exists():
                 shutil.rmtree(version_dir)
             version_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -264,7 +289,9 @@ class SkillInstaller:
         if not approved_by:
             raise_code("GRD-401", reason="skill-rollback-approval",
                        advice="Skill 回滚必须由人类显式批准")
-        version_dir = self.versions_dir / name / version
+        name = _safe_name(name)            # CND-04:外部 name/version 不得直接作路径依据
+        version = _safe_name(version)
+        version_dir = _safe_under(self.versions_dir, name, version)
         if not version_dir.is_dir():
             raise_code("EVT-101", skill=name, version=version,
                        advice="目标版本不存在")
@@ -277,7 +304,8 @@ class SkillInstaller:
         if not approved_by:
             raise_code("GRD-401", reason="skill-remove-approval",
                        advice="Skill 卸载必须由人类显式批准")
-        active = self.skills_dir / name
+        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据
+        active = _safe_under(self.skills_dir, name)
         if not active.exists():
             return {"ok": False, "name": name, "removed": False}
         version = self._current_version(name)
@@ -286,7 +314,8 @@ class SkillInstaller:
                 "version": version, "approved_by": approved_by}
 
     def versions(self, name: str) -> list[str]:
-        root = self.versions_dir / name
+        name = _safe_name(name)            # CND-04:外部 name 不得直接作路径依据
+        root = _safe_under(self.versions_dir, name)
         return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.exists() else []
 
 

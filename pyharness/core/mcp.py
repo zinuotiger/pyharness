@@ -150,8 +150,10 @@ class StdioTransport(Transport):
                 try:
                     await self._stderr_task
                 except asyncio.CancelledError:
-                    self._stderr_task = None
-                    raise
+                    # 自己 cancel 的 stderr 排空任务:await 被掐断抛 CancelledError,
+                    # 属清理段,吞掉即可——旧实现 re-raise 会让 request 超时路径的
+                    # await self.close() 被打断,掩盖本应抛的 TLB-805(P2 修复)。
+                    pass
                 except Exception:                # noqa: BLE001 stderr 排空失败不阻断
                     pass
                 self._stderr_task = None
@@ -197,7 +199,7 @@ class McpClient:
             "clientInfo": {"name": "pyharness", "version": self.version}})
         await self.transport.request("notifications/initialized", {})
         listed = await self.transport.request("tools/list", {})
-        self._tools = list(listed.get("tools") or [])
+        self._tools = list((listed or {}).get("tools") or [])   # result:null 判空(P2)
         self.connected = True
         return {"server": (init or {}).get("serverInfo"),
                 "tools": len(self._tools)}
@@ -252,6 +254,7 @@ class _McpProvider:
 
     async def handle(self, args: dict, ctx: Any) -> str:
         result = await self._client.call_tool(self._tool, args)
+        result = result or {}                                # result:null 判空(P2)
         if result.get("isError"):
             raise_code("TLB-805", module="mcp", tool=self._tool,
                        hint="远端执行错误")

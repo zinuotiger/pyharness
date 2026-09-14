@@ -53,6 +53,35 @@ async def test_skill_install_and_rollback(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_skill_name_rejects_path_traversal(tmp_path):
+    """CND-04:外部 name/version 不得作资源路径依据——"."/".."/含分隔符一律拒。
+
+    修复前:`_NAME_RE` 放行 "."/".." → `remove("..")` 会 rmtree 父目录;`versions`/
+    `rollback` 无校验可读写逃逸。"""
+    skills = tmp_path / "skills"
+    installer = SkillInstaller(skills, state_dir=tmp_path / "state")
+    sibling = tmp_path / "keep"
+    sibling.mkdir()
+    (sibling / "x").write_text("keep", encoding="utf-8")
+
+    # 正常路径:合法名放行(空版本列表,不抛)
+    assert installer.versions("demo") == []
+
+    for bad in (".", "..", "../keep", "a/b", "a\\b", ""):
+        with pytest.raises(PyHError) as e:
+            installer.remove(bad, approved_by="test")
+        assert e.value.code in ("EVT-100", "POL-FS-2")        # negative:拒
+        with pytest.raises(PyHError):
+            installer.versions(bad)
+        with pytest.raises(PyHError):
+            installer.rollback(bad, "1.0.0", approved_by="test")
+    # 版本段亦属外部输入:合法名 + 逃逸版本 → 拒
+    with pytest.raises(PyHError):
+        installer.rollback("demo", "../keep", approved_by="test")
+    assert (sibling / "x").read_text(encoding="utf-8") == "keep"   # 无越界删除
+
+
+@pytest.mark.asyncio
 async def test_skill_registry_rejects_hash_mismatch(tmp_path):
     pkg = tmp_path / "demo.zip"
     _skill_zip(pkg, "demo", "payload")

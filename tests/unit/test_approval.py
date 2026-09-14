@@ -165,14 +165,14 @@ async def test_grant_flow_events_and_strong_sync():
     assert req_evs[0].trace["channel"] == "cli"           # channel 经 trace 携带(偏离 1)
     assert req_evs[0].trace["call_id"] == "call_1"
 
-    prov.approve(aid, by="alice")
+    prov.approve(aid, by="cli:alice")
     assert await asyncio.wait_for(task, 5) == "granted"
     assert prov.pending_count() == 0
 
     granted = await _wait_events(store, "approval.granted")
     assert len(granted) == 1
     assert granted[0].payload["approval_id"] == aid
-    assert granted[0].payload["by"] == "alice"
+    assert granted[0].payload["by"] == "cli:alice"
     assert granted[0].actor == "user"
     # 事件序(按 seq 单调):requested → suspended → granted → resumed
     await _wait_events(store, "queue.resumed")
@@ -198,12 +198,12 @@ async def test_deny_flow():
     task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     aid = _by_type(store, "approval.requested")[0].seq
-    prov.deny(aid, by="bob")
+    prov.deny(aid, by="web:bob")
     assert await asyncio.wait_for(task, 5) == "denied"
     denied = await _wait_events(store, "approval.denied")
     assert len(denied) == 1
     assert denied[0].payload["approval_id"] == aid
-    assert denied[0].payload["by"] == "bob"
+    assert denied[0].payload["by"] == "web:bob"
     assert denied[0].actor == "user"
     assert prov.pending_count() == 0
     assert _by_type(store, "approval.granted") == []       # 只落一个结果
@@ -233,7 +233,7 @@ async def test_timeout_ttl_expiry():
     assert prov.pending_count() == 0
     # 迟到裁决 = 重放:approve 直接 APR-503(已消费);on_verdict 再投 → system.error
     with pytest.raises(PyHError) as ei:
-        prov.approve(aid, by="alice")
+        prov.approve(aid, by="cli:alice")
     assert ei.value.code == "APR-503"
     await prov.on_verdict("approval.granted",
                           {"approval_id": aid, "by": "alice"})
@@ -277,11 +277,11 @@ async def test_replay_aprid_503_and_unknown():
     task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     aid = _by_type(store, "approval.requested")[0].seq
-    prov.approve(aid, by="alice")
+    prov.approve(aid, by="cli:alice")
     assert await asyncio.wait_for(task, 5) == "granted"
     # 同一 id 二次裁决(approve/deny)→ APR-503
     with pytest.raises(PyHError) as ei:
-        prov.approve(aid, by="bob")
+        prov.approve(aid, by="web:bob")
     assert ei.value.code == "APR-503"
 
 
@@ -294,19 +294,19 @@ async def test_concurrent_approve_only_one_outcome():
     await _wait_pending(prov)
     aid = _by_type(store, "approval.requested")[0].seq
     results = await asyncio.gather(
-        prov.approve_async(aid, by="alice"),
-        prov.approve_async(aid, by="alice"),
+        prov.approve_async(aid, by="cli:alice"),
+        prov.approve_async(aid, by="cli:alice"),
         return_exceptions=True)
     assert await asyncio.wait_for(task, 5) == "granted"
     assert len(_by_type(store, "approval.granted")) == 1
     assert sum(isinstance(r, PyHError) and r.code == "APR-503"
                for r in results) == 1
     with pytest.raises(PyHError) as ei2:
-        prov.deny(aid, by="bob")
+        prov.deny(aid, by="web:bob")
     assert ei2.value.code == "APR-503"
     # 未知 id → APR-503
     with pytest.raises(PyHError) as ei3:
-        prov.approve(99999, by="alice")
+        prov.approve(99999, by="cli:alice")
     assert ei3.value.code == "APR-503"
     # on_verdict 直投重放 → system.error(APR-503),无第二 tool.result/结果事件
     await prov.on_verdict("approval.denied", {"approval_id": aid, "by": "bob"})
@@ -317,18 +317,20 @@ async def test_concurrent_approve_only_one_outcome():
 
 
 async def test_forged_verdict_identity_rejected():
-    """假冒审批防线(S-2):llm:/tool:/plugin: 前缀 or 空 by → APR-503,零事件。"""
+    """假冒审批防线(S-2 白名单收紧):llm:/tool:/plugin:/任意自报身份 or 空 by →
+    APR-503,零事件。"""
     prov, log, store, _ = _make_stack()
     await _boot(log)
     task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     aid = _by_type(store, "approval.requested")[0].seq
-    for bad in ("llm:assistant", "tool:shell_exec", "plugin:echo", ""):
+    for bad in ("llm:assistant", "tool:shell_exec", "plugin:echo",
+                "hacker", "alice", "", "sys:admin"):
         with pytest.raises(PyHError) as ei:
             prov.approve(aid, by=bad)
         assert ei.value.code == "APR-503"
     assert _by_type(store, "approval.granted") == []       # 零事件落盘
-    prov.deny(aid, by="claire")                            # 人类通道照常可用
+    prov.deny(aid, by="cli:claire")                        # 人类通道照常可用
     assert await asyncio.wait_for(task, 5) == "denied"
 
 
@@ -347,7 +349,7 @@ async def test_merge_same_fingerprint_single_request():
     assert prov.pending_count() == 1                       # 合并等待者不新增 pending
     assert len(_by_type(store, "approval.requested")) == 1  # 不新增请求事件
     aid = _by_type(store, "approval.requested")[0].seq
-    prov.approve(aid, by="alice")
+    prov.approve(aid, by="cli:alice")
     # 每个等待者各自配对同一裁决结果(各自独立重入 guard 链由 executor 负责)
     assert await asyncio.wait_for(t1, 5) == "granted"
     assert await asyncio.wait_for(t2, 5) == "granted"
@@ -367,7 +369,7 @@ async def test_merge_window_new_batch_after_terminal_and_diff_args():
     t1b = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await asyncio.sleep(0.02)
     assert len(_by_type(store, "approval.requested")) == 1
-    prov.deny(aid1, by="bob")
+    prov.deny(aid1, by="web:bob")
     assert await asyncio.wait_for(t1, 5) == "denied"
     assert await asyncio.wait_for(t1b, 5) == "denied"
     # ② 批已终态 → 同参再来 = 开新批(新 approval.requested,不挂旧批)
@@ -383,10 +385,10 @@ async def test_merge_window_new_batch_after_terminal_and_diff_args():
     await _wait_pending(prov, 2)
     assert len(_by_type(store, "approval.requested")) == 3
     # 独立裁决:批 2 deny,批 3 grant
-    prov.deny(aid2, by="bob")
+    prov.deny(aid2, by="web:bob")
     assert await asyncio.wait_for(t2, 5) == "denied"
     aid3 = _by_type(store, "approval.requested")[-1].seq
-    prov.approve(aid3, by="alice")
+    prov.approve(aid3, by="cli:alice")
     assert await asyncio.wait_for(t3, 5) == "granted"
     assert prov.pending_count() == 0
 
@@ -448,7 +450,7 @@ async def test_trustlist_disabled_by_default():
         task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
         await _wait_pending(prov)
         aid = _by_type(store, "approval.requested")[-1].seq
-        prov.approve(aid, by="alice")
+        prov.approve(aid, by="cli:alice")
         assert await asyncio.wait_for(task, 5) == "granted"
     assert len(_by_type(store, "approval.requested")) == 2
     assert prov.trust_count() == 0
@@ -458,13 +460,13 @@ async def test_trustlist_hit_skips_reask_and_clear():
     """信任命中(仅交互+开):granted 后同参再次请求 → 直接 granted,不再询问。"""
     prov, log, store, _ = _make_stack()
     await _boot(log)
-    prov.enable_trust(True, by="alice")
+    prov.enable_trust(True, by="cli:alice")
     assert prov.trust_count() == 0
     # 首次:正常审批并记住
     task = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     aid = _by_type(store, "approval.requested")[0].seq
-    prov.approve(aid, by="alice")
+    prov.approve(aid, by="cli:alice")
     assert await asyncio.wait_for(task, 5) == "granted"
     assert prov.trust_count() == 1
     # 二次:同指纹命中 → 跳过再次询问(无新事件,无等待,直接 granted)
@@ -478,7 +480,7 @@ async def test_trustlist_hit_skips_reask_and_clear():
     await _wait_pending(prov)
     assert len(_by_type(store, "approval.requested")) == 2
     aid2 = _by_type(store, "approval.requested")[-1].seq
-    prov.deny(aid2, by="bob")
+    prov.deny(aid2, by="web:bob")
     assert await asyncio.wait_for(task2, 5) == "denied"
     # clear_trust:清除后同参须重新审批;返回清除条数
     assert prov.clear_trust() == 1
@@ -487,21 +489,21 @@ async def test_trustlist_hit_skips_reask_and_clear():
     await _wait_pending(prov)
     assert len(_by_type(store, "approval.requested")) == 3
     aid3 = _by_type(store, "approval.requested")[-1].seq
-    prov.deny(aid3, by="bob")
+    prov.deny(aid3, by="web:bob")
     assert await asyncio.wait_for(task3, 5) == "denied"
     # 关闭开关:重新逐次询问
-    prov.enable_trust(True, by="alice")
+    prov.enable_trust(True, by="cli:alice")
     task4 = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     aid4 = _by_type(store, "approval.requested")[-1].seq
-    prov.approve(aid4, by="alice")
+    prov.approve(aid4, by="cli:alice")
     assert await asyncio.wait_for(task4, 5) == "granted"
-    prov.enable_trust(False, by="alice")
+    prov.enable_trust(False, by="cli:alice")
     task5 = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
     await _wait_pending(prov)
     assert len(_by_type(store, "approval.requested")) == 5  # 关后重新询问
     aid5 = _by_type(store, "approval.requested")[-1].seq
-    prov.deny(aid5, by="bob")
+    prov.deny(aid5, by="web:bob")
     assert await asyncio.wait_for(task5, 5) == "denied"
 
 
@@ -510,7 +512,7 @@ async def test_trustlist_headless_never_enabled():
     prov, log, _, _ = _make_stack(channel=None, headless=True)
     await _boot(log)
     with pytest.raises(PyHError) as ei:
-        prov.enable_trust(True, by="alice")
+        prov.enable_trust(True, by="cli:alice")
     assert ei.value.code == "APR-501"
     assert not prov._enabled
 
@@ -534,7 +536,7 @@ async def test_approval_id_equals_requested_seq_and_request_dedupe_key():
     req_ev = _by_type(store, "approval.requested")[0]
     assert next(iter(prov._pending)) == req_ev.seq         # approval_id=seq
     assert prov.pending_count() == 1
-    prov.deny(req_ev.seq, by="bob")
+    prov.deny(req_ev.seq, by="web:bob")
     assert await asyncio.wait_for(task, 5) == "denied"
     assert prov.pending_count() == 0
     await _settle_tasks()

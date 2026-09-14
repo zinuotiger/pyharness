@@ -88,3 +88,34 @@ def test_service_skill_root_is_repository_skills():
     svc = ApplicationService(SimpleNamespace(bus=None, storage=None))
     names = {row["name"] for row in svc.skills_mgr().list()}
     assert "interview-pitch" in names
+
+
+def test_approval_for_isolates_sessions_on_shared_ctx():
+    """多会话共享 ctx:共享 approval 归属 A 时,请求 B 会话不得复用(修复前串场)。"""
+    shared = SimpleNamespace(__shared_approval__=True)      # 冒充 ctx.approval
+    ctx = SimpleNamespace(bus=None, storage=None,
+                          settings=SimpleNamespace(),
+                          approval=shared, _approval_owner_sid="s-A")
+    svc = ApplicationService(ctx, channel="desktop")
+    # B 先请求(_approvals 尚空):owner(s-A) ≠ s-B → 必须建 per-session,不返回 shared
+    got_b = svc.approval_for("s-B", _Log())
+    assert got_b is not shared
+    assert svc._approvals["s-B"] is got_b
+    # A 自己请求:owner 匹配且首个 → 复用注入的共享 provider
+    got_a = svc.approval_for("s-A", _Log())
+    assert got_a is shared
+
+
+def test_validate_registry_url_ssrf():
+    """registry_url 校验:拒非 http(s) 与云元数据地址;正常 http(s) 放行。"""
+    from pyharness.application.service import _validate_registry_url
+    from pyharness.errors import PyHError
+
+    assert _validate_registry_url("https://skills.example.com") == \
+        "https://skills.example.com"
+    with pytest.raises(PyHError) as e1:
+        _validate_registry_url("file:///etc/passwd")
+    assert e1.value.code == "CFG-601"
+    with pytest.raises(PyHError) as e2:
+        _validate_registry_url("http://169.254.169.254/latest/meta-data")
+    assert e2.value.code == "CFG-601"

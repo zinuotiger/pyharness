@@ -46,6 +46,29 @@ def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
+_METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal",
+                             "100.100.100.200"})
+
+
+def _validate_registry_url(url: str) -> str:
+    """Skill Registry URL 校验(SSRF 收紧):仅 http(s);拒云元数据地址。
+
+    客户端可传 registry_url,服务端据此发起 HTTP——无校验则可指向内网/元数据做
+    SSRF,或指向 file:// 类本地读取面(P3:registry_url SSRF)。loopback/私网不强拒
+    (本地自建 registry 是合法用法),仅挡非 http(s) scheme 与云元数据端点。
+    """
+    from urllib.parse import urlsplit
+    parts = urlsplit(str(url or "").strip())
+    if parts.scheme not in ("http", "https"):
+        raise_code("CFG-601", field="skills.registry_url", value=str(url)[:200],
+                   advice="registry_url 须为 http(s) 地址(拒 file:// 等本地读取面)")
+    host = (parts.hostname or "").lower()
+    if host in _METADATA_HOSTS:
+        raise_code("CFG-601", field="skills.registry_url", value=host,
+                   advice="registry_url 指向云元数据地址,拒绝(SSRF)")
+    return str(url).strip()
+
+
 class ApplicationService:
     """Session-scoped business facade independent from HTTP and UI frameworks."""
 
@@ -200,8 +223,10 @@ class ApplicationService:
         if self.tenant_id == "default":
             if getattr(self.ctx, "approval", None) is None:
                 self.ctx.approval = spine.approval
+                self.ctx._approval_owner_sid = sid   # 归属记账:approval_for 判复用
             if getattr(self.ctx, "guard", None) is None:
                 self.ctx.guard = spine.guard
+                self.ctx._guard_owner_sid = sid
         return _eng_make_runner(spine)
 
     def runner_seam(self) -> Any:
@@ -239,7 +264,10 @@ class ApplicationService:
         if provider is None:
             ctx_approval = (getattr(self.ctx, "approval", None)
                             if self.tenant_id == "default" else None)
-            if ctx_approval is not None and not self._approvals:
+            owner = getattr(self.ctx, "_approval_owner_sid", None)
+            # 仅当共享 ctx.approval 确属本会话(owner==sid)或未记归属(外部单会话
+            # 注入)才复用;否则建 per-session——防第二会话拿到第一会话的审批通道。
+            if ctx_approval is not None and owner in (None, sid):
                 return ctx_approval
             provider = ApprovalProvider(session=log_, bus=None,
                                         config=_session_module()._cfg_of(self.ctx))
@@ -743,7 +771,11 @@ class ApplicationService:
         except Exception:                          # noqa: BLE001 读面降级到 ctx
             budget = None
         if budget is None:
-            budget = getattr(self.ctx, "budget", None)
+            # 共享 ctx.budget 作 fallback:owner 为空(外部单会话注入)或确属本会话
+            # 才用;owner 指向别的会话(多会话最后装配者)→ 拒用,防串场。
+            owner = getattr(self.ctx, "_budget_owner_sid", None)
+            if owner is None or owner == sid:
+                budget = getattr(self.ctx, "budget", None)
         snap = getattr(budget, "snapshot", None)
         if not callable(snap):
             return {**base, "disabled": True,
@@ -918,6 +950,7 @@ class ApplicationService:
         if not url:
             raise_code("CFG-601", field="skills.registry_url",
                        advice="未配置 Skill Registry URL")
+        url = _validate_registry_url(url)
         rows = await self.skill_installer().search(query, url)
         return {"registry_url": url, "skills": rows, "count": len(rows)}
 
@@ -930,6 +963,7 @@ class ApplicationService:
         if not url:
             raise_code("CFG-601", field="skills.registry_url",
                        advice="未配置 Skill Registry URL")
+        url = _validate_registry_url(url)
         result = await self.skill_installer().install(
             name, registry_url=url, version=version or None,
             approved_by=approved_by)

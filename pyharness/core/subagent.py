@@ -379,7 +379,10 @@ class SubagentManager:
                          window_tokens=getattr(s, "window_tokens", 64000),
                          window_ratio=getattr(s, "window_ratio", 0.75),
                          session=child_session,
-                         counters=None, bus=getattr(self, "_bus", None))
+                         # 继承父预算计数器:子 agent 用量并入同一预算闸(P2 修复,
+                         # 此前 None → 子 scope 预算恒 ok,烧钱无感)
+                         counters=getattr(parent_scope, "_counters", None),
+                         bus=getattr(self, "_bus", None))
         except Exception as exc:                            # noqa: BLE001
             log.warning("子 scope 构造失败 sub=%s: %s(降级 None)", sub_id, exc)
             return None
@@ -888,7 +891,10 @@ class SubagentManager:
         if h.state in ("spawning", "running"):
             h.state = "joining"                 # 等待期状态(ChildState 词表)
         try:
-            return await asyncio.wait_for(h.result, timeout)
+            # shield:超时只取消本等待,不毒化 h.result 内部 Future——否则超时后
+            # 再次 join 读到 cancelled future 直接抛 CancelledError、结果永久丢失
+            # (task_queue.wait_for 同款处理,P2 修复)。
+            return await asyncio.wait_for(asyncio.shield(h.result), timeout)
         except asyncio.TimeoutError:
             return None                         # 调用方:再等/取消/先干别的
 
@@ -989,13 +995,19 @@ class SubagentSpawnProvider:
 
     async def handle(self, args: dict, ctx: Any = None) -> str:
         """Provider 执行面(async;executor 关3 直接协程 wait_for)。"""
+        # 递归深度自装配层经 ctx.subagent_depth 传入(见 orchestration):子会话携带
+        # 自身层级 d → 此处计算 d+1,使嵌套 spawn 逐层递增至 ≤3 的硬上限;无该字段
+        # (交互主会话/未装配)= 顶层 d=0 → depth=1。LLM 无法自报 depth 绕过闸门。
+        base = self._mgr._depth
+        if ctx is not None:
+            base = int(getattr(ctx, "subagent_depth", base))
         spec = SubagentSpec(
             task=str(args.get("task") or ""),
             tools_subset=args.get("tools_subset"),
             deny_extra=list(args.get("deny_extra") or []),
             budget_ratio=float(args.get("budget_ratio")
                                or DEFAULT_BUDGET_RATIO),
-            depth=int(args.get("depth") or self._mgr._depth + 1),
+            depth=int(args.get("depth") or base + 1),
             creds_allowed=list(args.get("creds_allowed") or []),
             notify=bool(args.get("notify", True)))
         sub_id = await self._mgr.spawn(spec, ctx)       # 四道闸内聚(spawn 校验)

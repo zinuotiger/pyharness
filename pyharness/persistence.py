@@ -41,8 +41,9 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterator, Optional
 
 from pyharness.config import DEFAULTS
-from pyharness.errors import raise_code
+from pyharness.errors import PyHError, raise_code
 from pyharness.events import Envelope, SYNC_TYPES
+from pyharness.events.vocab import validate_payload
 
 log = logging.getLogger("pyharness.persistence")
 
@@ -75,12 +76,139 @@ def default_sessions_dir() -> Path:
     return Path(raw).expanduser()
 
 
+# ================================================================= 跨进程文件锁
+def _os_lock_fd(fd: int) -> None:
+    """对 fd 取 OS 级**非阻塞**独占锁;已被占 → OSError。Windows msvcrt / POSIX fcntl。
+
+    锁独立于 JSONL 追加句柄(锁文件另开),故 store 内 close/reopen 句柄(轮转/截断
+    重写)不会丢锁。msvcrt 锁首字节,fcntl 锁整文件。
+    """
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)      # 锁首字节;被占抛 OSError
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _os_unlock_fd(fd: int) -> None:
+    """释放 fd 上的 OS 级锁(尽力;失败不阻断 close)。"""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as e:                            # noqa: BLE001 释放失败不阻断
+        log.warning("PERS-202 域:文件锁释放失败 why=%s", e)
+
+
+class _FileLock:
+    """会话日志跨进程独占锁(INV-07 单写者)。
+
+    在 lock_path 上取 OS 级非阻塞独占锁,防两进程同写一 JSONL 造成 seq 重复 /
+    轮转 os.replace 互覆 / 重写时他进程活句柄写的字节静默消失。锁文件独立于 JSONL
+    且**不删除**(留 0 字节 .lock 属标准做法;删锁反有 release↔unlink 竞态)。
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        self._path = lock_path
+        self._fd: Optional[int] = None
+
+    def try_acquire(self) -> bool:
+        """非阻塞取锁;成功 True。冲突/IO 失败 → False(不抛,由调用方转 PERS-202)。"""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(str(self._path), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            return False
+        try:
+            _os_lock_fd(fd)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        """释放锁(幂等);不删锁文件。"""
+        if self._fd is None:
+            return
+        _os_unlock_fd(self._fd)
+        try:
+            os.close(self._fd)
+        finally:
+            self._fd = None
+
+
+# 进程内锁注册表:{resolved lock path -> [_FileLock, refcount]}。同进程多 store 打开
+# 同一会话(如桌面 + 进程内 repair)复用同一 OS 锁,不误判为跨进程冲突。
+_LOCKS: dict[str, list] = {}
+
+
+def acquire_session_lock(lock_path: Path) -> None:
+    """取会话日志独占锁(进程内引用计数可重入);跨进程冲突 → PERS-202。
+
+    调用方须在 finally 里配对 release_session_lock(lock_path)。
+    """
+    key = str(lock_path)
+    ent = _LOCKS.get(key)
+    if ent is not None:
+        ent[1] += 1                                # 同进程已持有:重入
+        return
+    lock = _FileLock(lock_path)
+    if not lock.try_acquire():
+        raise_code("PERS-202", op="lock", path=str(lock_path),
+                   advice="另一进程正在写/修复该会话(单写者 INV-07);"
+                          "先结束该进程再打开/修复")
+    _LOCKS[key] = [lock, 1]
+
+
+def release_session_lock(lock_path: Path) -> None:
+    """释放会话日志独占锁(引用计数归零才真正解锁;幂等)。"""
+    key = str(lock_path)
+    ent = _LOCKS.get(key)
+    if ent is None:
+        return
+    ent[1] -= 1
+    if ent[1] <= 0:
+        ent[0].release()
+        del _LOCKS[key]
+
+
+def session_lock_path(path: Path) -> Path:
+    """会话日志对应的锁文件路径(``{sid}.jsonl.lock``;不匹配 repair 的 *.jsonl 扫描)。"""
+    return path.with_name(path.name + ".lock")
+
+
+def _last_newline_before(f, end: int) -> Optional[int]:
+    """在 [0, end) 内从后向前分块查找最近 \\n 的字节偏移;无换行 → None。
+
+    detect_truncation 的半行超窗兜底:尾部窗口内无换行不代表文件前部无完整行
+    ——>4096B 半行曾致返回 0 触发 repair 把含完整数据的文件整段截断(数据事故),
+    故需扩大到窗口前区域定位最后完整行的切点。分块读取,避免整文件载入内存。
+    """
+    pos = end
+    while pos > 0:
+        step = min(pos, _TAIL_WINDOW)
+        pos -= step
+        f.seek(pos)
+        i = f.read(step).rfind(b"\n")
+        if i >= 0:
+            return pos + i
+    return None
+
+
 def detect_truncation(path: Path) -> Optional[int]:
     """截断检测(只读):文件非空且末字节不是 \\n → 返回半行起始字节偏移;否则 None。
 
     崩溃遗留的尾部半行 = 未完成写的事实,不假装发生:open/回放不修,repair 先备份
     再截断(F060)。实现按 spec 注释意图读取尾部窗口——伪码 seek(0,2) 后未回退
-    read 为空,实际以 seek(-window, 2) 读窗口再定位最后一个换行。
+    read 为空,实际以 seek(-window, 2) 读窗口再定位最后一个换行;窗口内无换行
+    (半行超窗)时扩大到窗口前区域,仅当整文件都无换行(单条半行文件)才返回 0。
     """
     try:
         if not path.exists() or path.stat().st_size == 0:
@@ -95,9 +223,14 @@ def detect_truncation(path: Path) -> Optional[int]:
         tail = f.read(window)
         if tail.endswith(b"\n"):
             return None                          # 完整行结尾:无截断
-    last_nl = tail.rfind(b"\n")
-    # 偏移 = 文件大小 - 窗口内最后一个换行之后的字节数(字节级切点,保完整行)
-    return size - (len(tail) - last_nl - 1) if last_nl >= 0 else 0
+        last_nl = tail.rfind(b"\n")
+        if last_nl >= 0:
+            # 偏移 = 文件大小 - 窗口内最后一个换行之后的字节数(字节级切点,保完整行)
+            return size - (len(tail) - last_nl - 1)
+        # 窗口内无换行:半行超窗。扩大到窗口前区域定位最后完整行;整文件仍无
+        # 换行 = 真·单条半行文件,保留 offset=0 语义;否则禁止误判为 0。
+        prev = _last_newline_before(f, size - window)
+        return (prev + 1) if prev is not None else 0
 
 
 def _read_clean(path: Path) -> list[tuple[int, str]]:
@@ -150,10 +283,12 @@ class SessionStore:
                  rotate_bytes: Optional[int] = None,
                  flush_batch: Optional[int] = None,
                  flush_interval_s: Optional[float] = None,
+                 lock_path: Optional[Path] = None,
                  on_system_event: Optional[Callable[[str, dict], Awaitable]] = None):
         self.session_id = session_id
         self.path = path
         self._fh = fh                             # 追加句柄(append,UTF-8,单写者)
+        self._lock_path = lock_path               # 跨进程独占锁文件(open_store 持有)
         self.rotate_bytes = rotate_bytes or _ROTATE_BYTES
         self.flush_batch = flush_batch or _FLUSH_BATCH
         self.flush_interval_s = flush_interval_s or _FLUSH_INTERVAL_S
@@ -166,13 +301,16 @@ class SessionStore:
 
     # ------------------------------------------------------------ 关闭
     def close(self) -> None:
-        """收尾:flush + 关追加句柄(会话终态/进程退出前调用)。"""
-        if self._fh.closed:                       # 已关(如编码坏块 .corrupt 分支)
-            return
+        """收尾:flush + 关追加句柄 + 释放跨进程锁(会话终态/进程退出前调用)。"""
         try:
-            self._fh.flush()
+            if not self._fh.closed:               # 已关(如编码坏块 .corrupt 分支)
+                try:
+                    self._fh.flush()
+                finally:
+                    self._fh.close()
         finally:
-            self._fh.close()
+            if self._lock_path is not None:       # 解锁(引用计数;幂等)
+                release_session_lock(self._lock_path)
 
     # ------------------------------------------------------------ 落盘主路径
     async def append(self, env: Envelope, sync: bool = False) -> None:
@@ -228,30 +366,36 @@ class SessionStore:
             raise
 
     async def flush(self, up_to_seq: Optional[int] = None) -> None:
-        """公开 flush:把 _pending 中 seq ≤ up_to_seq 的行(连同重试队列)写盘+flush。
+        """公开 flush:把 _pending 与 _retry_q 中 seq ≤ up_to_seq 的行写盘+flush。
 
         up_to_seq=None = 全量(定时器/关闭前);成功才返回(强同步契约);OSError →
         行回重试队列(PERS-202,拒新不丢旧)。调用方:session 强同步点、定时任务。
+        两队列同受 up_to_seq 过滤(P3:此前 retry_q 不过滤,>up_to_seq 的旧重试行会被
+        提前写出、破坏 seq 升序)。
         """
         if not self._pending and not self._retry_q:
             return                                # 无积压:空操作
-        take, keep = [], []
-        for item in self._pending:                # 仅刷 up_to_seq 之前;之后保留积压
-            (keep if (up_to_seq is not None and item[0] > up_to_seq) else take).append(item)
+        def _within(seq: int) -> bool:
+            return up_to_seq is None or seq <= up_to_seq
+        take = [it for it in self._pending if _within(it[0])]
+        keep = [it for it in self._pending if not _within(it[0])]
         self._pending = deque(keep)
-        retry = list(self._retry_q)               # 先重试旧行再新取(seq 升序)
-        to_write = retry + take
+        retry_original = list(self._retry_q)      # 保序(失败回填需与写序一致)
+        retry_take = [it for it in retry_original if _within(it[0])]
+        retry_keep = [it for it in retry_original if not _within(it[0])]
+        to_write = retry_take + take              # 先重试旧行再新取(seq 升序)
         if not to_write:
+            self._retry_q = deque(retry_keep)     # 全在 up_to_seq 之后:原位保留
             return
         try:
             for _seq, line in to_write:
                 self._fh.write(line)
             self._fh.flush()
             self._fail_streak = 0                 # 成功:复位连续失败计数
-            self._retry_q.clear()
+            self._retry_q = deque(retry_keep)     # 仅剩 >up_to_seq 的旧重试行待刷
         except OSError as e:
-            self._retry_q = deque(retry)          # 旧行原样保留,新取入队:不重不漏
-            self._retry_q.extend(take)
+            self._retry_q = deque(retry_original)  # 旧行原样保序保留
+            self._retry_q.extend(take)            # 新取入队:不重不漏
             self._fail_streak += 1
             raise_code("PERS-202", n=len(take), why=str(e),
                        advice="行已入重试队列不丢;repair 后恢复")
@@ -302,7 +446,14 @@ class SessionStore:
                         continue                 # 空行跳过(轮转残留容忍)
                     try:
                         text = line.decode("utf-8")
-                        yield Envelope.model_validate_json(text)   # 信封一次校验
+                        env = Envelope.model_validate_json(text)  # 信封一次校验
+                        # 读侧 payload 强校验(P1-4):写侧拒坏 payload、读侧曾漏网——
+                        # 缺字段/错类型的行"合法"通过回放,到 reducer/repair 深处才
+                        # KeyError 崩。校验失败落入下方 PERS-201 隔离(与写侧同口径)。
+                        canonical = validate_payload(env.type, env.payload)
+                        if canonical is not env.payload:
+                            env = env.model_copy(update={"payload": canonical})
+                        yield env
                     except Exception:                            # noqa: BLE001
                         # 解码坏块/JSON 非法/信封校验失败统一记 PERS-201 隔离
                         self._quarantine.add(no)  # 中部坏行隔离(记跳不中断)
@@ -424,11 +575,14 @@ class SessionStore:
     def _maybe_rotate(self) -> None:
         """轮转检查(append 写入后调用):>rotate_bytes → _rotate。
 
+        大小取 OS 文件字节数(fstat),不用 `_fh.tell()`——文本模式 tell() 返回的是
+        不透明游标(cookie)而非字节偏移,与 rotate_bytes(字节)不可比(P3:_rotate 判定)。
         轮转失败只记日志不抛(数据无损:事件已先落主文件;rename 原子性保证主文件
         仍在),下次 append 再触发——避免在 append 成功路径上叠加二次异常。
         """
         try:
-            if self._fh.tell() > self.rotate_bytes:
+            size = os.fstat(self._fh.fileno()).st_size
+            if size > self.rotate_bytes:
                 self._rotate()
         except (OSError, ValueError) as e:
             log.error("PERS-202 域:轮转失败(数据无损,下次重试) why=%s", e)
@@ -457,6 +611,10 @@ class SessionStore:
         """
         seqs = [env.seq for env in self.replay()]     # 复用坏行隔离读取
         holes: list[int] = []
+        if seqs and seqs[0] > 1:
+            # 前缀段连续缺失(轮转文件丢失/坏文件):seq 1..(seqs[0]-1) 整体缺失,
+            # 旧实现只查相邻差、对首段失明(P1-5,与 repair.check_seq_gap 口径对齐)
+            holes.extend(range(1, seqs[0]))
         for expect, got in zip(seqs, seqs[1:]):
             if got != expect + 1:
                 holes.extend(range(expect + 1, got))  # 相邻差 >1 = 空洞
@@ -524,6 +682,14 @@ def open_store(session_id: str, *, dir: Optional[Path] = None) -> SessionStore:
         raise_code("PERS-202", op="mkdir", path=str(d), why=str(e),
                    advice="查磁盘/权限;repair 后恢复")
     path = d / f"{session_id}.jsonl"              # 会话日志锚点 ~/.pyharness/sessions
+    lock_path = session_lock_path(path)           # 跨进程独占锁(INV-07 单写者)
+    try:
+        acquire_session_lock(lock_path)           # 冲突 → PERS-202(不建第二写者)
+    except PyHError:
+        raise
+    except Exception as e:                        # noqa: BLE001 非预期锁故障:拒开
+        raise_code("PERS-202", op="lock", path=str(lock_path), why=str(e),
+                   advice="会话锁获取异常;查磁盘/权限")
     trunc = detect_truncation(path)               # 只读检测:崩溃遗留尾部半行?
     if trunc is not None:
         log.warning("PERS-201 域:尾部半行待 repair(open 不修,先备份再修 F060) "
@@ -532,12 +698,15 @@ def open_store(session_id: str, *, dir: Optional[Path] = None) -> SessionStore:
         # newline="\n":JSONL 统一 \n 行尾,Windows 下禁 \r\n 翻译(半行检测按字节)
         fh = open(path, "a", encoding="utf-8", newline="\n")
     except OSError as e:
+        release_session_lock(lock_path)           # 开失败:释放已取锁
         raise_code("PERS-202", op="open", path=str(path), why=str(e),
                    advice="查磁盘/权限;repair 后恢复")
-    return SessionStore(session_id=session_id, path=path, fh=fh)
+    return SessionStore(session_id=session_id, path=path, fh=fh,
+                        lock_path=lock_path)
 
 
 __all__ = [
     "SessionStore", "RepairReport", "open_store", "detect_truncation",
     "default_sessions_dir", "now_ts",
+    "acquire_session_lock", "release_session_lock", "session_lock_path",
 ]

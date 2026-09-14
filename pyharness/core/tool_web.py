@@ -60,6 +60,8 @@ from typing import Any, Optional
 from urllib.parse import (parse_qs, urlencode, urljoin, urlsplit,
                            unquote)
 
+import asyncio
+
 import httpx
 
 from pyharness.core.tools_registry import ToolDefinition
@@ -541,28 +543,31 @@ async def _http_once(ctx: Any, url: str, *, max_bytes: int) -> _RawResponse:
     """
     timeout = httpx.Timeout(HTTP_TIMEOUT, connect=CONNECT_TIMEOUT)
     try:
-        async with httpx.AsyncClient(timeout=timeout,
-                                     follow_redirects=False) as client:
-            async with client.stream("GET", url) as resp:   # 手动控跳
-                headers = {str(k).lower(): str(v)
-                           for k, v in resp.headers.items()}
-                if resp.status_code >= 300:     # 重定向/错误:不读体
-                    return _RawResponse(resp.status_code, headers, b"",
+        # 墙钟总闸:httpx.Timeout 是"每步"超时,慢滴流服务器(m每步都 <15s)可无限拖延;
+        # asyncio.timeout 给整次抓取一个硬上限(P3:tool_web 每步超时→墙钟)。
+        async with asyncio.timeout(HTTP_TIMEOUT):
+            async with httpx.AsyncClient(timeout=timeout,
+                                         follow_redirects=False) as client:
+                async with client.stream("GET", url) as resp:   # 手动控跳
+                    headers = {str(k).lower(): str(v)
+                               for k, v in resp.headers.items()}
+                    if resp.status_code >= 300:     # 重定向/错误:不读体
+                        return _RawResponse(resp.status_code, headers, b"",
+                                            str(resp.url))
+                    raw = b""
+                    async for chunk in resp.aiter_bytes():      # 限量读流
+                        raw += chunk
+                        if len(raw) > max_bytes:    # 超原始上限 → 停并拒
+                            raise_code("PERS-223", url=url, got=len(raw),
+                                       max=max_bytes,
+                                       advice="页面超过 2MB 抓取上限,换更小目标")
+                    return _RawResponse(resp.status_code, headers, raw,
                                         str(resp.url))
-                raw = b""
-                async for chunk in resp.aiter_bytes():      # 限量读流
-                    raw += chunk
-                    if len(raw) > max_bytes:    # 超原始上限 → 停并拒
-                        raise_code("PERS-223", url=url, got=len(raw),
-                                   max=max_bytes,
-                                   advice="页面超过 2MB 抓取上限,换更小目标")
-                return _RawResponse(resp.status_code, headers, raw,
-                                    str(resp.url))
     except PyHError:
         raise
-    except httpx.TimeoutException:
+    except (TimeoutError, httpx.TimeoutException):
         raise_code("TLB-805", url=url, stage="timeout",
-                   advice="抓取超时(15s)")
+                   advice="抓取超时(15s 墙钟)")
     except httpx.HTTPError as e:
         raise_code("TLB-805", url=url, stage="transport",
                    cause=e, advice=f"网络失败:{type(e).__name__}")

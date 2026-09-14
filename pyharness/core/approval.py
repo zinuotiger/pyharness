@@ -97,8 +97,10 @@ _OUTCOME_EVENTS: dict[str, str] = {
     "timeout": "approval.timeout",
 }
 
-# 非法裁决者身份前缀(假冒审批结构防线 S-2:仅人类通道可裁决)
-_FAKE_BY_PREFIXES: tuple[str, ...] = ("llm:", "tool:", "plugin:")
+# 人类裁决通道白名单(假冒审批结构防线 S-2 收紧,P2):仅四通道可裁决——通道名
+# 本身("desktop")或其 ":" 前缀("cli:alice")视为合法;任意其它自报身份拒
+# (旧实现只拒 llm:/tool:/plugin: 黑名单,`by="hacker"` 冒充人类可过)。
+_HUMAN_CHANNELS: tuple[str, ...] = ("cli", "web", "acp", "desktop")
 
 # 会话级信任名单容量上限(≤N 条 FIFO 淘汰;N 可经构造参数覆盖)
 DEFAULT_TRUST_MAX: int = 100
@@ -154,6 +156,7 @@ class ApprovalRequest:
     state: str = "pending"                 # pending/granted/denied/timeout 一次性迁移
     approval_id: Optional[int] = None      # = 请求事件 seq(lead 才有)
     fingerprint: str = ""                  # 规范化指纹(合并批 + 信任共键)
+    binding: str = ""                      # 执行侧绑定指纹(executor 传入;授权↔执行一致性)
     session_id: str = ""                   # 请求所属会话(事件落点路由)
     log: Any = None                        # 会话日志(事件落点;经 ctx 注入)
     waiter: Any = None                     # asyncio Future(裁决/超时/取消先到者解决)
@@ -211,6 +214,8 @@ class ApprovalProvider:
         self._suspend_log: Any = None           # 挂起事件落点(恢复事件同落点)
         self._detached: bool = False            # detach 幂等标记
         self._tasks: set = set()                # fire-and-forget 任务登记(防 GC)
+        self._grant_slots: dict[str, str] = {}  # call_id → granted 绑定指纹(executor
+        # 重入校验用;call_id 每次调用唯一,单 slot 无生命周期问题)
         # 裁决事件订阅:approval.granted/denied/timeout → on_verdict(DIS-SEAM §6.2
         # Definition.subscriptions 同款);owner="approval" 供 detach 摘除。
         if self._bus is not None:
@@ -227,8 +232,13 @@ class ApprovalProvider:
 
     # ======================================================== 审批主入口
     async def request(self, call: Any, args_summary: str, ctx: Any, *,
-                      ttl_ms: Optional[int] = None) -> str:
+                      ttl_ms: Optional[int] = None,
+                      binding: Optional[str] = None) -> str:
         """审批主入口(F015;executor 关 2.5 唯一调用方)→ granted/denied/timeout。
+
+        binding:executor 传入的"授权↔执行"绑定指纹(本轮参数序列化),granted
+        时按 call_id 记录,供 executor 重入 guard 得到 approval 决策时校验一致
+        (批准针对同参数才放行);信任命中路径同样记录。None = 未绑定(旧调用方)。
 
         流程:通道检查(headless → APR-501 直接拒)→ 信任名单命中(仅交互+开)返回
         granted → 60s 合并或新建批(强同步 approval.requested,approval_id=事件 seq)
@@ -250,13 +260,18 @@ class ApprovalProvider:
         ttl = self._ttl_ms if ttl_ms is None else int(ttl_ms)
         # 信任名单命中:本会话内"同工具同参已批准" → 跳过再次询问(仅交互+开)
         if self._trust_hit(fp, sid, ch):
+            if binding:                             # 信任命中也记录绑定(重入校验面)
+                cid = getattr(call, "call_id", "") or ""
+                if cid:
+                    self._grant_slots[cid] = binding
             return "granted"                     # executor 仍重入 guard 链
         # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件
         batch = self._merge.get(fp)
         if (batch and not batch[0].is_terminal
                 and time.monotonic() - batch[0].batch_mono
                 < self._merge_window_ms / 1000.0):
-            req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid, sess=sess)
+            req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,
+                                   sess=sess, binding=binding)
             batch.append(req)                    # 挂到既有批,等同一裁决
             return await self._wait_any(req)
         # 开新批:强同步 approval.requested(approval_id = append 返回 seq)
@@ -269,7 +284,8 @@ class ApprovalProvider:
             trace["parent_seq"] = call.parent_seq
         env = await sess.append("approval.requested", payload,
                                 actor="tool", sync=True, trace=trace)
-        req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid, sess=sess)
+        req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,
+                               sess=sess, binding=binding)
         req.approval_id = env.seq                # approval_id=请求事件 seq
         req.batch_mono = time.monotonic()
         self._pending[env.seq] = req
@@ -379,6 +395,13 @@ class ApprovalProvider:
             await self._emit_verdict(sess, type_, payload, actor=actor)
         except Exception:
             req.decision_inflight = None
+            # 落盘失败 + TTL 已失效(如 _ttl_tick 已触发)→ 无再触发者,executor
+            # await request() 将永久挂起(P2 修复):内存侧 settle=denied 收口唤醒
+            # 等待者(事件未落 = 审计缺口,记日志),绝不悬挂。
+            self._settle(req, "denied", by="system")
+            self._maybe_resume_soft()
+            logger.warning("approval 结果落盘失败,settle=denied 收口 id=%s",
+                           req.approval_id)
             raise
 
     async def _emit_verdict(self, sess: Any, type_: str, payload: dict, *,
@@ -460,6 +483,9 @@ class ApprovalProvider:
             w.by = by
             w.decision_inflight = None
             self._cancel_timer(w)
+            if verdict == "granted" and w.call_id:
+                # 授权↔执行绑定:executor 重入 approval 决策时按 call_id 取此校验
+                self._grant_slots[w.call_id] = w.binding
             if not w.waiter.done():
                 w.waiter.set_result(verdict)     # 唤醒 request() 等待者
         if req.approval_id is not None and req.approval_id in self._pending:
@@ -511,6 +537,11 @@ class ApprovalProvider:
                                      actor="system")
         except Exception:
             req.decision_inflight = None
+            # 超时落盘也失败 + 定时器已消费 → 同样 settle=denied 收口防悬挂(P2)
+            self._settle(req, "denied", by="system")
+            self._maybe_resume_soft()
+            logger.warning("approval timeout 落盘失败,settle=denied 收口 id=%s",
+                           req.approval_id)
             raise
 
     # ================================================== 等待与取消(APR-502)
@@ -574,6 +605,14 @@ class ApprovalProvider:
         canon = canonical_json(args or {})
         return hashlib.sha1(f"{tool}\n{canon}".encode("utf-8")).hexdigest()
 
+    def grant_binding(self, call_id: str) -> Optional[str]:
+        """最近一次 granted(含信任命中)为该 call_id 记录的绑定指纹(None = 无)。
+
+        executor 重入 guard 得到 approval 决策时读取:与当前调用参数指纹不一致
+        即"批准针对异参数",拒绝执行(GRD-403)。
+        """
+        return self._grant_slots.get(call_id)
+
     @staticmethod
     def _sid_of(ctx: Any, sess: Any) -> str:
         """会话 id 解析:会话日志 sid 优先,回落 ctx 显式。"""
@@ -589,7 +628,8 @@ class ApprovalProvider:
 
     # ================================================== 等待者工厂
     def _new_waiter(self, fp: str, call: Any, args_summary: str, ch: str,
-                    ttl: int, *, sid: str, sess: Any) -> ApprovalRequest:
+                    ttl: int, *, sid: str, sess: Any,
+                    binding: Optional[str] = None) -> ApprovalRequest:
         """构造等待者(waiter Future 由运行中事件循环创建;批先含自身)。"""
         req = ApprovalRequest(
             tool=call.name,
@@ -599,6 +639,7 @@ class ApprovalProvider:
             ttl_ms=ttl,
             channel=ch,
             fingerprint=fp,
+            binding=binding or fp,               # 未绑定 → 回落规范化指纹
             session_id=sid,
             log=sess,
         )
@@ -698,13 +739,16 @@ class ApprovalProvider:
     # ================================================== 内部辅助
     @staticmethod
     def _require_human(by: Any) -> None:
-        """裁决者身份校验(假冒审批防线 S-2):by 缺失或 llm:/tool:/plugin: → APR-503。"""
+        """裁决者身份校验(假冒审批防线 S-2 白名单,P2):仅 cli/web/acp/desktop
+        通道名或其 ":" 前缀合法,任意其它自报身份(含 llm:/tool:/plugin:/hacker)→
+        APR-503。"""
         if not isinstance(by, str) or not by:
             raise_code("APR-503", why="裁决者身份缺失:by 由框架按通道打,不可省略")
-        if by.startswith(_FAKE_BY_PREFIXES):
+        ok = any(by == c or by.startswith(c + ":") for c in _HUMAN_CHANNELS)
+        if not ok:
             raise_code("APR-503", by=by,
-                       why="裁决者身份非法:仅 cli/web/acp 人类通道可裁决"
-                           "(LLM/工具/插件无权自报'我是人类批准的')")
+                       why="裁决者身份非法:仅 cli/web/acp/desktop 人类通道可裁决"
+                           "(LLM/工具/插件及任意自报身份无权冒充人类批准)")
 
     def _cfg_int(self, path: tuple[str, ...], default: int) -> int:
         """config 只读取数(path 逐层 getattr,缺省回落默认;禁热更键)。"""

@@ -314,6 +314,18 @@ async function loadSessions() {
   }
 }
 
+/* ---------- 会话右键菜单(右键会话 → 删除) ---------- */
+function showSessionMenu(ev, sid, name) {
+  state.contextSession = { sid, name };
+  const menu = $("#session-menu");
+  menu.classList.add("show");
+  menu.style.left = `${ev.clientX}px`;
+  menu.style.top = `${ev.clientY}px`;
+}
+function hideSessionMenu() {
+  $("#session-menu").classList.remove("show");
+}
+
 /* ---------- 会话选择 / 加载 ---------- */
 async function deleteSession(sid, name) {
   if (!window.confirm(`删除会话「${name}」？该操作会永久删除本地 JSONL 记录。`)) return;

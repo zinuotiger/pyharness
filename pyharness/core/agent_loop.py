@@ -26,8 +26,9 @@ run() 偏离说明);轮 = run 内一次 LLM 调用及其全部工具;RunContext.
    输入保留不静默丢,待下次 wake 按 FIFO 继续消费)。
 2. BudgetExhausted / MaxTurnsExceeded 为循环控制信号异常,spec 未给归属模块
    (scope/llm 未实现),本模块本地定义;scope.py 落地后按 INV-08(agent_loop →
-   scope 允许)改为 from pyharness.core.scope import ...。catch 仅为防御:主终止
-   路径是 _must_stop 三闸声明式判定。
+   scope 允许)改为 from pyharness.core.scope import ...。BudgetExhausted 单类
+   收敛已落地(见类定义处注释,P2 修复);catch 仅为防御:主终止路径是 _must_stop
+   三闸声明式判定。
 3. ctx 绑定:loop 与会话 1:1(一会话一 agent,ctx.loop),ctx 一经 run(ctx)/wake
    (env, ctx) 绑定即终身有效(cancel()/队列满留痕等无参路径经 self._ctx 引用);
    伪码 cancel(reason) 体内引用 ctx 却无参即因此成立。wake(env, ctx=None) 比伪码
@@ -67,19 +68,18 @@ _REASONS = ("complete", "max_turns", "budget", "cancelled", "stall",
 
 
 # ------------------------------------------------------------ 循环信号异常
-class BudgetExhausted(Exception):
-    """F032 预算硬闸信号:scope.check_budget() 超限抛出 → 终态 reason=budget。
-
-    scope/llm 模块落地前本地定义(偏离说明 2);不得被 PyHError 域捕获逻辑吞掉,
-    故不继承 PyHError,按伪码顺序在 except PyHError 之前捕获。
-    """
-
-
 class MaxTurnsExceeded(Exception):
     """轮数闸信号:防御性捕获 → 终态 reason=max_turns(主路径走 _must_stop 闸1)。
 
     正常情况下本模块不会抛出(轮数由闸前置判定);llm/工具层防绕行兜底用。
     """
+
+
+# BudgetExhausted 单类收敛(P2 修复):与 scope 同型,从 scope 反向 import——此前
+# scope.py 与 agent_loop 各定义一份且互不引用,scope.check_budget() 抛的类本循环
+# except 接不住,预算终态会被误判成 CYC-999(当前被 _must_stop 闸顺序遮蔽,潜伏)。
+# 本模块不再本地定义,统一引用 scope 的循环信号类。
+from pyharness.core.scope import BudgetExhausted  # noqa: E402,F401
 
 
 # ------------------------------------------------------------ 关键数据结构

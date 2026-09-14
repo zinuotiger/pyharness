@@ -411,7 +411,11 @@ class Scope:
         """读注入计数器任务级聚合;未注入/返回空 → 零读数(事件降级,见偏离 3)。"""
         c = self._counters
         if c is None:
-            log.debug("scope=%s 未注入计数器,预算按零读数(ok)", self.session_id)
+            # 未注入计数器 → 零读数(ok)。fail-open 是装配缺线与"预算失效"的静默
+            # 组合(历史上 ctx.budget 曾漏装配),故以 WARNING 可见告警而非 debug,
+            # 装配错一眼可查(不 fail-closed:子 scope 等合法无计数器场景)。
+            log.warning("scope=%s 未注入计数器,预算按零读数(ok)——若在真实装配"
+                        "出现,查装配层是否漏接 counters", self.session_id)
             return TaskUsage()
         used = c.task_total()
         return used if used is not None else TaskUsage()

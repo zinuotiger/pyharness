@@ -29,6 +29,7 @@ class AskProvider:
         self._bus = bus
         self._pending: dict[int, asyncio.Event] = {}
         self._answers: dict[int, dict] = {}
+        self._bg_tasks: set[asyncio.Task] = set()   # 持有后台答复任务引用(防 GC 丢)
 
     # ------------------------------------------------------------ 请求面
     async def request(self, question: str, options: Optional[list] = None,
@@ -82,7 +83,9 @@ class AskProvider:
             coro = self._write_answer_and_settle(
                 aid, waiter, choice_v, text_v, by)
             try:
-                asyncio.get_running_loop().create_task(coro)
+                task = asyncio.get_running_loop().create_task(coro)
+                self._bg_tasks.add(task)                 # 持引用:防 GC 中途回收
+                task.add_done_callback(self._bg_tasks.discard)
             except RuntimeError:
                 coro.close()
                 self._pending[aid] = waiter

@@ -10,14 +10,17 @@ seq 空洞检测(未声明标记/compacted 声明合法)、轮转序号合并、
 
 铁律:全部用 pytest tmp_path fixture,绝不写真实 ~/.pyharness。
 """
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from pyharness.errors import PyHError
 from pyharness.events import Envelope, SYNC_TYPES
-from pyharness.persistence import (RepairReport, SessionStore,
+from pyharness.persistence import (RepairReport, SessionStore, _FileLock,
                                    default_sessions_dir, detect_truncation,
                                    open_store)
 
@@ -90,6 +93,21 @@ def test_open_store_warns_tail_half_line_but_does_not_fix(tmp_path, caplog):
     assert path.read_bytes().endswith(b'{"seq":99')      # 原样未动
     assert detect_truncation(path) == len(_line(_env(1)).encode("utf-8"))
     store.close()
+
+
+def test_detect_truncation_half_line_over_tail_window(tmp_path):
+    """半行超过 4096B 尾窗时不误判为 0(数据事故回归):完整行 + 大半行。
+
+    旧实现窗口内无 \\n → 返回 0 → repair 把含完整行的文件整段截空;现应返回
+    最后完整行的切点(= 单行信封长度 + 1),半行内容完整保留待 repair 截断。
+    """
+    path = tmp_path / f"{SID}.jsonl"
+    good = _line(_env(1)).encode("utf-8")
+    big_half = b'{"seq": 2, "ts": "' + b"x" * 5000  # > _TAIL_WINDOW 的无 \\n 半行
+    path.write_bytes(good + big_half)
+    detected = detect_truncation(path)
+    assert detected == len(good)                           # 不返回 0
+    assert path.read_bytes()[detected:] == big_half        # 大半行仍在(未误伤)
 
 
 # =====================================================================
@@ -510,3 +528,64 @@ async def test_replay_tolerates_crlf_leftover(tmp_path):
     assert [e.seq for e in store.replay()] == [1, 2]
     assert store.quarantine_info()["count"] == 0
     store.close()
+
+
+# =====================================================================
+# 跨进程单写者锁(INV-07):进程内可重入 / 跨进程独占
+# =====================================================================
+def test_file_lock_os_level_mutual_exclusion(tmp_path):
+    """_FileLock:第二把锁取不到(OS 级互斥);释放后可再取。"""
+    lp = tmp_path / f"{SID}.jsonl.lock"
+    a = _FileLock(lp)
+    assert a.try_acquire()
+    b = _FileLock(lp)
+    assert not b.try_acquire()               # 已持有 → 拒绝
+    a.release()
+    c = _FileLock(lp)
+    assert c.try_acquire()                   # 释放后可再取
+    c.release()
+
+
+def test_session_lock_reentrant_same_process(tmp_path):
+    """同进程多开同一会话:引用计数复用同一锁,不误判跨进程冲突。"""
+    a, d = _store(tmp_path)
+    b, _ = _store(tmp_path)                  # 同路径第二次打开:重入,不抛
+    assert a.path == b.path
+    a.close()
+    b.close()
+
+
+def test_session_lock_released_on_close_allows_reopen(tmp_path):
+    """close 释放锁:同会话可再次 open。"""
+    a, d = _store(tmp_path)
+    a.close()
+    b, _ = _store(tmp_path)                  # 锁已释放 → 可开
+    b.close()
+
+
+def test_cross_process_lock_blocks_second_writer(tmp_path):
+    """跨进程:父进程持锁时,子进程开同一会话 → PERS-202(单写者 INV-07)。"""
+    store, d = _store(tmp_path)
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from pyharness.persistence import open_store\n"
+        "from pyharness.errors import PyHError\n"
+        "try:\n"
+        "    open_store(sys.argv[1], dir=Path(sys.argv[2]))\n"
+        "    print('OPENED')\n"
+        "except PyHError as e:\n"
+        "    print('BLOCKED', e.code)\n"
+    )
+    repo = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    r = subprocess.run([sys.executable, "-c", code, SID, str(d)],
+                       cwd=str(repo), capture_output=True,
+                       encoding="utf-8", errors="replace", env=env)
+    store.close()
+    assert "BLOCKED PERS-202" in r.stdout, (r.stdout, r.stderr)
+    # 父进程释放后,子进程可正常打开
+    r2 = subprocess.run([sys.executable, "-c", code, SID, str(d)],
+                        cwd=str(repo), capture_output=True,
+                        encoding="utf-8", errors="replace", env=env)
+    assert "OPENED" in r2.stdout, (r2.stdout, r2.stderr)

@@ -65,8 +65,9 @@ from typing import Any, Callable, Iterator, Optional
 
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import Envelope, check_seq_gap
-from pyharness.persistence import (default_sessions_dir, detect_truncation,
-                                   open_store)
+from pyharness.persistence import (acquire_session_lock, default_sessions_dir,
+                                   detect_truncation, open_store,
+                                   release_session_lock, session_lock_path)
 
 log = logging.getLogger("pyharness.repair")
 
@@ -106,7 +107,7 @@ class SessionHealth:
     bad_lines: list[int] = field(default_factory=list)
     holes: list[int] = field(default_factory=list)          # 未被声明覆盖的缺失 seq
     holes_declared: list[tuple[int, int]] = field(default_factory=list)
-    index_stale: bool = False                               # 派生视图末 seq < 日志末 seq
+    index_stale: bool = False                               # 视图末 seq ≠ 日志末(落后或幽灵行)
     healthy: bool = True
 
 
@@ -151,11 +152,35 @@ class RepairPolicy:
 
 # ================================================================= 基础工具
 def _parse_or_none(text: str) -> Optional[Envelope]:
-    """单行信封解析(容错):任何解析/校验失败 → None(坏行语义,PERS-201)。"""
+    """单行信封解析(容错):任何解析/校验失败 → None(坏行语义,PERS-201)。
+
+    含 payload 按 type 强校验(P1-4,读侧与写侧同口径)——缺字段/错类型的行
+    视为坏行隔离,不再漏进 reducer(此前只验信封、payload 坏数据延迟崩溃)。
+    """
     try:
-        return Envelope.model_validate_json(text)
+        from pyharness.events.vocab import validate_payload
+        env = Envelope.model_validate_json(text)
+        canonical = validate_payload(env.type, env.payload)
+        if canonical is not env.payload:
+            env = env.model_copy(update={"payload": canonical})
+        return env
     except Exception:                    # noqa: BLE001 — 坏行记跳不中断
         return None
+
+
+def _indexable(env: Any) -> bool:
+    """信封是否在 FTS 索引**新增行**(repair 水位对账用;口径单源于 session_query)。
+
+    懒导入避免 repair 顶层耦合 sqlite 模块;未装配/异常 → 保守按"可索引"计
+    (退化旧口径,不改变安全方向)。CND-06/08:使日志水位与索引 max_seq 同口径
+    ——非内容事件(session.created/finished、llm.request、guard.* 等)不产索引行,
+    不应计入水位,否则尾部非内容即误判 stale / 误抛 PERS-201。
+    """
+    try:
+        from pyharness.core.session_query import is_indexable
+        return bool(is_indexable(getattr(env, "type", ""), env))
+    except Exception:                               # noqa: BLE001 未装配:保守
+        return True
 
 
 def _declared_ranges(env: Envelope) -> list[tuple[int, int]]:
@@ -205,10 +230,14 @@ def _iter_text(path: Path) -> Iterator[tuple[int, Optional[str]]]:
 
 
 def _iter_bytes(path: Path) -> Iterator[tuple[int, bytes]]:
-    """逐物理行原始字节(行号 1 起,行尾已剥;quarantine 原子重写用,保字节往返)。"""
+    """逐物理行原始字节(行号 1 起,行尾**原样保留**;quarantine 原子重写用)。
+
+    行尾不剥:遗留 `\\r\\n` 须随好行原样回写,否则重写把 CRLF 归一为 LF(丢 \\r,
+    P3)。隔离条目展示时单独 rstrip。
+    """
     with open(path, "rb") as fh:
         for no, raw in enumerate(fh, 1):
-            yield no, raw.rstrip(b"\r\n")
+            yield no, raw
 
 
 def _sessions_dir(ctx: Any) -> Path:
@@ -267,8 +296,9 @@ async def scan_session(path: Path, *,
     - 尾部 4KB 判半行(detect_truncation 偏移,复用 persistence 原语);
     - 严格行迭代:解码失败/JSON 信封解析失败记 bad_lines(不中断,PERS-201 语义);
     - 收集 seq 序列与声明区间(compacted/recovered),check_seq_gap 求未声明空洞;
-    - 索引落后:注入 fts_last_seq(sid) 提供者时,日志末 seq > 视图末 seq = stale;
-      无提供者不算落后(偏离 4,避免未装配 FTS 时全会话误报)。
+    - 索引对账:注入 fts_last_seq(sid) 提供者时,视图末 seq ≠ 日志末 seq = stale
+      (落后=索引漏事件;超前=幽灵行,见 index_stale 注释);无提供者不算 stale
+      (偏离 4,避免未装配 FTS 时全会话误报)。
     损坏全部落报告字段,不抛(打开失败 OSError 上抛,由 auto_scan/repair_session
     各自按 PERS-202 语义处置)。
     """
@@ -292,7 +322,8 @@ async def scan_session(path: Path, *,
         if env.type == "session.recovered":   # 声明不产生 FTS 内容:不计入对账末 seq
             declared.extend(_declared_ranges(env))  # 但其 lost 声明仍合法化空洞
             continue
-        last = max(last, env.seq)
+        if _indexable(env):                   # 水位与索引 max_seq 同口径(CND-06/08)
+            last = max(last, env.seq)
         if env.type in _DECLARE_TYPES:
             declared.extend(_declared_ranges(env))
     holes = check_seq_gap(seqs, declared) if seqs else []
@@ -300,9 +331,13 @@ async def scan_session(path: Path, *,
     if fts_last_seq is not None:
         try:
             view_last = fts_last_seq(sid)
-            index_stale = last > 0 and view_last is not None and last > view_last
+            # 对账口径 = 视图末 seq 与日志末 seq **必须一致**(!=,非仅落后 <):
+            # 落后(视图<日志)= 索引漏事件;超前(视图>日志)= 幽灵行——dispatch 先于
+            # flush,session.append 落盘失败时事件已入总线被 FTS 订阅者索引,日志却
+            # 没有该 seq。两者都判 stale → 触发 rebuild 整体对账(幽灵行随之清除)。
+            index_stale = view_last is not None and view_last != last
         except Exception as e:             # noqa: BLE001 — 对账提供者故障不误报
-            log.warning("repair: fts_last_seq(%s) 提供者异常,索引落后不判定: %s",
+            log.warning("repair: fts_last_seq(%s) 提供者异常,索引对账不判定: %s",
                         sid, e)
     return SessionHealth(
         sid=sid, path=path,
@@ -360,6 +395,24 @@ async def repair_session(ctx: Any, sid: str, *, interactive: bool = False,
         raise_code("PERS-202", sid=sid,
                    advice="会话正被 ctx.session 持有,禁双开修复(DEP §6);"
                           "先退出该会话进程再 repair")
+    lock_path = session_lock_path(path)    # 跨进程独占锁:活会话占用 → PERS-202
+    acquire_session_lock(lock_path)
+    try:
+        return await _repair_locked(ctx, sid, path,
+                                    interactive=interactive, policy=policy)
+    finally:
+        release_session_lock(lock_path)
+
+
+async def _repair_locked(ctx: Any, sid: str, path: Path, *,
+                         interactive: bool,
+                         policy: Optional[RepairPolicy]) -> RepairReport:
+    """repair_session 的持锁突变段(扫描 → 备份 → 截断/隔离 → 重建 → 声明)。
+
+    调用方(repair_session)已持会话独占锁并经 ctx.session 双开守卫,故本段对目标
+    文件的全部读-改-写处于单写者保护下(跨进程活写者已被锁挡在 repair 之外,不再
+    出现"repair 关句柄整写时他进程活句柄写的字节静默消失")。
+    """
     health = await scan_session(path, fts_last_seq=_fts_last_seq_provider(ctx))
     if health.healthy:                     # 二次 repair:无动作(幂等)
         return RepairReport(sid=sid)
@@ -480,9 +533,9 @@ async def quarantine_lines(path: Path, bad: list[int],
         with open(tmp, "wb") as out_fh:
             for no, rawb in _iter_bytes(path):
                 if no not in badset:
-                    out_fh.write(rawb + b"\n")     # 好行全保留(字节往返)
+                    out_fh.write(rawb)             # 好行原样保留(含原行尾,字节往返)
                     continue
-                text = rawb.decode("utf-8", "replace")[:_QUARANTINE_RAW_CAP]
+                text = rawb.rstrip(b"\r\n").decode("utf-8", "replace")[:_QUARANTINE_RAW_CAP]
                 entry = QuarantineEntry(line_no=no, raw=text,
                                         reason="parse-fail", archived=True)
                 if _append_quarantine(qpath, {"line_no": no, "raw": text,
@@ -490,7 +543,7 @@ async def quarantine_lines(path: Path, bad: list[int],
                                               "archived": True}):
                     kept.append(entry)
                 else:                        # 隔离档写失败:行保留原地(不丢数据)
-                    out_fh.write(rawb + b"\n")
+                    out_fh.write(rawb)       # 原样(含原行尾)
                     kept.append(QuarantineEntry(line_no=no, raw=text,
                                                 reason="parse-fail",
                                                 archived=False))
@@ -583,15 +636,15 @@ async def rebuild_derived_views(ctx: Any, sid: str) -> bool:
         except Exception:                    # noqa: BLE001 — 提供者故障降级
             log.warning("repair: 视图 max_seq(%s) 查询失败,对账跳过", sid)
         if view_last is not None:
-            # 对账口径:内容日志末 seq(排除 session.recovered 声明——声明不被
-            # FTS 索引,若计入则每次 repair 声明后视图恒落后 → 永不收敛)
+            # 对账口径:与索引 max_seq 同口径 = **可索引事件**(内容型 insert)末 seq——
+            # 排除 session.recovered 声明(不索引)与一切非内容事件(created/finished/
+            # llm.request/guard.* 等,不产索引行);否则尾部非内容即误抛 PERS-201。
             log_last = 0
             for _no, text in _iter_text(_sessions_dir(ctx) / f"{sid}.jsonl"):
                 if text is None:
                     continue
                 env = _parse_or_none(text)
-                if env is not None and env.type != "session.recovered" \
-                        and env.seq > log_last:
+                if env is not None and _indexable(env) and env.seq > log_last:
                     log_last = env.seq
             if log_last != view_last:
                 raise_code("PERS-201", op="view-reconcile", sid=sid,

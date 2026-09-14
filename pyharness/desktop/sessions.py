@@ -289,8 +289,11 @@ class DesktopSessionManager:
                             c = (e.get("payload") or {}).get("content") or ""
                             summary["preview"] = c.strip()[:10]
                             break
-            except Exception:               # noqa: BLE001 文件坏/竞态 → 摘要留最小
-                log.warning("desktop list 读 %s 失败(摘要降级)", path.name, exc_info=True)
+            except Exception as e:          # noqa: BLE001 文件坏/竞态 → 摘要留最小
+                # 一行告警(不打整段 traceback):UI 每次轮询会话列表都读此路径,
+                # 单个不可读文件若打 traceback 会持续刷屏;只报类型名即可定位。
+                log.warning("desktop list 读 %s 失败(摘要降级):%s",
+                            path.name, type(e).__name__)
             out.append(summary)
         out.sort(key=lambda s: s.get("updated", 0), reverse=True)  # 时间倒序
         return out

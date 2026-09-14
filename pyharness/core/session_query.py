@@ -208,6 +208,47 @@ _WHITELIST: dict[str, Any] = {
 _INDEX_TYPES: tuple[str, ...] = tuple(_WHITELIST) + ("user.message_edited",)
 
 
+def _index_item(type_: str, env: Any) -> Optional[tuple]:
+    """事件 → 索引项(模块级单源;``SessionQueryIndex._extract`` 与 ``is_indexable`` 共用)。
+
+    返回 None = 不索引;("insert", row) = 新增内容行;("edit", (sid, tseq, newc))
+    = 级联修正(F063,不改行键、不新增行)。
+    """
+    if type_ == "user.message_edited":             # F063:级联更新 target 行
+        sid = _field(env, "session_id")
+        tseq = _payload_field(env, "target_seq")
+        newc = _payload_field(env, "new_content")
+        if not sid or not tseq or not newc:
+            return None
+        return ("edit", (sid, int(tseq), str(newc)))
+    fn = _WHITELIST.get(type_)
+    if fn is None:
+        return None                                # 白名单外(含 guard.*/瞬时)
+    text = fn(env)
+    text = str(text if text is not None else "").strip()
+    if not text:
+        return None                                # 空文本不索引(llm.response 空轮)
+    sid = _field(env, "session_id")
+    seq = _field(env, "seq")
+    ts = _field(env, "ts", "")
+    actor = _field(env, "actor", "")
+    if not sid or not seq:
+        return None                                # 缺行键:拒(不产生孤儿行)
+    row = (str(sid), int(seq), str(type_), str(ts), str(actor),
+           _index_text(str(_payload_field(env, "new_title", "") or "")),
+           _index_text(text))
+    return ("insert", row)
+
+
+def is_indexable(type_: str, env: Any) -> bool:
+    """该事件是否在 FTS 索引**新增行**(insert):edit 不新增行、None 不索引 → False。
+
+    repair 对账用——使"日志水位"与索引 ``max_seq`` **同口径**(CND-06/08:读写判据单源)。
+    """
+    item = _index_item(type_, env)
+    return item is not None and item[0] == "insert"
+
+
 # ================================================================= 结果模型
 @dataclass(frozen=True)
 class Hit:
@@ -636,37 +677,9 @@ class SessionQueryIndex:
     def _extract(self, type_: str, env: Any) -> Optional[tuple]:
         """事件 → 攒批项(共享抽取核心;on_event/rebuild 同一口径,INV-03)。
 
-        返回 None = 不索引;("insert", row) / ("edit", (sid, target_seq, new_content))。
-        row = (session_id, seq, type, ts, actor, title, content)(7 列,偏离 1)。
+        委托模块级 ``_index_item``(单源,避免第二份口径漂移)。
         """
-        if type_ == "user.message_edited":             # F063:级联更新 target 行
-            sid = _field(env, "session_id")
-            tseq = _payload_field(env, "target_seq")
-            newc = _payload_field(env, "new_content")
-            if not sid or not tseq or not newc:
-                return None
-            return ("edit", (sid, int(tseq), str(newc)))
-        fn = _WHITELIST.get(type_)
-        if fn is None:
-            return None                                # 白名单外(含 guard.*/瞬时)
-        text = fn(env)
-        if text is None:
-            text = ""
-        text = str(text).strip()
-        if not text:
-            return None                                # 空文本不索引(llm.response 空轮)
-        sid = _field(env, "session_id")
-        seq = _field(env, "seq")
-        ts = _field(env, "ts", "")
-        actor = _field(env, "actor", "")
-        if not sid or not seq:
-            return None                                # 缺行键:拒(不产生孤儿行)
-        # 写索引前中文逐字空格化(每字一词,unicode61 局限的索引侧补偿)——title 与
-        # content 同变换,保证查询侧 2-gram 短语/整串短语能与索引 token 对齐。
-        row = (str(sid), int(seq), str(type_), str(ts), str(actor),
-               _index_text(str(_payload_field(env, "new_title", "") or "")),
-               _index_text(text))
-        return ("insert", row)
+        return _index_item(type_, env)
 
     # ------------------------------------------------------------ 批量落库
     async def flush(self) -> int:

@@ -105,6 +105,13 @@ class EngineSpine:
 
     async def close(self) -> None:
         """关闭会话拥有的外部资源(MCP 子进程/调度泵/子任务/派生索引)。"""
+        # 在途 job 先取消(P2):close 此前不触 jobs._on_session_closing,store 关闭后
+        # job 仍可能向父会话写终态(脏续写);与 subagent 的 child-first 清理对齐。
+        if self.jobs is not None:
+            try:
+                await self.jobs._on_session_closing("session.closing", None)
+            except Exception:                        # noqa: BLE001 收尾尽力
+                log.warning("jobs session-closing cleanup failed", exc_info=True)
         if self.fts is not None:
             try:
                 await self.fts.detach(None)
@@ -546,14 +553,23 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     net = getattr(getattr(cfg, "security", None), "network", None)
     backend_name = str(getattr(net, "search_backend", "disabled"))
     endpoint = str(getattr(net, "search_endpoint", ""))
+    search_ep = ""
     if backend_name == "bing":
-        search_backend = BingRssBackend(endpoint or
-                                        "https://cn.bing.com/search")
+        search_ep = endpoint or "https://cn.bing.com/search"
+        search_backend = BingRssBackend(search_ep)
     elif backend_name == "duckduckgo":
-        search_backend = DuckDuckGoBackend(
-            endpoint or "https://html.duckduckgo.com/html/")
+        search_ep = endpoint or "https://html.duckduckgo.com/html/"
+        search_backend = DuckDuckGoBackend(search_ep)
     else:
         search_backend = None
+    # g5 外发闸:web.search 无 url 参数,以其后端 host 作目标域(P3:web.search 恒拒)
+    # ——操作者在 allowed_domains 列入后端 host 后 web.search 方可通行;未配后端=空。
+    if search_backend is not None:
+        from urllib.parse import urlsplit
+        try:
+            policy.search_host = (urlsplit(search_ep).hostname or "").lower()
+        except Exception:                            # noqa: BLE001 解析失败=空(恒拒)
+            policy.search_host = ""
 
     # SessionLog 接总线落盘订阅(事件一入内存即入真源队列)
     if attach_persistence:
@@ -624,11 +640,39 @@ def _record_to(store: Any):
 
 
 # ---------------------------------------------------------------- runner seam
+def _owned_task_message(log_: Any, task: Any) -> Optional[Any]:
+    """严格归属窗口:取 (上一个 task.enqueued, 本任务 enqueued] 内最后一条 user.message。
+
+    修复(P1-1):旧实现取"enqueued 之前最后一条 user.message",会把 plan 步骤的
+    /plan 旧消息顶给步骤执行(plan_mode 提交纯意图,不落 user.message),并发下还
+    会让 schedule 任务拿到前台消息。窗口为空(纯意图任务)→ None,由调用方按
+    task.intent 补写信号消息。只读遍历事件源,零副作用。
+    """
+    mark = int(getattr(task, "enqueued_seq", 0) or 0)
+    if mark <= 0:
+        return None
+    prev_enq = 0
+    env = None
+    for e in log_.events_after(0):
+        seq = int(getattr(e, "seq", 0) or 0)
+        if seq > mark:
+            break
+        if e.type == "task.enqueued":
+            if seq < mark:
+                prev_enq = seq
+                env = None                      # 新窗口:清空旧归属(前窗口消息不复用)
+            continue                             # 本任务自身 enqueued:非消息
+        if e.type == "user.message" and seq > prev_enq:
+            env = e
+    return env
+
+
 def make_runner(spine: EngineSpine) -> EngineRunner:
     """task_queue runner seam:async run_for_task(task) → loop.wake(env)。
 
-    task 的 text 已由 create_message 落盘为 user.message(seq 已知);
-    从事件源找该 envelope(按 seq),交 loop.wake 驱动真实处理。
+    task 的配套 user.message 已由 schedule.trigger/前台 submit 落盘(seq 已知);
+    经严格归属窗口从事件源找该 envelope,窗口为空则按 task.intent 补写,交
+    loop.wake 驱动真实处理。
     """
     log_ = spine.session
     loop = spine.loop
@@ -643,17 +687,17 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                 log.debug("plugin lazy preload failed: %s", type(e).__name__)
             spine._plugins_ready = True
         mark = int(getattr(task, "enqueued_seq", 0) or 0)
-        env = None
-        if mark > 0:                           # task.enqueued 之前的最后一条 user.message
-            for e in log_.events_after(0):
-                if (int(getattr(e, "seq", 0)) <= mark
-                        and getattr(e, "type", "") == "user.message"):
-                    env = e
-        if env is None:                        # 兜底:最近一条 user.message
-            for e in reversed(list(log_.events_after(0))):
-                if getattr(e, "type", "") == "user.message":
-                    env = e
-                    break
+        intent = str(getattr(task, "intent", "") or "").strip()
+        env = _owned_task_message(log_, task)   # 严格归属窗口(P1-1)
+        if env is None and intent:
+            # 窗口内无配套 user.message(plan 步等纯意图任务):意图本身即待执行
+            # 指令,按 schedule 前例落 user.message(system 署名)驱动循环——
+            # 提交者不落 message 则 agent 无从 derive 到该任务(schedule._fire 同款)。
+            env = await log_.append("user.message", {"content": intent},
+                                    actor="system",
+                                    origin=f"task:{getattr(task, 'id', '')}",
+                                    task_id=getattr(task, "id", None),
+                                    sync=True)
         if env is None:
             raise PyHError("CYC-999", ctx={"hint": "runner 找不到对应 user.message 事件"})
         ag_ctx = await _agent_ctx_of(spine, env)

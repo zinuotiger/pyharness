@@ -415,6 +415,20 @@ async def accumulate_stream(stream: AsyncIterator[Any], ctx: Any) -> tuple:
     return "".join(parts), calls, finish, usage
 
 
+def _est_tokens(text: str) -> int:
+    """输出 token 粗估(流式计量盲区兜底;与 session._estimate_tokens 同启发式)。
+
+    CJK 逐字 1 token;ASCII 词按 4 字符 ≈ 1;+4 结构开销。仅用于 usage 缺失时
+    让 F029 账目与预算闸至少计入 output 量级,不构成权威计数。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+    words = sum(max(1, (len(w) + 3) // 4)
+                for w in re.findall(r"[A-Za-z0-9_./\\@:+-]+", text))
+    return cjk + words + 4
+
+
 # ================================================================ 错误归一
 def _http_status_code(status: int) -> str:
     """HTTP 状态 → 码(401/403→302;429/≥500→303;其余 4xx→304;只按状态不按文本)。"""
@@ -462,10 +476,12 @@ def normalize_exc(e: Exception) -> str:
 
 
 # ================================================================ 成本与计量
-def estimate_cost(model: str, usage: Any, prices: dict, hit_discount: float = 1.0) -> float:
+def estimate_cost(model: str, usage: Any, prices: dict, hit_discount: float = 0.1) -> float:
     """成本估算(ADI §8.2,元/百万):未命中输入 + 命中输入×折扣 + 输出;只进事件/报表(N14)。
 
     usage 无缓存字段厂商按全价估算(保守);prices 缺模型直取 KeyError 属调用方先查表(偏离 4)。
+    hit_discount 默认 0.1(缓存命中官方约 1/10 价)——原默认 1.0 使命中按全价计,成本恒高估
+    (P3:estimate_cost 折扣)。调用方未传折扣时取真实折扣,而非全价。
     """
     p = prices[model]                              # {in_per_million, out_per_million}
     hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
@@ -593,6 +609,15 @@ class OpenAICompatAdapter(LLMAdapter):
         self._counters_injected: bool = counters is not None
         self._deg: Optional[str] = None            # 降级来源(fallback 切链后置位 F013)
 
+    def mark_degraded_from(self, source: Optional[str]) -> None:
+        """置位降级来源(Producer:降级链在降级时调用;F013)。
+
+        是 ``_deg`` 的唯一写入口:下一次 ``chat()`` 的 llm.request 据此携带
+        ``degraded_from``(EVENT-SCHEMA §3.x / ADI §3.3 / specs/llm.py.md)。
+        CND-08:此前 ``_deg`` 无赋值点 → ``degraded_from`` 恒缺失(dead trigger)。
+        """
+        self._deg = source
+
     # ------------------------------------------------------ 传输解析
     def _ensure_transport(self) -> Any:
         """惰性取传输:注入优先;否则 build_client(解析 key 需真实凭据,仅真调用路径)。"""
@@ -640,6 +665,8 @@ class OpenAICompatAdapter(LLMAdapter):
                 transport.complete(req), timeout=self.timeout.total_s)
         except Exception as e:                      # noqa: BLE001 传输细分统一归一(ADI §7.2)
             code = normalize_exc(e)                 # 非 API 异常:原样上抛(不上 LLM 码)
+            if code == "LLM-303":
+                self._note_rate_limit(ctx)          # 归一 303 计入连续限流(降级判定用)
             raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES)
         msg, finish = self._first_message(raw)
         content = (msg.content or "") if msg.content is not None else ""
@@ -676,6 +703,8 @@ class OpenAICompatAdapter(LLMAdapter):
                 accumulate_stream(stream, ctx), timeout=self.timeout.total_s)
         except Exception as e:                      # noqa: BLE001 断流/总闸统一归一
             code = normalize_exc(e)
+            if code == "LLM-303":
+                self._note_rate_limit(ctx)          # 归一 303 计入连续限流(降级判定用)
             raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES)
         _restore_call_names(calls, name_map)        # sanitized → fs.read_file 还原
         if not text and not calls:
@@ -683,6 +712,14 @@ class OpenAICompatAdapter(LLMAdapter):
                        hint="流式聚合为空(断流/零内容),不回空文本冒充成功")
         if usage is not None:                       # 流式计量在 include_usage 末块(F029)
             await self.report_usage(usage, self.model, ctx=ctx)
+        elif text or calls:
+            # P1-3 盲区修复:端点忽略 include_usage 或断流缺末块 → 整轮流式零入账,
+            # 预算闸(F032)对流式全程无感知。按已拼内容兜底估算 out_tokens(仅 output;
+            # input 不猜 0,账目保守),杜绝"流式长对话超支无感"。
+            fallback_usage = SimpleNamespace(
+                prompt_tokens=0, completion_tokens=_est_tokens(text),
+                prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0)
+            await self.report_usage(fallback_usage, self.model, ctx=ctx)
         env = await ctx.session.append(             # 聚合完成落单条 llm.response(F027)
             "llm.response", _response_payload(self.model, finish or "unknown",
                                               text, calls), actor="llm")
@@ -701,6 +738,21 @@ class OpenAICompatAdapter(LLMAdapter):
         if not self._counters_injected:
             cnt = getattr(ctx, "counters", None) or self._counters
         return await report_usage(usage, model, ctx=ctx, counters=cnt)
+
+    def _note_rate_limit(self, ctx: Any) -> None:
+        """LLM-303 归一时计入"连续限流"计数(供 llm_fallback._may_degrade 阈值判定)。
+
+        计数归属与 report_usage 同源(显式注入优先,否则 ctx.counters);计数器缺
+        rate_limit_add(测试替身)→ 守卫式跳过。修复:此前 rate_limit_add 全库无调用
+        → _rate_limit_streak 恒 0 → "连续限流达阈值降级"分支永不触发。
+        已知限制:无"成功重置"点,计数为会话内累计而非严格"连续"。
+        """
+        cnt = self._counters
+        if not self._counters_injected:
+            cnt = getattr(ctx, "counters", None) or self._counters
+        add = getattr(cnt, "rate_limit_add", None)
+        if callable(add):
+            add()
 
     # ------------------------------------------------------ F033 探针
     async def ping(self) -> float:

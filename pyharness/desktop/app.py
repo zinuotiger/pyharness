@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import html as html_mod
 import inspect
 import json
 import logging
 import os
 import pathlib
+import re
 import secrets
 import threading
 import time
@@ -24,11 +24,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pyharness.application import ApplicationService, ApplicationServiceRegistry
 from pyharness.core.approval import ApprovalProvider
-from pyharness.core.tenant_settings import normalize_tenant_id
+from pyharness.core.tenant_settings import (normalize_tenant_id,
+                                            tenant_for_session)
 from pyharness.core.task_queue import TaskQueue
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import EVENT_TYPES, Envelope
 from pyharness.events.vocab import TRANSIENT_TYPES, validate_payload
+
+# 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)
+_SESSION_ID_IN_PATH = re.compile(
+    r"/(?:sessions|budget|approvals|asks)/(s-[0-9a-zA-Z]+)")
 
 from .constants import (
     BRIDGE_TIMEOUT_S,
@@ -116,9 +121,18 @@ class DesktopApp:
         return self._tenant_var.get()
 
     async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
-        tenant = normalize_tenant_id(
+        client_tenant = normalize_tenant_id(
             request.headers.get("x-pyharness-tenant")
             or request.query_params.get("tenant") or "default")
+        # 服务端派生(A3):路径含会话 id 时,以"该会话注册的租户"为准,不信客户端
+        # 自报头——阻断用伪造 X-PyHarness-Tenant 访问他租户会话。会话未注册(本进程
+        # 未见过的磁盘会话)→ 回落客户端头(信息不足,无法派生)。
+        tenant = client_tenant
+        m = _SESSION_ID_IN_PATH.search(request.url.path)
+        if m:
+            derived = tenant_for_session(m.group(1))
+            if derived:
+                tenant = derived
         token = self._tenant_var.set(tenant)
         try:
             return await call_next(request)
@@ -198,28 +212,26 @@ class DesktopApp:
     def _require_api_auth(self, request: Request,
                           x_pyharness_token: Optional[str] = Header(default=None),
                           authorization: Optional[str] = Header(default=None)) -> None:
-        """写端点依赖:令牌缺失/不匹配 → CRED-701(401);前端从 index meta 注入。"""
+        """读/写端点统一鉴权依赖(P1-2 收紧):令牌缺失/不匹配 → CRED-701(401)。
+
+        令牌来源:① X-PyHarness-Token / Authorization: Bearer 头(pywebview 桥/
+        测试/外部客户端);② pyharness_token HttpOnly cookie(_index_page 下发,
+        JS 不可读、同源请求自动携带)。仅索引页 / 与 webhook 入站端点免鉴权
+        (引导/外联);全部数据端点(含读端与 SSE)强制鉴权——此前 39 个读端点
+        匿名、SSE 无鉴权,任何本地进程可枚举全部会话。
+        """
         expected = self._api_token
         if not expected:
             return
         given = x_pyharness_token or ""
         if not given and authorization and authorization.lower().startswith("bearer "):
             given = authorization[7:].strip()
+        if not given:
+            given = (request.cookies or {}).get("pyharness_token", "") or ""
         if not given or not secrets.compare_digest(given, expected):
             raise_code("CRED-701", reason="api-token",
-                       hint="缺少或非法 API token(X-PyHarness-Token / Bearer)")
-
-    def _plugin_roots(self) -> list[Path]:
-        """插件装载白名单根:仓库示例目录 + 配置 plugins.dir,HTTP 只能装载其下目录。"""
-        roots = [Path(__file__).resolve().parents[1] / "examples" / "plugins"]
-        cfg = _cfg_of(self.ctx)
-        try:
-            extra = getattr(getattr(cfg, "plugins", None), "dir", None)
-            if extra:
-                roots.append(Path(str(extra)).expanduser())
-        except Exception:                                # noqa: BLE001 鸭子配置
-            log.debug("plugin root config unavailable", exc_info=True)
-        return [p.resolve() for p in roots]
+                       hint="缺少或非法 API token"
+                            "(X-PyHarness-Token / Bearer / pyharness_token cookie)")
 
     # ------------------------------------------------ 总线订阅(偏离 4)
     def _subscribe_all(self, bus: Any) -> list:
@@ -233,31 +245,6 @@ class DesktopApp:
     def _surface_mgr(self) -> Any:
         return self.service.surface_mgr()
 
-    async def _require_session(self, sid: str) -> Any:
-        return await self.service.require_session(sid)
-
-    async def _queue_for(self, sid: str, log_: Any) -> TaskQueue:
-        return await self.service.queue_for(sid, log_)
-
-    async def _engine_runner_for(self, sid: str, log_: Any) -> Any:
-        return await self.service._engine_runner_for(sid, log_)
-
-    def _runner_seam(self) -> Any:
-        return self.service.runner_seam()
-
-    @staticmethod
-    def _owner_for(sid: str) -> str:
-        return ApplicationService.owner_for(sid)
-
-    async def _public_spine_for(self, sid: str) -> tuple[Any, Any]:
-        return await self.service.public_spine_for(sid)
-
-    def _approval_for(self, sid: str, log_: Any) -> ApprovalProvider:
-        return self.service.approval_for(sid, log_)
-
-    def _all_approval_providers(self) -> list:
-        return self.service.all_approval_providers()
-
     # ------------------------------------------------ API 装配
     def mount_api(self) -> None:
         """注册全部端点(只读投影 + 引擎门面写 + SSE)+ PyHError 统一错误体(ADR-011)。"""
@@ -265,24 +252,31 @@ class DesktopApp:
         a.add_api_route("/", self._index_page, methods=["GET"])
         a.add_api_route("/api/sessions", self.create_session, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
-        a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"])
+        a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}", self.delete_session,
                         methods=["DELETE"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/messages", self.session_messages,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/messages", self.create_message,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/timeline", self.session_timeline,
-                        methods=["GET"])                            # 轨迹(核心)
+                        methods=["GET"],                            # 轨迹(核心)
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/event/{seq}", self.event_detail,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/telemetry", self.telemetry_report,
-                        methods=["GET"])            # F066 审计导出(桌面面)
-        a.add_api_route("/api/stream", self.stream_sse, methods=["GET"])  # SSE
+                        methods=["GET"],            # F066 审计导出(桌面面)
+                        dependencies=[Depends(self._require_api_auth)])
+        a.add_api_route("/api/stream", self.stream_sse, methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])  # SSE
         a.add_api_route("/api/approvals/pending", self.pending_approvals,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/approvals/{sid}/{aid}", self.decide_approval_for,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
@@ -290,7 +284,8 @@ class DesktopApp:
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])  # 审批弹窗裁决
         a.add_api_route("/api/asks/pending", self.pending_asks,
-                        methods=["GET"])                              # #38 反问轮询
+                        methods=["GET"],                              # #38 反问轮询
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/asks/{sid}/{ask_id}", self.answer_ask_for,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
@@ -298,7 +293,8 @@ class DesktopApp:
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])  # #38 反问答复
         a.add_api_route("/api/plugins", self.list_plugins,
-                        methods=["GET"])                              # 插件列表
+                        methods=["GET"],                              # 插件列表
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/plugins/load", self.plugin_load,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])  # 插件装载
@@ -312,10 +308,13 @@ class DesktopApp:
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])  # 权限档位切换
         a.add_api_route("/api/capabilities", self.capabilities,
-                        methods=["GET"])                              # 双壳能力契约
-        a.add_api_route("/api/tenant", self.tenant_state, methods=["GET"])
+                        methods=["GET"],                              # 双壳能力契约
+                        dependencies=[Depends(self._require_api_auth)])
+        a.add_api_route("/api/tenant", self.tenant_state, methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/settings/models", self.list_model_profiles,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/settings/models", self.save_model_profile,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
@@ -326,9 +325,11 @@ class DesktopApp:
                         self.delete_model_profile, methods=["DELETE"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/skills", self.list_skills,
-                        methods=["GET"])                              # 技能目录
+                        methods=["GET"],                              # 技能目录
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/skills/registry/search", self.search_skills,
-                        methods=["GET"])                              # Registry 搜索
+                        methods=["GET"],                              # Registry 搜索
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/skills/reload", self.reload_skills,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])  # 技能库重扫
@@ -342,10 +343,13 @@ class DesktopApp:
                         self.remove_skill, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/skills/{name}/versions", self.skill_versions,
-                        methods=["GET"])                              # 已装版本
+                        methods=["GET"],                              # 已装版本
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/skills/{name}", self.skill_detail,
-                        methods=["GET"])                              # 技能正文
-        a.add_api_route("/api/budget/{sid}", self.budget_dashboard, methods=["GET"])
+                        methods=["GET"],                              # 技能正文
+                        dependencies=[Depends(self._require_api_auth)])
+        a.add_api_route("/api/budget/{sid}", self.budget_dashboard, methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/attachments", self.upload_attachment, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/workflow", self.run_workflow,
@@ -353,22 +357,26 @@ class DesktopApp:
                         dependencies=[Depends(self._require_api_auth)])
         # ------------------------------------------------------------ 编排管理面
         a.add_api_route("/api/sessions/{sid}/jobs", self.list_jobs,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/jobs", self.start_job,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/jobs/{job_id}", self.job_status,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/jobs/{job_id}/cancel",
                         self.cancel_job, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/schedules", self.list_schedules,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/schedules/action",
                         self.schedule_action, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/subagents", self.list_subagents,
-                        methods=["GET"])
+                        methods=["GET"],
+                        dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/subagents", self.spawn_subagent,
                         methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
@@ -430,7 +438,9 @@ class DesktopApp:
 
         前端文件打包为 data 资源:源码运行读 pyharness/ui/index.html;PyInstaller
         打包时 --add-data 携带同相对路径(_MEIPASS 下亦命中);缺失 → 兜底提示页。
-        API token 以 meta 注入前端(写端点依赖校验,读端点不强制)。
+        API token 不再明文注入页面 meta(P1-2 收紧,防 DOM/日志泄漏):改 HttpOnly
+        cookie 下发,JS 不可读、同源 fetch/SSE 自动携带;cookie 化/SSO 迁移留待
+        下一批(前端仍兼容读取 meta 的旧逻辑,缺口即无 token 时回落 cookie)。
         """
         try:
             import importlib.resources as _ir
@@ -447,12 +457,11 @@ class DesktopApp:
                         "justify-content:center;height:100vh'>"
                         "<div><h2>PyHarness Desktop</h2>"
                         "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
-        token = self._api_token or ""
-        if token:
-            safe_token = html_mod.escape(token, quote=True)
-            meta = (f'<meta name="pyharness-token" content="{safe_token}">')
-            html = html.replace("</head>", meta + "</head>", 1)
-        return HTMLResponse(html)
+        resp = HTMLResponse(html)
+        if self._api_token:
+            resp.set_cookie("pyharness_token", self._api_token,
+                            httponly=True, samesite="strict", path="/")
+        return resp
 
     # ------------------------------------------------ 会话解析(端点共用)
     async def _require_session(self, sid: str) -> Any:
@@ -506,11 +515,14 @@ class DesktopApp:
         # _provider_owning 经 ctx.approval 兜底定位;否则弹窗 A/B 打来 APR-503)
         if getattr(self.ctx, "approval", None) is None:
             self.ctx.approval = spine.approval
+            self.ctx._approval_owner_sid = sid   # 归属记账:_approval_for 据此判能否复用
         if getattr(self.ctx, "guard", None) is None:
             self.ctx.guard = spine.guard
-        # 预算门面随会话对齐(多会话共享 ctx:每次装配本会话时覆盖,保证
-        # /api/budget/{sid} 读的是该会话自己的 counters)
+            self.ctx._guard_owner_sid = sid
+        # 预算门面:按会话记账归属;/api/budget/{sid} 主路径读本会话 spine.budget,
+        # ctx.budget 仅作 fallback 且需 owner==sid(防多会话共享 ctx 串场)
         self.ctx.budget = spine.budget
+        self.ctx._budget_owner_sid = sid
         return _eng_make_runner(spine)
 
     def _runner_seam(self) -> Any:
@@ -557,7 +569,10 @@ class DesktopApp:
         provider = self._approvals.get(sid)
         if provider is None:
             ctx_approval = getattr(self.ctx, "approval", None)
-            if ctx_approval is not None and not self._approvals:
+            owner = getattr(self.ctx, "_approval_owner_sid", None)
+            # 仅当共享 ctx.approval 确属本会话(owner==sid)或未记归属才复用;否则
+            # 按本会话 log_ 建 per-session provider——防第二会话拿到第一会话的审批通道。
+            if ctx_approval is not None and owner in (None, sid):
                 return ctx_approval          # 装配注入的全会话 provider(单会话形态)
             provider = ApprovalProvider(session=log_, bus=None,
                                         config=_cfg_of(self.ctx))

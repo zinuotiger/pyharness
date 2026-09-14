@@ -227,17 +227,15 @@ def _text_card(type_: str, payload: dict) -> Optional[str]:
 
 # ---------------------------------------------------------------- 输出助手
 def _json_line(obj: dict) -> None:
-    """stdout 结构化行(唯一机器出口;禁人类文本混入)。"""
-    print(json.dumps(obj, ensure_ascii=False))
+    """stdout 结构化行(唯一机器出口;禁人类文本混入)。flush 保 --json 管道实时。"""
+    print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
 def _emit_plain(text: str, *, err: bool = False) -> None:
-    """人类文本出口:text 模式 stdout / json 模式一律 stderr(保流纯净);
-    err=True 恒走 stderr(错误/中断提示)。"""
-    if err or True:                                    # 提示类文本统一 stderr 保守
-        print(text, file=sys.stderr)
-    else:
-        print(text)
+    """人类文本出口:统一走 stderr——json 模式下保 stdout 机器流纯净;text 模式下
+    stderr 同样可见。err 参数保留(调用方对称),不再据其分流(原 `if err or True`
+    恒真死分支,2026-09-13 清理)。"""
+    print(text, file=sys.stderr, flush=err)
 
 
 def _emit_error(e: PyHError, *, json_mode: bool) -> None:

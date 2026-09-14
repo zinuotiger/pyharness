@@ -142,7 +142,8 @@ class FakeApproval:
         self.verdicts = list(verdicts)
         self.requests: list[tuple] = []
 
-    async def request(self, call, args_summary: str, ctx):
+    async def request(self, call, args_summary: str, ctx, *,
+                      binding=None, ttl_ms=None):
         self.requests.append((call.name, args_summary, ctx))
         v = self.verdicts.pop(0) if self.verdicts else "denied"
         if v == "raise-apr501":
@@ -500,6 +501,40 @@ class TestApprovalFlow:
         assert "c13" in ex.rejected_ids()
         assert sess.of("tool.result") == []
 
+    async def test_granted_binding_mismatch_denied(self, tmp_path: Path):
+        """P0-2 ① 绑定校验:granted 后重入仍要审批时,批准绑定与本次参数指纹
+        不一致(篡改/复用)→ GRD-403 拒,Provider 未执行。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        reg, scope, chain = self._writer(sess, prov, tmp_path, danger="high")
+        ap = FakeApproval(["granted"])
+        ap.grant_binding = lambda _cid: "wrong-binding"    # 注入不一致绑定
+        ctx = make_ctx(sess, scope, chain=chain, approval=ap)
+        ex = ToolExecutor(reg)
+        r = await ex.execute(ToolCall(name="fs.write_file",
+                                      raw_args={"path": "a.txt", "content": "x"},
+                                      call_id="c98"), ctx)
+        assert not r.ok
+        assert "GRD-403" in r.summary
+        assert prov.calls == 0                             # 未执行
+        assert "c98" in ex.rejected_ids()
+
+    async def test_granted_binding_match_allows(self, tmp_path: Path):
+        """P0-2 ① 绑定一致(真实 ApprovalProvider)→ 重入 approval 决策放行执行。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        reg, scope, chain = self._writer(sess, prov, tmp_path, danger="high")
+        prov_ap = ApprovalProvider(channel="cli")
+        ctx = make_ctx(sess, scope, chain=chain, approval=prov_ap)
+        ex = ToolExecutor(reg)
+        call = ToolCall(name="fs.write_file",
+                        raw_args={"path": "sub/b.txt", "content": "new"},
+                        call_id="c99")
+        task = asyncio.create_task(ex.execute(call, ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        aid = sess.of("approval.requested")[-1]["seq"]
+        prov_ap.approve(aid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok and prov.calls == 1                    # 绑定一致 → 放行
+
 
 # ================================================================ 关3 执行
 class TestProviderExecution:
@@ -535,6 +570,41 @@ class TestProviderExecution:
         # 线程已被弃(掐断点不等待其返回)——timeout 语义 = executor 已收敛返回
         assert sess.last_of("tool.error")["payload"]["message"].startswith(
             "执行超时(1s)")
+
+    async def test_timeout_evicts_pool_not_reused(self, tmp_path: Path):
+        """超时线程池被驱逐:后续调用在全新线程执行,不复用僵尸线程(防重叠副作用)。"""
+        sess = AsyncSess()
+        started = threading.Event()
+        release = threading.Event()
+        tids: list[int] = []
+
+        def handle(args, ctx):
+            tids.append(threading.get_ident())
+            if len(tids) == 1:                          # 第一次:阻塞至超时
+                started.set()
+                release.wait(10)
+            return {"ok": True}
+
+        defn = mk_defn(timeout_s=1)                     # 1s 超时 < 第一次阻塞
+        reg = make_registry(defn)
+        reg.bind_provider(defn.name, types.SimpleNamespace(handle=handle))
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)), chain=GuardChain(session=sess))
+        ex = ToolExecutor(reg)
+        # 第一次:超时;被掐断的线程在后台继续
+        r1 = await ex.execute(ToolCall(name="fs.read_file", raw_args={"path": "a"},
+                                       call_id="c40"), ctx)
+        assert not r1.ok and r1.summary.startswith("执行超时")
+        assert await asyncio.to_thread(started.wait, 2)  # 旧线程已启动
+        assert len(ex._zombie_pools) == 1               # 僵尸池被驱逐且保留引用
+        # 第二次:不复用僵尸线程 → 不阻塞,新线程完成
+        t0 = time.monotonic()
+        r2 = await asyncio.wait_for(
+            ex.execute(ToolCall(name="fs.read_file", raw_args={"path": "b"},
+                                call_id="c41"), ctx), 3)
+        assert r2.ok
+        assert time.monotonic() - t0 < 1.0             # 未被僵尸线程阻塞
+        assert tids[-1] != tids[0]                     # 新物理线程,旧线程未复用
+        release.set()                                   # 放行僵尸线程(防悬挂)
 
     async def test_cancel_writes_partial_and_reraises(self, tmp_path: Path):
         """F025:执行中取消 → partial tool.result(ok=False,truncated)+ re-raise。"""
@@ -783,6 +853,11 @@ class TestFacadeAndHelpers:
         s = summarize({"content": "x" * 500, "path": "a/b"})
         assert s.startswith("path=a/b")
         assert "…" in s                                 # 超长值截断
+        # P0-2 ① 尾部可见:content 类键超长后保留尾部(防危险段被省略号隐藏)
+        tail_s = summarize({"content": "A" * 300 + "-MALICIOUS-TAIL-XX"})
+        assert "MALICIOUS-TAIL-XX" in tail_s
+        plain = summarize({"note": "A" * 300 + "-HIDDEN-TAIL-XX"})
+        assert "-HIDDEN-TAIL-XX" not in plain             # 普通键单侧截断
         s2 = summarize({"k1": 1, "k2": [1, 2, 3]})
         assert "k2=<list 3项>" in s2
         assert len(summarize_text("字" * 3000)) <= 2000

@@ -22,7 +22,8 @@ from pyharness import bus as B
 from pyharness.bus import EventBus
 from pyharness.core.session import SessionLog, open_session
 from pyharness.errors import PyHError
-from pyharness.events import Envelope, EVENT_TYPES
+from pyharness.events import Envelope, EVENT_TYPES, SYNC_TYPES
+from pyharness.persistence import open_store
 
 SID = "s-abc12345"
 SID2 = "s-other99999"
@@ -612,3 +613,74 @@ async def test_close_marker_rejects_later_append():
         await log.append("user.message", {"content": "x"}, actor="user")
     assert ei.value.code == "EVT-104"
     assert log.stats()["event_count"] == 1, "close_marker 本身不写事件"
+
+
+# ================================= F-SYNC-1:强同步失败对调用方可见(端到端真链)
+class TestSyncDurabilityEndToEnd:
+    """真链:SessionLog + 真 EventBus + 真 SessionStore + 真总线→存储适配器。
+
+    证明 ``session.append(sync=True)`` 在适配器落盘失败时**不再 silent success**
+    (修复前:适配器异常被总线 EVT-103 隔离 + 步骤 9 flush 面对空 pending 静默
+    返回成功 → 调用方以为已落盘,实际丢行)。
+    """
+
+    @staticmethod
+    async def _wired(sid: str, tmp_path):
+        store = open_store(sid, dir=tmp_path)
+
+        async def adapter(type_, payload):
+            if hasattr(payload, "model_dump_json"):
+                await store.append(payload, sync=type_ in SYNC_TYPES)
+
+        bus = EventBus()
+        for t in EVENT_TYPES:
+            bus.subscribe(t, adapter, owner="persistence")
+        log = SessionLog(sid=sid, persistence=store, bus=bus)
+        await log.append("session.created", {"title": "", "model": "m"},
+                         actor="system")
+        await store.flush()                              # 引导事件落盘
+        return log, store, bus
+
+    @staticmethod
+    def _boom(*_a, **_k):
+        raise OSError("disk full (simulated)")
+
+    async def test_sync_failure_raises_to_caller(self, tmp_path, monkeypatch):
+        """Case B(端到端):两次失败 → `append` 抛 PERS-202,行保留在 `_retry_q`。"""
+        log, store, bus = await self._wired(SID, tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError) as ei:
+            await log.append("user.message", {"content": "x"}, actor="user",
+                             sync=True)
+        assert ei.value.code == "PERS-202"                # caller-visible
+        assert [s for s, _ in store._retry_q] == [2]      # 不丢行
+        monkeypatch.undo()
+        store.close()
+
+    async def test_sync_recovery_then_event_is_readable(self, tmp_path,
+                                                       monkeypatch):
+        """Case A(端到端):失败 → 通道恢复 → flush → 事件真实落盘且 replay 可读。"""
+        log, store, bus = await self._wired(SID, tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError):
+            await log.append("user.message", {"content": "x"}, actor="user",
+                             sync=True)
+        monkeypatch.undo()
+        await store.flush()                               # 恢复后重试成功
+        assert len(store._retry_q) == 0
+        types = [e.type for e in store.replay()]
+        assert types == ["session.created", "user.message"]
+        store.close()
+
+    async def test_async_event_isolation_unchanged(self, tmp_path, monkeypatch):
+        """INV-F5:非 sync 事件仍走既有攒批/EVT-103 路径,本修复不影响。"""
+        log, store, bus = await self._wired(SID, tmp_path)
+        store.flush_batch = 1                             # 每条即刷(触达攒批路径)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        await log.append("agent.message", {"content": "ok"}, actor="agent")
+        assert [s for s, _ in store._retry_q] == [2]      # 攒批重试,**不抛**
+        monkeypatch.undo()
+        await store.flush()                               # 通道恢复后重试成功
+        assert [e.type for e in store.replay()] == ["session.created",
+                                                    "agent.message"]
+        store.close()

@@ -673,3 +673,182 @@ def test_s24_adapters_reference_sync_types():
         src = (repo / rel).read_text(encoding="utf-8")
         assert "SYNC_TYPES" in src, f"{rel} 未引用 SYNC_TYPES(应为派生)"
         assert "_SYNC = (" not in src, f"{rel} 仍存在第二真源 `_SYNC`"
+
+
+# ============================================ F-SYNC-1 强同步 durability 修复
+class TestSyncDurability:
+    """F-SYNC-1:sync=True 落盘失败必须**不丢行**且**对调用方可⻅**。
+
+    修复点 = ``SessionStore._flush_pending_all`` 的失败语义(原为丢弃 pending_now)。
+    铁律:全部走**真实** ``store.append`` / ``store.flush``,只对 ``_fh.write``
+    注入故障(不 mock 内部函数制造假成功)。
+    """
+
+    @staticmethod
+    def _boom(*_a, **_k):
+        raise OSError("disk full (simulated)")
+
+    async def test_sync_failure_preserves_batch_and_raises(self, tmp_path,
+                                                           monkeypatch):
+        """Case B:两次都失败 → 行留在 `_retry_q`;第二次调用方可见 PERS-202。"""
+        store, _ = _store(tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError) as ei:                  # 第一次:适配器路径
+            await store.append(_env(10), sync=True)
+        assert ei.value.code == "PERS-202"
+        assert [s for s, _ in store._retry_q] == [10]        # 不丢
+        assert len(store._pending) == 0
+        with pytest.raises(PyHError) as ei2:                 # 第二次:步骤 9 flush
+            await store.flush(10)
+        assert ei2.value.code == "PERS-202"                  # caller-visible
+        assert [s for s, _ in store._retry_q] == [10]        # 仍不丢
+        assert store.path.read_text(encoding="utf-8") == ""  # 确实未落盘
+        monkeypatch.undo()
+
+    async def test_sync_case_a_second_attempt_succeeds(self, tmp_path,
+                                                       monkeypatch):
+        """Case A:第一次失败、第二次成功 → 数据真实存在且队列清空。"""
+        store, _ = _store(tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError):
+            await store.append(_env(10), sync=True)
+        assert [s for s, _ in store._retry_q] == [10]
+        monkeypatch.undo()                                   # 通道恢复
+        await store.flush(10)                                # 第二次真实尝试
+        assert len(store._retry_q) == 0
+        assert store.path.read_bytes() == _line(_env(10)).encode("utf-8")
+        assert [e.seq for e in store.replay()] == [10]       # replay 可读
+        store.close()
+
+    async def test_failed_batch_not_split_or_reordered(self, tmp_path,
+                                                       monkeypatch):
+        """多事件批:10/11/12 整批保留且**保序**,不丢头不丢尾。"""
+        store, _ = _store(tmp_path)
+        for s in (10, 11, 12):
+            store._pending.append((s, _line(_env(s))))
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(OSError):
+            await store._flush_pending_all()
+        assert [s for s, _ in store._retry_q] == [10, 11, 12]
+        monkeypatch.undo()
+        await store.flush(12)                                # 恢复后重试
+        assert store.path.read_text(encoding="utf-8") == "".join(
+            _line(_env(s)) for s in (10, 11, 12))            # 顺序 10→11→12
+        assert len(store._retry_q) == 0
+        store.close()
+
+    async def test_retry_precedes_new_rows(self, tmp_path, monkeypatch):
+        """重试行恒先写:旧 retry(10) 先于新 pending(11),seq 不倒退。"""
+        store, _ = _store(tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(OSError):
+            store._pending.append((10, _line(_env(10))))
+            await store._flush_pending_all()
+        monkeypatch.undo()
+        store._pending.append((11, _line(_env(11))))         # 新行入队
+        await store.flush(11)
+        assert store.path.read_text(encoding="utf-8") == (
+            _line(_env(10)) + _line(_env(11)))               # 10 → 11
+        store.close()
+
+    @pytest.mark.parametrize("type_,payload", [
+        ("user.message", {"content": "hi"}),
+        ("guard.rejected", {"tool": "t", "guard_id": "g-danger",
+                            "reason": "POL-DGR-1", "policy_ref": "POL-DGR-1"}),
+        ("decision.issued", {"decision_id": "d1", "verdict": "allow",
+                             "principal_kind": "system",
+                             "principal_id": "pyharness-runtime"}),
+    ])
+    async def test_contract_applies_to_all_sync_types(self, tmp_path, type_,
+                                                      payload, monkeypatch):
+        """修复对全部 SYNC_TYPES 一致生效——无任何 event type 特判。"""
+        assert type_ in SYNC_TYPES
+        store, _ = _store(tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError) as ei:
+            await store.append(_env(10, type_=type_, payload=payload),
+                               sync=True)
+        assert ei.value.code == "PERS-202"
+        assert [s for s, _ in store._retry_q] == [10]
+        monkeypatch.undo()
+        await store.flush(10)
+        assert [e.type for e in store.replay()] == [type_]
+        store.close()
+
+    async def test_async_path_semantics_unchanged(self, tmp_path, monkeypatch):
+        """INV-F5:非 sync 路径行为不变(攒批失败回填 `_retry_q`,不因本修复改变)。"""
+        store, _ = _store(tmp_path)
+        store.flush_batch = 1
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        await store.append(_env(10))                         # sync=False:不抛
+        assert [s for s, _ in store._retry_q] == [10]
+        assert store._fail_streak == 1
+        monkeypatch.undo()
+        await store.flush()
+        assert [e.seq for e in store.replay()] == [10]
+        store.close()
+
+    async def test_same_seq_replay_does_not_duplicate_line(self, tmp_path,
+                                                           monkeypatch):
+        """同 seq 重放(失败后原样重试)不得在 JSONL 留下重复 seq 行。"""
+        store, _ = _store(tmp_path)
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        with pytest.raises(PyHError):
+            await store.append(_env(10), sync=True)          # 失败 → 行入 retry
+        assert [s for s, _ in store._retry_q] == [10]
+        monkeypatch.undo()
+        await store.append(_env(10), sync=True)              # 同 seq 重放
+        text = store.path.read_text(encoding="utf-8")
+        assert text == _line(_env(10))                       # 只写一行
+        assert [e.seq for e in store.replay()] == [10]       # seq 不重复
+        assert len(store._retry_q) == 0
+        store.close()
+
+    async def test_t10_same_seq_identical_payload_dedupes(self, tmp_path):
+        """T10(A-1):同 seq + **相同内容** → 去重为一行(幂等,不重复写)。"""
+        store, _ = _store(tmp_path)
+        line = _line(_env(10))
+        store._retry_q.append((10, line))
+        store._pending.append((10, line))
+        await store._flush_pending_all()
+        assert store.path.read_text(encoding="utf-8") == line   # 恰一行
+        assert len(store._retry_q) == 0 and len(store._pending) == 0
+        store.close()
+
+    async def test_t11_same_seq_conflicting_payload_fails_closed(self, tmp_path):
+        """T11(A-1)=(c):同 seq + **不同内容** → PERS-202 fail-closed;
+        **不 first-wins、不 last-wins、不静默覆盖**——两份数据都保留。"""
+        store, _ = _store(tmp_path)
+        line_a = _line(_env(10))                             # payload A
+        line_b = _line(_env(10, payload={"content": "B"}))   # 同 seq,不同内容
+        assert line_a != line_b
+        store._retry_q.append((10, line_a))
+        store._pending.append((10, line_b))
+        with pytest.raises(PyHError) as ei:
+            await store._flush_pending_all()
+        assert ei.value.code == "PERS-202"
+        assert ei.value.ctx.get("op") == "seq_conflict"
+        # 两份原始数据均未被覆盖/丢弃(冲突前不改队列)
+        assert store._retry_q[0] == (10, line_a)
+        assert store._pending[0] == (10, line_b)
+        assert store.path.read_text(encoding="utf-8") == ""   # 未写盘
+        store.close()
+
+    async def test_t12_seq_unique_after_retry_cycles(self, tmp_path,
+                                                    monkeypatch):
+        """T12:多轮失败/重试后 seq 仍唯一且升序(replay 无重复 seq)。"""
+        store, _ = _store(tmp_path)
+        for s in (10, 11, 12):
+            store._pending.append((s, _line(_env(s))))
+        monkeypatch.setattr(store._fh, "write", self._boom)
+        for _ in range(2):                                   # 连续两轮失败
+            with pytest.raises(OSError):
+                await store._flush_pending_all()
+            assert [s for s, _ in store._retry_q] == [10, 11, 12]
+        monkeypatch.undo()
+        await store.flush(12)                                # 恢复
+        seqs = [e.seq for e in store.replay()]
+        assert seqs == [10, 11, 12]                          # 唯一 + 升序
+        assert len(seqs) == len(set(seqs))                   # 无重复
+        assert store.path.read_text(encoding="utf-8").count("\n") == 3
+        store.close()

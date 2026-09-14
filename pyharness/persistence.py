@@ -61,6 +61,33 @@ _RETRY_Q_LIMIT = 192
 _TAIL_WINDOW = 4096
 
 # ================================================================= 工具函数
+def _resolve_by_seq(rows: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """写前按 seq 归并(保序)并做**一致性校验**(fail-closed)。
+
+    ``seq`` 是事件身份的一部分——框架经 ``SeqState`` 单调分配、``SessionLog``
+    另有 EVT-101 失步闸,故同一 seq 只可能代表同一事件。据此:
+
+    - 同 seq + **相同行** ⇒ 去重(同 seq 重放同一事件,幂等);
+    - 同 seq + **不同行** ⇒ **数据一致性冲突** → ``PERS-202`` 上抛;
+      **不 first-wins、不 last-wins、不静默覆盖**(丢哪一份都是丢事件)。
+
+    返回按 seq 升序的写序列(物理写序 = seq 序)。**本函数无副作用**:在任何
+    队列状态变更之前调用,冲突时原队列保持不动。
+    """
+    seen: dict[int, str] = {}
+    for seq, line in rows:
+        prev = seen.get(seq)
+        if prev is None:
+            seen[seq] = line
+        elif prev != line:
+            raise_code("PERS-202", op="seq_conflict", seq=seq,
+                       why="同一 seq 出现不同内容:seq 是事件身份的一部分,"
+                           "同一 seq 只能是同一事件",
+                       advice="拒绝静默覆盖(不 first/last-wins);查是否绕过"
+                              "框架自报 seq 或存在重复写入")
+    return [(s, seen[s]) for s in sorted(seen)]
+
+
 def now_ts() -> str:
     """UTC 时间戳(备份/损坏文件命名用):YYYYMMDDTHHMMSSZ。"""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -346,23 +373,39 @@ class SessionStore:
     async def _flush_pending_all(self) -> None:
         """内部:全量 pending + 重试队列写盘(强同步路径用;失败 → OSError 上抛)。
 
-        失败语义:本次 pending 行丢弃(强同步失败 = 不承诺,调用方 raise PERS-202
-        后自行重试重新 append,不经过重试队列——否则重试会双写同 seq);
-        既有 _retry_q 原样保留(攒批失败行仍待定时重试)。
+        失败语义(**F-SYNC-1 修复**):**本批一行不丢**——写失败时把
+        ``retry_old + pending_now`` **完整回填** ``_retry_q``(保序)后上抛
+        ``OSError``;不丢任何一条、不重复任何一条。
+
+        为什么这样能恢复 caller-visible failure:本函数由装配层适配器(总线订阅者)
+        调用,其异常被总线按 EVT-103 隔离——若此处**丢弃**本批,``session.append``
+        步骤 9 的 ``flush(seq)`` 会面对空队列而**静默返回成功**(调用方以为已落盘,
+        实际丢行)。回填后,步骤 9 成为对同一批的**第二次真实尝试**:
+
+        - 成功 ⇒ 事件真正持久,``append`` 成功返回(且 replay 可读出);
+        - 仍失败 ⇒ ``PERS-202`` 上抛至调用方(**不再 silent success**),行仍留在
+          ``_retry_q`` 待 repair 后恢复。
+
+        排序:重试行恒先写(旧行 seq 更小),与 ``flush`` / ``_flush_batch`` 三处
+        写入路径语义一致——**seq 不会倒退**,replay 顺序正常。
         """
         if not self._pending and not self._retry_q:
             return
         retry_old = list(self._retry_q)
         pending_now = list(self._pending)
+        # 一致性校验先行(无副作用):同 seq 异内容 → PERS-202 fail-closed,
+        # 此时尚未改动任何队列 → 两份数据都保留,绝不静默覆盖。
+        to_write = _resolve_by_seq(retry_old + pending_now)
         self._pending = deque()
         try:
-            for _seq, line in retry_old + pending_now:
+            for _seq, line in to_write:
                 self._fh.write(line)
             self._fh.flush()
             self._fail_streak = 0
             self._retry_q.clear()
         except OSError:
-            self._retry_q = deque(retry_old)      # 攒批旧行保底;本次行丢弃(见上)
+            self._retry_q = deque(retry_old)
+            self._retry_q.extend(pending_now)     # F-SYNC-1:本批完整回填(保序)
             raise
 
     async def flush(self, up_to_seq: Optional[int] = None) -> None:

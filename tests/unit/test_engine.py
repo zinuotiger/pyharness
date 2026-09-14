@@ -453,3 +453,35 @@ def test_s23_f1_rule_policy_refs_covers_builtin():
     会**静默给出空 refs**;本断言把该缺口封死。
     """
     assert set(_BUILTIN_IDS) <= set(_RULE_POLICY_REFS)
+
+
+# =====================================================================
+# S2-4:强同步真源收敛(关闭 ADR-019 P-3)
+# =====================================================================
+async def test_s24_engine_adapter_derives_sync_from_vocab():
+    """S2-4:engine 落盘适配器对**每个词表类型**的 ``sync`` 取值 == `type in SYNC_TYPES`。
+
+    封 ADR-019 P-3:此前 ``_record_to`` 内有一份 11 名硬编码副本,与词表真源
+    各成第二真源(新增强同步事件漏改即**静默漂移**——``policy.updated`` 已发生过)。
+    """
+    from pyharness.engine import _record_to
+    from pyharness.events.vocab import EVENT_TYPES, SYNC_TYPES
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        async def append(self, env: Any, sync: bool = False) -> None:
+            self.calls.append((env.type, sync))
+
+    rec = _Rec()
+    record = _record_to(rec)
+    payload = SimpleNamespace(model_dump_json=lambda: "{}")   # 非 dict → 不跳过
+    for t in sorted(EVENT_TYPES):
+        payload.type = t
+        await record(t, payload)
+    got = dict(rec.calls)
+    assert got == {t: (t in SYNC_TYPES) for t in EVENT_TYPES}, \
+        "engine 适配器的 sync 取值必须逐类型等于 SYNC_TYPES 成员资格"
+    assert got["policy.updated"] is True        # 治理层策略事件:强同步(Q3)
+    assert got["scope.updated"] is False        # 运行时 scope 收紧:非强同步(Q1)

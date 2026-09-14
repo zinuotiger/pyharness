@@ -589,3 +589,87 @@ def test_cross_process_lock_blocks_second_writer(tmp_path):
                         cwd=str(repo), capture_output=True,
                         encoding="utf-8", errors="replace", env=env)
     assert "OPENED" in r2.stdout, (r2.stdout, r2.stderr)
+
+
+# =====================================================================
+# S2-4:强同步真源收敛(关闭 ADR-019 P-3)
+# =====================================================================
+def test_s24_sync_set_membership():
+    """Q1/Q3 分工在真源上的体现:policy.updated 在册,scope.updated 不在册。"""
+    assert "policy.updated" in SYNC_TYPES       # 治理层策略事件:强同步(ADR-020 Q3)
+    assert "scope.updated" not in SYNC_TYPES    # 运行时 scope 收紧:非强同步(Q1)
+
+
+async def test_s24_desktop_adapter_derives_sync_from_vocab():
+    """S2-4:desktop 落盘适配器同样**派生自** `SYNC_TYPES`,并保持 sid 过滤。
+
+    以未绑定方法直接驱动 ``_attach_persistence``(只需 ``bus``/``_owners``),
+    避免拉起整个桌面会话管理器。
+    """
+    from types import SimpleNamespace
+
+    from pyharness.bus import EventBus
+    from pyharness.desktop.sessions import DesktopSessionManager
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        async def append(self, env, sync=False) -> None:
+            self.calls.append((env.type, sync))
+
+    sid = "s-s24desk01"
+    rec = _Rec()
+    mgr = SimpleNamespace(bus=EventBus(), _owners={})
+    log_ = SimpleNamespace(sid=sid, _bus=None)
+    DesktopSessionManager._attach_persistence(mgr, log_, rec, sid)
+
+    env = SimpleNamespace(session_id=sid, model_dump_json=lambda: "{}")
+    for t, expected in (("policy.updated", True), ("scope.updated", False),
+                        ("user.message", True), ("agent.message", False),
+                        ("guard.rejected", True)):
+        env.type = t
+        await mgr.bus.emit(t, env)
+        assert rec.calls[-1] == (t, expected), \
+            f"{t} 的 sync 取值必须等于 (t in SYNC_TYPES)"
+
+    # 多会话隔离仍生效:异会话事件不落本文件
+    n = len(rec.calls)
+    env.session_id = "s-other-session"
+    await mgr.bus.emit("user.message", env)
+    assert len(rec.calls) == n, "异会话事件必须被 sid 过滤挡住"
+
+
+def test_s24_no_hardcoded_sync_list_in_adapters():
+    """**防回归**:适配器源文件不得再出现"硬编码强同步清单"。
+
+    判定:任何元素全为字符串常量的 tuple/set/list,若其**至少 3 个**元素且
+    **全体 ⊆ SYNC_TYPES**,即视为第二真源(engine/desktop 曾各有一份 11 名副本)。
+    """
+    import ast
+
+    repo = Path(__file__).resolve().parents[2]
+    files = ("pyharness/engine.py", "pyharness/desktop/sessions.py",
+             "pyharness/cli.py", "pyharness/core/orchestration.py")
+    offenders: list = []
+    for rel in files:
+        tree = ast.parse((repo / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Tuple, ast.Set, ast.List)):
+                continue
+            vals = [e.value for e in node.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if (len(vals) == len(node.elts) >= 3
+                    and set(vals) <= set(SYNC_TYPES)):
+                offenders.append((rel, sorted(vals)))
+    assert not offenders, (
+        f"出现硬编码强同步清单(应统一派生自 events.vocab.SYNC_TYPES):{offenders}")
+
+
+def test_s24_adapters_reference_sync_types():
+    """engine / desktop 适配器必须**引用** SYNC_TYPES(证明"派生"而非"删除清单")。"""
+    repo = Path(__file__).resolve().parents[2]
+    for rel in ("pyharness/engine.py", "pyharness/desktop/sessions.py"):
+        src = (repo / rel).read_text(encoding="utf-8")
+        assert "SYNC_TYPES" in src, f"{rel} 未引用 SYNC_TYPES(应为派生)"
+        assert "_SYNC = (" not in src, f"{rel} 仍存在第二真源 `_SYNC`"

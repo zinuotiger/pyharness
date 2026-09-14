@@ -686,17 +686,20 @@ def _EVENT_TYPES_OR_ALL() -> tuple:
 
 
 def _record_to(store: Any):
-    """总线 → 存储订阅(强同步三类即写即刷;其余批量落盘由 store 自管)。"""
-    _SYNC = ("user.message", "guard.rejected", "approval.requested",
-             "approval.granted", "approval.denied", "approval.timeout",
-             "session.finished", "session.recovered", "segment.start",
-             "fork.created", "context.compacted")
+    """总线 → 存储订阅(强同步即写即刷;其余批量落盘由 store 自管)。
+
+    强同步清单**唯一真源** = ``events.vocab.SYNC_TYPES``(ADR-019 P-3 收敛):
+    此前本函数内有一份 11 名硬编码副本,与 ``desktop/sessions.py`` 的同款副本
+    各成第二真源——新增强同步事件时漏改即**静默漂移**(``policy.updated`` 已实际
+    发生过一次)。本函数不再本地维护清单。
+    """
+    from pyharness.events.vocab import SYNC_TYPES
 
     async def _record(type_: str, payload: Any) -> None:
         # 瞬时类型(llm.chunk 等)以 dict 上总线,不得进入 append-only JSONL。
         if not hasattr(payload, "model_dump_json"):
             return
-        await store.append(payload, sync=type_ in _SYNC)
+        await store.append(payload, sync=type_ in SYNC_TYPES)
     return _record
 
 

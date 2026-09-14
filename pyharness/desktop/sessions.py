@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from pyharness.core.session import SessionLog, open_session
 from pyharness.errors import raise_code
-from pyharness.events import EVENT_TYPES
+from pyharness.events import EVENT_TYPES, SYNC_TYPES
 
 log = logging.getLogger("pyharness.desktop.sessions")
 
@@ -148,11 +148,9 @@ class DesktopSessionManager:
         async def _record(type_: str, payload: Any) -> None:
             if getattr(payload, "session_id", None) != sid:
                 return                       # 跨会话事件:不落本文件(多会话隔离)
-            await store.append(payload, sync=type_ in (
-                "user.message", "guard.rejected", "approval.requested",
-                "approval.granted", "approval.denied", "approval.timeout",
-                "session.finished", "session.recovered", "segment.start",
-                "fork.created", "context.compacted"))
+            # 强同步清单唯一真源 = events.vocab.SYNC_TYPES(ADR-019 P-3 收敛;
+            # 此前此处有一份 11 名内联副本,与 engine._record_to 各成第二真源)
+            await store.append(payload, sync=type_ in SYNC_TYPES)
 
         for t in EVENT_TYPES:               # 词表逐精确类型订阅(段通配防重复,见偏离 4)
             self.bus.subscribe(t, _record, owner=owner)

@@ -83,7 +83,7 @@ INJECTION_MARKERS: tuple[str, ...] = (
     "ignore previous", "ignore all previous", "ignore prior",
 )
 
-TOOL_REGISTERED = "tool.registered"    # 总线瞬时类型(57 词表外,见偏离 1)
+TOOL_REGISTERED = "tool.registered"    # 总线瞬时类型(74 词表外,见偏离 1)
 REGISTRY_UPDATED = "registry.updated"  # F003 瞬时广播(EventBus 预置类型)
 
 DANGER_LEVELS: tuple[str, ...] = ("none", "low", "high", "critical")

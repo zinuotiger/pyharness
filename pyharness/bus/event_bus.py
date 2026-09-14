@@ -103,7 +103,7 @@ class EventBus:
     """
 
     # 总线内部瞬时广播类型(仅内存、无 payload 模型——EVENT-SCHEMA §8.1
-    # 落盘矩阵:registry.updated 仅总线,不进 57 词表 EVENT_TYPES)。
+    # 落盘矩阵:registry.updated 仅总线,不进 74 词表 EVENT_TYPES)。
     # 预置入 _types 使 Registry 的 F003 留痕 emit 不被自身 EVT-102 闸拦截。
     _INTERNAL_TYPES: tuple[str, ...] = ("registry.updated",)
 
@@ -111,7 +111,7 @@ class EventBus:
         self._by_type: dict[str, list[Subscription]] = {}   # 精确索引
         self._wild: list[Subscription] = []                 # 通配索引(tool.*)
         # 事件 schema 注册表(EVT-102 判定):register_type 写入 + 预置内部瞬时
-        # 广播;其余 57 词表类型经 events.vocab 联动放行(见 _type_registered)
+        # 广播;其余 74 词表类型经 events.vocab 联动放行(见 _type_registered)
         self._types: dict[str, Optional[type]] = {t: None for t in self._INTERNAL_TYPES}
         self._queues: dict[str, deque] = {}                 # per-sender FIFO
         self.dropped: dict[str, int] = {}                   # 背压丢弃计数(可观测)
@@ -140,7 +140,7 @@ class EventBus:
     def _type_registered(self, type_: str) -> bool:
         """类型已注册判定:总线本地 _types ∪ events.vocab 词表联动。
 
-        词表 57 核心类型(payload 模型随 events 包导入即注册)开箱即发;
+        词表 74 类型(payload 模型随 events 包导入即注册)开箱即发;
         插件/能力命名空间类型须先 register_type(或经 events.register_event_type)。
         """
         return type_ in self._types or is_registered(type_)

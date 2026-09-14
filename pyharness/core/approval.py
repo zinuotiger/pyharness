@@ -35,7 +35,7 @@ guard 链/executor(重入由 executor 编排,本模块不 import)。
 偏离说明(相对 spec 伪码;契约=spec,以下为与既有实现冲突处的取舍,均列理由):
 1. approval.requested 载荷不含 channel/call_id:events/payload.py 的
    ApprovalRequestedPayload 为 extra="forbid" 且只有 tool/args_summary/ttl_ms/risk
-   四字段(57 类型已锁定,实测超字段 append → EVT-100)→ channel/call_id 改经
+   四字段(74 类型已锁定,实测超字段 append → EVT-100)→ channel/call_id 改经
    Envelope.trace 携带(信封 trace 为自由 dict 不触发载荷校验,tools_guard 偏离 1
    同款先例);risk 恒 "high"(guard 层只放行 high 进审批,critical 已转 reject)。
 2. headless 分支以"异常表 + ERR.md + DIS-SEAM §6.2 G2"为准:request() 抛 APR-501
@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from pyharness.errors import raise_code
-from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 57 词表,见偏离 5)
+from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 74 词表,见偏离 5)
 
 if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖
     from pyharness.core.tools_guard import ToolCall

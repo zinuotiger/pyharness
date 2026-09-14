@@ -616,7 +616,7 @@ def _attach_log_persistence(bus: Any, log_: Any, store: Any) -> None:
             return                             # 瞬时 llm.chunk:仅总线,禁落盘
         await store.append(env, sync=type_ in _EVT_SYNC)
 
-    for t in EVENT_TYPES:                      # 词表 57 类型逐类型订阅(精确命中)
+    for t in EVENT_TYPES:                      # 词表 74 类型逐类型订阅(精确命中)
         bus.subscribe(t, _record, owner="persistence")
     log_._bus = bus                            # 回填总线:append 即分发即落盘
 

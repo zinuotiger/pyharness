@@ -35,3 +35,4 @@ cli(14 子命令)/ acp(JSON-RPC)/ desktop(pywebview+FastAPI)/ repair(F060)
 - 安全核心:tools_guard 80 测试(INV-03 单调拒绝/INV-04 零副作用)
 - 每模块错误码锚定 ERR.md(41 码零表外)
 - 事件词表 64 类型(57 核心 + plan/schedule 扩展)
+- **后续演进(2026-09-14)**:事件词表已增至 **74 型**(强同步 **12**)。本文件为 2026-09-07 历史快照,原数字**保留不改**;现行值见 `docs/baseline/BASELINE_REPORT.md`。

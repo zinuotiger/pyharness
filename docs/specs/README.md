@@ -23,6 +23,8 @@
 | [`errors.py.md`](errors.py.md) | 13KB | 10 | 一句话:全系统唯一失败语义层——ErrorSpec 注册表 + PyHError 异常树(code/message/re |
 | [`events.py.md`](events.py.md) | 16KB | 9 | 一句话:会话事件唯一的 pydantic 模型层——Envelope 信封强校验 + 57 个事件负载词表注册 + 五步 |
 
+> **注(2026-09-14)**:上表"**57** 个事件负载"为**基线引用**(PARAMETER-ANCHOR 基线 57),**保留不改**;后续版本已演进至现行 `EVENT_TYPES = 74`,见 `docs/EVENT-SCHEMA.md` §3 与 `docs/baseline/`。
+
 
 ## 阶段1
 

@@ -175,10 +175,10 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 74 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组权威 + 词表外扩展 14 项
-# 按 §7 登记:llm.retry F028 / plan.done·plan.aborted F046 / schedule.registered·
-# updated·removed·blocked·missed F048 / policy.updated ADR-020;PARAMETER-ANCHOR
-# 基线 57,扩展只增不改)。
+# 74 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前
+# 计数] + 词表外扩展 17 项 = 74;按 §7 登记:llm.retry F028 /
+# plan.done·plan.aborted F046 / schedule.registered·updated·removed·blocked·
+# missed F048 / policy.updated ADR-020;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
 _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # ---- A 会话生命周期(§3.1)

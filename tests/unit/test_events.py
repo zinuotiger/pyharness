@@ -1,10 +1,11 @@
 """events 模块单测 — 契约:specs/events.py.md + EVENT-SCHEMA.md §3
 
-覆盖面:词表完整(64 名全量核对:57 词表 + §7 词表外扩展 llm.retry/plan.done/
-plan.aborted/schedule.registered/updated/removed/blocked/missed)、Envelope 三要素
-(seq/type/ts UTC)、seq 连续性(EVT-101)、非法输入抛码(EVT-100/102/106)、payload
-二次强校验、SeqState 分配器、check_seq_gap 空洞自检。
-说明:词表完整性断言必须位于本文件最前(见 test_vocab_full_64),其后注册类
+覆盖面:词表完整(74 名全量核对:基线 57 + §7 词表外扩展 17 项,含 llm.retry/
+plan.done/plan.aborted/schedule.registered/updated/removed/blocked/missed/
+policy.updated)、Envelope 三要素(seq/type/ts UTC)、seq 连续性(EVT-101)、非法
+输入抛码(EVT-100/102/106)、payload 二次强校验、SeqState 分配器、check_seq_gap
+空洞自检;另含 S2-5 的注释/计数一致性守卫(见本文件末)。
+说明:词表完整性断言必须位于本文件最前(见 test_vocab_full),其后注册类
 测试会向运行期注册表追加合成类型(只增不改,无注销 API)。
 """
 import re
@@ -377,3 +378,90 @@ def test_envelope_frozen_and_optionals():
         origin="cap:tool_fs", task_id="t-7", trace={"parent_seq": 0}))
     assert env2.origin == "cap:tool_fs"
     assert env2.task_id == "t-7"
+
+
+# =====================================================================
+# S2-5:注释/计数一致性守卫
+# =====================================================================
+def test_s25_scope_events_are_registered():
+    """**P-1 的根因防护**:scope.updated / budget.paused **均已入词表**。
+
+    据实测两者 `is_registered` 均为 True(随 S1/S2 阶段注册)。本断言针对
+    ``scope.py`` 模块 docstring 曾写"尚未入 events 词表(57 锁定类型之外)、
+    会 EVT-102 拒写"的**失效立论**——把事实钉死,任何注释再与事实背离即在此暴露。
+    """
+    assert EV.is_registered("scope.updated") is True
+    assert EV.is_registered("budget.paused") is True
+
+
+def test_s25_channel_counts():
+    """通道计数冻结:强同步 12、瞬时 3(总数 74 由 test_vocab_full 覆盖)。"""
+    assert len(EV.SYNC_TYPES) == 12
+    assert len(EV.TRANSIENT_TYPES) == 3
+    assert "policy.updated" in EV.SYNC_TYPES          # 治理事件:强同步(ADR-020 Q3)
+
+
+def test_s25_scope_and_policy_event_boundary_frozen():
+    """**ADR-020 Q1 分工冻结**:scope.updated 管运行时收紧、policy.updated 管策略集。
+
+    二者**不得表达同一种策略变化**;`op` 值域互斥;字段面各守其域。
+    """
+    from pyharness.events.payload import (PolicyUpdatedPayload,
+                                          ScopeUpdatedPayload)
+    from pyharness.governance.policy import POLICY_OPS
+
+    # 通道:策略事件强同步,scope 收紧不强同步
+    assert "policy.updated" in EV.SYNC_TYPES
+    assert "scope.updated" not in EV.SYNC_TYPES
+    # op 值域互斥:tighten 只属 scope.updated
+    assert POLICY_OPS == {"add", "enable", "disable"}
+    assert "tighten" not in POLICY_OPS
+    # 字段面:策略事件携带 policy 身份;scope 事件只有收紧三元组
+    assert {"policy_id", "version", "fingerprint"} <= set(
+        PolicyUpdatedPayload.model_fields)
+    assert set(ScopeUpdatedPayload.model_fields) == {"op", "added", "reason"}
+
+
+# ---------------------------------------------------- 注释扫描守卫(Y-5)
+# 白名单(必须记录原因):
+#   ① 数字后接 "A-E 分组 / 基线 / 权威" —— 那是 **EVENT-SCHEMA §3 的基线名**
+#      (PARAMETER-ANCHOR 基线 57),属**基线引用**而非当前计数 → 放行。
+#   ② 本守卫只扫 ``pyharness/**/*.py`` 的**注释与 docstring 文本**;
+#      ``docs/**`` 有意保留基线引用(specs/CODE-MATRIX/baseline),不在此扫描面。
+_ALLOWED_COUNTS = {"74"}                    # 当前真值(类型数)
+_COUNT_RE = re.compile(r"(?<![\w-])(\d{2,3})\s*(?:个)?\s*(?:事件|词表|核心类型)")
+_WHITELIST_NEAR = ("基线", "A-E", "权威", "PARAMETER-ANCHOR")
+
+
+def test_s25_no_stale_vocab_count_in_source():
+    """注释扫描守卫:pyharness 源码注释里不得再出现**过期的词表计数**。
+
+    判定:正则命中"<数字> 事件/词表/核心类型"样式的计数声明后,数字必须 ∈
+    ``_ALLOWED_COUNTS``;命中点 ±60 字符内含白名单词(基线/A-E/权威)则放行。
+    """
+    import pathlib
+    import tokenize
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    offenders: list = []
+    for path in sorted((repo / "pyharness").rglob("*.py")):
+        with open(path, encoding="utf-8") as fh:
+            try:
+                toks = list(tokenize.generate_tokens(fh.readline))
+            except tokenize.TokenError:          # 坏文件不阻断守卫
+                continue
+        for tok in toks:
+            if tok.type != tokenize.COMMENT:
+                continue
+            text = tok.string
+            for m in _COUNT_RE.finditer(text):
+                if m.group(1) in _ALLOWED_COUNTS:
+                    continue
+                near = text[max(0, m.start() - 60): m.end() + 60]
+                if any(w in near for w in _WHITELIST_NEAR):
+                    continue                     # 白名单:基线引用,放行
+                rel = path.relative_to(repo).as_posix()
+                offenders.append(f"{rel}:{tok.start[0]}: {m.group(0)!r}")
+    assert not offenders, (
+        "源码注释中出现过期词表计数(应订正为 74,或标注为基线引用):\n  "
+        + "\n  ".join(offenders))

@@ -27,7 +27,7 @@ API**——全链 allow 只是"本 guard 不反对",最终执行权在 executor 
 偏离说明(相对 spec 伪码;契约=spec,偏离均列理由,scope.py 偏离注同款先例):
 1. **guard.evaluated/rejected 载荷字段以已落地的 events 词表模型为准**
    (events/payload.py 的 GuardEvaluatedPayload/GuardRejectedPayload,
-   extra="forbid" 拒多余字段,57 类型已锁定;实测:超字段 append → EVT-100):
+   extra="forbid" 拒多余字段,74 类型已锁定;实测:超字段 append → EVT-100):
    - evaluated 载荷 = {tool, decision, guard_ids, reasons};spec 伪码的
      policy_ref 字段在该模型不存在 → policy_ref 并入 reasons(模型同义字段);
      decision 词表为 allow|deny|need_approval(deny≡reject、need_approval≡
@@ -35,7 +35,7 @@ API**——全链 allow 只是"本 guard 不反对",最终执行权在 executor 
    - rejected 载荷 = {tool, guard_id, reason, policy_ref}:spec 伪码的 call_id
      字段模型不允许 → 经 Envelope.trace={"call_id": …} 携带(信封 trace 为自由
      dict,不触发载荷校验),回放按 trace/事件序与 tool.call(含 call_id)配对;
-   - guard.disabled 未入 57 词表(实测 append → EVT-102)→ 经注入 session
+   - guard.disabled 未入 74 词表(实测 append → EVT-102)→ 经注入 session
      尽力而为留痕(scope.py 偏离 4 同款:真实 SessionLog 拒写属 events 模块
      后续阶段门,测试全替身覆盖)。
 2. **g1 g-schema 的 registry 依赖注入式装配**:tools_registry(F026)本阶段未

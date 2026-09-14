@@ -38,10 +38,11 @@ EVENT-SCHEMA(budget.paused/scope.updated)。
    (agent-loop 三闸每轮同步调)→ budget.paused/scope.updated 在有运行中事件
    循环时 create_task 排程投递(失败只记日志),无循环/未接线 → 日志降级
    (尽力而为,llm_fallback._fire_emit 同款);budget.warn 走 bus 尽力出口。
-   注意:budget.paused/scope.updated 尚未入 events 词表(57 锁定类型之外,与
-   llm_fallback budget.paused 现状一致;真实 SessionLog.append 会 EVT-102
-   拒写)——词表/payload 模型扩展属 events 模块后续阶段门,本模块以注入日志
-   对象为事件出口,测试全替身覆盖。
+   注意(2026-09-14 勘误):budget.paused/scope.updated **已入 events 词表**
+   (现 74 型;随 S1/S2 阶段陆续注册),真实 SessionLog.append **正常落盘**——
+   原注"尚未入词表(57 锁定类型之外)、会 EVT-102 拒写"的立论**已失效**(当时
+   词表确未收录,属历史阶段门)。事件出口仍以注入日志对象为面(装配解耦),
+   测试可用替身覆盖;为何要注入而非直取详见上文 3。
 5. BudgetLimits 字段名对齐 config.py 权威键面(max_in_tokens/max_out_tokens/
    max_cost_yuan/warn_ratio),非 spec 伪码短名(in/out/cost);窗口与告警比例
    配置化:window_tokens ← cfg.loop.max_context_tokens(默认 65536,spec 伪码

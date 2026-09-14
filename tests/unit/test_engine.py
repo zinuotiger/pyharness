@@ -14,15 +14,19 @@ F027 streaming / F013 fallback chain)。本文件锁定这些装配不变量,防
 from __future__ import annotations
 
 import asyncio
+import pathlib
+from types import SimpleNamespace
 
 import pytest
 
 from pyharness.config import Settings, load_settings
 from pyharness.core.session import SessionLog
 from pyharness.core.task_queue import Task
+from pyharness.core.tools_guard import (FORCED_GUARDS, ToolCall, _BUILTIN_IDS,
+                                        _RULE_POLICY_REFS)
 from pyharness.engine import (_activate_storage_caps, _agent_ctx_of,
                               _owned_task_message, assemble_real_engine,
-                              build_spine)
+                              attach_engine_to_ctx, build_spine)
 
 
 def _cfg(tmp_path) -> Settings:
@@ -272,3 +276,180 @@ async def test_guard_from_config_applies_cfg_disabled(tmp_path):
             == "allow", "禁用 g-fs-path 后该越界调用不应再被 g3 拒"
     finally:
         _close_spine(spine_off)
+
+
+# =====================================================================
+# S2-3:治理层装配(只进装配链,不进运行链)
+# =====================================================================
+async def _gov_spine(tmp_path, sid, *, preset=None, disabled=None):
+    """建带治理装配的 spine;preset="standard" → basic 沙箱(放开域约束)。"""
+    cfg = _cfg(tmp_path)
+    if preset is not None:
+        cfg.security.policy.preset = preset
+    if disabled is not None:
+        cfg.security.guards.disabled = list(disabled)
+    spine = await build_spine(cfg, sid=sid, sessions_dir=_sessions_dir(tmp_path))
+    await spine.session.append("session.created",
+                               {"title": "", "model": "deepseek-chat"},
+                               actor="system")
+    return spine
+
+
+def _tc(spine, name, **raw):
+    """生产同形 ToolCall:附 defn(关1a 会挂契约;g2 danger 面读它)。"""
+    return ToolCall(name=name, raw_args=dict(raw), call_id="c1",
+                    defn=spine.tool_registry.lookup(name))
+
+
+# ---------------------------------------------------------------- T-B
+async def test_s23_tb_single_chain_and_single_governance(tmp_path):
+    """T-B:**只一条 GuardChain** + 治理层单实例 + create_agent 路径挂载同一对象。
+
+    ``spine.guard is spine.governance.policy.chain`` 封死"两条链"(S2-3.1 的 R-A):
+    guard 必须取自 policy.chain(chain_factory 产出),不得另行直调 from_config。
+    """
+    spine = await _gov_spine(tmp_path, "s-s23-tb-000001")
+    try:
+        assert spine.governance is not None
+        assert spine.guard is spine.governance.policy.chain       # 只一条链
+        ctx1 = await _agent_ctx_of(spine, _env_of(spine))
+        assert ctx1.guard is spine.guard
+        assert ctx1.governance is spine.governance                # 同一实例
+        ctx2 = await _agent_ctx_of(spine, _env_of(spine))         # 幂等
+        assert ctx2 is ctx1 and ctx2.governance is ctx1.governance
+    finally:
+        _close_spine(spine)
+
+
+# ---------------------------------------------------------------- T-C
+async def test_s23_tc_attach_path_mounts_same_governance(tmp_path):
+    """T-C:attach_engine_to_ctx 路径(CLI/ACP 门面)挂载**同一**治理实例。"""
+    cfg = _cfg(tmp_path)
+    cfg.llm.api_key = "env:PH_S23_TEST_KEY"      # 过 CRED-701 引用检查(不解析值)
+    ctx = SimpleNamespace()
+    log_ = SessionLog("s-s23-tc-000001")
+    spine = await attach_engine_to_ctx(
+        ctx, cfg, log_=log_, sessions_dir=_sessions_dir(tmp_path), preload=False)
+    try:
+        assert ctx.guard is spine.guard
+        assert ctx.governance is spine.governance                 # 同一对象
+        assert spine.guard is spine.governance.policy.chain
+    finally:
+        _close_spine(spine)
+
+
+# ---------------------------------------------------------------- T-A
+async def test_s23_ta_rules_match_chain(tmp_path):
+    """T-A:治理层持有的规则与链实际执行的规则**逐条同构**(序/开关/forced/refs)。
+
+    注:不可断言 check/match 对象同一 —— describe_rules 自建 guard 实例
+    (tools_guard 不改,X-5(a) 已否决),故只做结构同一性。
+    """
+    spine = await _gov_spine(tmp_path, "s-s23-ta-000001")
+    try:
+        pol = spine.governance.policy.policy                        # Policy 对象
+        assert [r.rule_id for r in pol.rules] == [g.id for g in spine.guard.chain]
+        assert [r.rule_id for r in pol.enabled_rules()] \
+            == spine.guard.enabled_guard_ids()
+        for r in pol.rules:
+            assert r.forced == (r.rule_id in FORCED_GUARDS)
+            assert r.policy_refs == _RULE_POLICY_REFS[r.rule_id]
+        assert pol.disabled == frozenset()                          # 无禁用声明
+        assert pol.fingerprint == spine.governance.policy.fingerprint() != ""
+    finally:
+        _close_spine(spine)
+
+
+async def test_s23_ta_cfg_disabled_reaches_policy(tmp_path):
+    """T-A(续):cfg 禁用面同时进入**策略 disabled 面**与**链**(两面一致)。"""
+    spine = await _gov_spine(tmp_path, "s-s23-ta2-000001",
+                             disabled=["g-fs-path"])
+    try:
+        assert "g-fs-path" in spine.governance.policy.policy.disabled
+        assert "g-fs-path" not in spine.guard.enabled_guard_ids()
+    finally:
+        _close_spine(spine)
+
+
+# ---------------------------------------------------------------- T-C
+async def test_s23_tc_policy_rules_carry_injected_params(tmp_path):
+    """T-C:治理层**持有的规则**确实带着注入参数(与链同源),封 S2-3.1 的 R-B。
+
+    对象同一不可断言(``describe_rules`` 自建 guard 实例);故用**行为**验证:
+    直接调用**策略规则自己的** ``check``——若注入参数没到达描述面,
+    ``validator=None`` 会让 g-schema 恒 allow(INV-04 空转),本例必红。
+    """
+    spine = await _gov_spine(tmp_path, "s-s23-tc2-000001")
+    try:
+        rules = {r.rule_id: r for r in spine.governance.policy.policy.rules}
+        g_schema = rules["g-schema"]
+        # 畸形参数(缺必填 path)→ 策略规则应拒(TLB-803),证明 validator 已注入
+        d, ref = await g_schema.check(_tc(spine, "fs.read_file"), spine.scope)
+        assert (d, ref) == ("reject", "TLB-803")
+        # 合规参数 → 该规则不反对
+        assert await g_schema.check(
+            _tc(spine, "fs.read_file", path="a.txt"), spine.scope) == ("allow", None)
+        # 与链上同名规则的行为一致(同一判定语义)
+        assert await spine.guard.evaluate(
+            _tc(spine, "fs.read_file"), spine.scope) == "reject"
+    finally:
+        _close_spine(spine)
+
+
+# ---------------------------------------------------------------- T-D
+async def test_s23_td_guard_behavior_smoke(tmp_path):
+    """T-D:guard 行为 smoke —— S2-3 前后判定一致(断言**冻结期望**)。
+
+    standard 预设 → basic 沙箱,使 fs/exec 域可见,从而覆盖 g3/g4/g5/g7 与
+    g2 的 approval 路径;strict 档另测 scope 前置终局拒。
+    """
+    spine = await _gov_spine(tmp_path, "s-s23-td-000001", preset="standard")
+    try:
+        ws = pathlib.Path(spine.scope.policy.workspace_root)
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "exists.txt").write_text("x", encoding="utf-8")
+
+        async def verdict(name, **raw):
+            d = await spine.guard.evaluate(_tc(spine, name, **raw), spine.scope)
+            return str(d)
+
+        # g3 路径几何:.. 逃逸越界 → reject
+        assert await verdict("fs.list_dir", path="../../outside") == "reject"
+        # g4 凭据读:workspace 内凭据形态名 → reject
+        assert await verdict("fs.read_file", path="credentials.yaml") == "reject"
+        # g7 覆写:目标已存在 → approval(新建则不触发)
+        assert await verdict("fs.write_file", path="exists.txt",
+                             content="y") == "approval"
+        assert await verdict("fs.write_file", path="new.txt",
+                             content="z") == "allow"
+        # 合规读 → allow
+        assert await verdict("fs.read_file", path="exists.txt") == "allow"
+        # g6 在 basic 放行,但 g2 见 danger=high → approval(不可审批例外见 strict)
+        assert await verdict("exec.shell_run", command="echo hi") == "approval"
+        # g5 外发:allowlist 空 → reject
+        assert await verdict("web.fetch", url="http://x/") == "reject"
+    finally:
+        _close_spine(spine)
+
+
+async def test_s23_td_strict_scope_precheck(tmp_path):
+    """T-D(续):strict 默认档下 critical 与域外工具在 scope 前置即终局拒。"""
+    spine = await _gov_spine(tmp_path, "s-s23-td2-000001")
+    try:
+        for name, raw in (("fs.delete_file", {"path": "a"}),
+                          ("exec.shell_run", {"command": "echo hi"}),
+                          ("web.fetch", {"url": "http://x/"})):
+            d = await spine.guard.evaluate(_tc(spine, name, **raw), spine.scope)
+            assert str(d) == "reject", f"{name} 在 strict 下应终局拒"
+    finally:
+        _close_spine(spine)
+
+
+# ---------------------------------------------------------------- F-1 守卫
+def test_s23_f1_rule_policy_refs_covers_builtin():
+    """F-1(S2-1 Exit Review):声明表必须覆盖**全部**内置 guard。
+
+    describe_rules 用 ``_RULE_POLICY_REFS.get(g.id, ())`` —— 新增内置 guard 漏登记
+    会**静默给出空 refs**;本断言把该缺口封死。
+    """
+    assert set(_BUILTIN_IDS) <= set(_RULE_POLICY_REFS)

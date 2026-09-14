@@ -469,6 +469,7 @@ def create_agent(session_id: str, spine: Any, cfg: Any) -> Agent:
     ag.ctx.registry = spine.registry             # 注册表(F003 寻址)
     ag.ctx.config = cfg
     ag.ctx.guard = getattr(spine, "guard", None)      # guard 链(executor 关3,F031 兜底)
+    ag.ctx.governance = getattr(spine, "governance", None)  # 治理层单实例(ADR-018;S2-3)
     ag.ctx.approval = getattr(spine, "approval", None)  # 审批(executor 转审批 F015)
     ag.ctx.counters = getattr(spine, "counters", None)  # F032 预算闸数据源(report_usage 写)
     ag.ctx.sysprompt = getattr(spine, "sysprompt", None)  # F010 装配器(agent 出网前挂)

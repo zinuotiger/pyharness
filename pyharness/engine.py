@@ -94,6 +94,7 @@ class EngineSpine:
     search_backend: Any = None
     budget: Any = None
     fts: Any = None
+    governance: Any = None                         # 治理层单实例(ADR-018;S2-3)
     _plugins_ready: bool = False
     _auto_titled: bool = False
     _spill_provider: Any = None
@@ -182,6 +183,7 @@ class EngineContext:
     agent: Any = None
     task_queue: Any = None
     budget: Any = None
+    governance: Any = None                 # 治理层单实例(ADR-018;S2-3 装配面)
 
 
 # ---------------------------------------------------------------- 适配器注册
@@ -422,6 +424,51 @@ async def activate_orchestration(spine: EngineSpine, *,
         spine._schedule_started = True
 
 
+def _build_governance(cfg: Any, *, session: Any, bus: Any,
+                      tool_reg: Any) -> tuple[Any, Any]:
+    """治理层装配(S2-3):返回 ``(PolicyEngine, guard)``。
+
+    **只一条 GuardChain**:``guard`` 取自 ``policy.chain``(由注入的 chain_factory
+    产出),**禁止**另行直调 ``tools_guard.from_config``——否则 spine.guard 与
+    policy.chain 是两个对象(T-B 断言钉死)。
+
+    **注入参数同源**:同一份 ``inj`` 同时交给 ``describe_rules``(描述面)与
+    ``chain_factory``(执行面)。两处都把注入参数**烘焙进 guard 闭包**,参数分歧
+    ⇒ 治理层持有的规则与实际执行的链判定分歧(静默)。
+
+    治理层只进**装配链**、不进运行链:运行期仍是 ``ctx.guard.evaluate``
+    (tools_executor 关 2b 调用),治理层无执行权(ADR-013 G-4 / INV-G5);
+    运行期向治理层问询(authorize)属 S3。
+    """
+    from pyharness.core.tools_guard import describe_rules
+    from pyharness.core.tools_guard import from_config as guard_from_config
+    from pyharness.governance import PolicyEngine
+
+    def _guard_factory(cfg_, *, session=None, bus=None, validator=None,
+                       credential_paths=None, path_exists=None,
+                       link_resolver=None, approval_channel=None):
+        """装配层适配:治理层契约参数名 → ``tools_guard.from_config`` 实际形参名。
+
+        治理层按设计用 ``credential_paths``(S2-1 设计 §3.2 契约);而
+        ``tools_guard.from_config`` 的实际形参是 ``credentials``。二者名字不同,
+        映射归**装配层**(治理层不 import tools_guard,ADR-018:308)。等同性:
+        ``credentials=None`` 时 from_config 仍从 cfg 取默认清单,与 S1 行为一致。
+        """
+        return guard_from_config(cfg_, session=session, bus=bus,
+                                 credentials=credential_paths,
+                                 validator=validator, path_exists=path_exists,
+                                 link_resolver=link_resolver,
+                                 approval_channel=approval_channel)
+
+    inj = dict(validator=tool_reg.validate_args, credential_paths=None,
+               path_exists=None, link_resolver=None, approval_channel=True)
+    policy = PolicyEngine.from_config(
+        cfg, session=session, bus=bus,
+        rules=describe_rules(**inj),
+        chain_factory=_guard_factory, **inj)
+    return policy, policy.chain
+
+
 def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
                             sessions_dir: Path,
                             store: Any = None,
@@ -462,9 +509,9 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # ---- 工具链(F008/F014/F015 真装配):fs.* 4 工具 + 四关执行器 + guard + 审批
     from pyharness.core.tools_registry import ToolRegistry
     from pyharness.core.tools_executor import ToolExecutor
-    from pyharness.core.tools_guard import from_config as guard_from_config
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core import tool_fs
+    from pyharness.governance import GovernanceContext
 
     tool_reg = ToolRegistry()
     tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
@@ -480,10 +527,11 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # approval_channel=True:engine 装配面视同交互通道在位(与修复前 None 的
     # "视同有通道"语义等价);无通道场景仍由 approval 层 APR-501 兜底拒绝,
     # 故本项不改变 headless 行为。
-    guard = guard_from_config(
-        cfg, session=log_, bus=bus,
-        validator=tool_reg.validate_args,
-        approval_channel=True)
+    # 注意:不得用局部名 `policy` —— 上游已有 `policy = ScopePolicy()`(scope 的策略面),
+    # 遮蔽它会让下面的 danger_marks/_apply_preset 写到 PolicyEngine 上而 scope 失效
+    # (S2-3.2 实测:fs.delete_file 变可见)。故用 gov_policy。
+    gov_policy, guard = _build_governance(cfg, session=log_, bus=bus,
+                                          tool_reg=tool_reg)
     approval = ApprovalProvider(session=log_, bus=bus, config=cfg,
                                 channel="desktop")   # 审批请求入 pending,桌面轮询
 
@@ -596,6 +644,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         session=log_, bus=bus, registry=registry,
         scope=scope, llm=llm_client, tools=tools,
         guard=guard, approval=approval,
+        governance=GovernanceContext(policy=gov_policy),
         counters=counters, sysprompt=sysprompt, compactor=compactor,
         goals=goals, todos=todos, ask=ask, skills=skills,
         plugins=plg_mgr, plugin_state=plg_state, tool_registry=tool_reg,
@@ -851,7 +900,8 @@ async def assemble_real_engine(cfg: Any, *, sid: str,
         agent=None, task_runner=runner,
         make_runner=lambda: make_runner(spine),
         storage=spine.storage,     # 与 spine 同对象:spill 激活后立即可见
-        engine_spine=spine, task_queue=queue, budget=spine.budget)
+        engine_spine=spine, task_queue=queue, budget=spine.budget,
+        governance=spine.governance)
     ctx.search_backend = spine.search_backend
     await activate_orchestration(spine, task_queue=queue)
     return ctx
@@ -888,6 +938,7 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
     ctx.scope = spine.scope
     ctx.tools = spine.tools
     ctx.guard = spine.guard
+    ctx.governance = getattr(spine, "governance", None)   # 治理层单实例(S2-3)
     ctx.budget = spine.budget                      # F032 只读预算门面(仪表盘)
     ctx.search_backend = getattr(spine, "search_backend", None)
     ctx.approval = spine.approval

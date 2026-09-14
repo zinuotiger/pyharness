@@ -200,11 +200,17 @@ class Decision:
     ts: str = ""
     approval_ref: Optional[int] = None
     receipt_id: Optional[str] = None
+    # S3-2 对 S3-1 Decision Contract 的**向后兼容扩展**(可选字段,默认 None):
+    # 本字段**不是** S3-1 原有字段。同一次 call_id 可产生多个 Decision(如审批
+    # 重入 D001→D002),``supersedes`` 指向前一个 Decision 的 ``decision_id``,
+    # 表达"后一决策对前一决策的替代/继承"关系;无前序时保持 None。不设 attempt。
+    supersedes: Optional[str] = None
 
     def _fields(self) -> tuple:
         return (self.decision_id, self.verdict, self.tool, self.policy_refs,
                 self.guard_ids, self.policy_fingerprint, self.inputs_digest,
-                self.principal, self.ts, self.approval_ref, self.receipt_id)
+                self.principal, self.ts, self.approval_ref, self.receipt_id,
+                self.supersedes)
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Decision):
@@ -266,7 +272,21 @@ class DecisionEngine:
       3. **无通道即拒**:verdict=APPROVAL 但无可用审批通道 → REJECT(APR-501 语义);
       4. **批准结果**:``approval_verdict`` 为 ``denied`` / ``timeout`` 时
          APPROVAL → REJECT(``granted`` 保持 APPROVAL,由执行侧重入校验);
-      5. 装配 Decision(id/ts 经注入的工厂与时钟产生)。
+      5. 装配 Decision(id/ts/supersedes 经注入的工厂与时钟产生)。
+
+    **决策语义所有权(S3-2-1 R1 裁定,强制)**:下列原始条件由**既有所有者**
+    负责,**DecisionEngine 不得重复计算**:
+
+    | 条件 | 唯一所有者 |
+    |---|---|
+    | critical → reject | `GuardChain`(g-danger 规则 + `_evaluate_full` 兜底闸) |
+    | high + 无通道 → reject | `approval.py` APR-501 → `ToolExecutor._approval_round` |
+    | denied / timeout → 不执行 | `ToolExecutor._approval_round` |
+
+    因此 **`authorize()` 的生产路径不得传 `approval_available` /
+    `approval_verdict`**——二者保留在本签名中只为稳定 S3-1 Decision Contract 与
+    兼容面,其分支在生产路径中**不触发**。若未来要让本层重新拥有这些语义,须经
+    新的架构裁定。
     """
 
     def __init__(self, *, id_factory: Optional[Callable[[], str]] = None,
@@ -315,6 +335,7 @@ class DecisionEngine:
             principal=principal,
             ts=self._clock(),
             approval_ref=approval_ref,
+            supersedes=(prior.decision_id if prior is not None else None),
         )
 
 

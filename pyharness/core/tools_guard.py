@@ -669,8 +669,13 @@ class GuardChain:
         self._tasks: set[asyncio.Task] = set()    # fire-and-forget 任务登记
 
     # ------------------------------------------------------ 单调链求值主函数
-    async def evaluate(self, call: Any, scope: Any) -> Decision:
-        """单调求值(F014 主函数):scope 前置 → 按注册序 waterfall → 终局决策。
+    async def _evaluate_full(self, call: Any, scope: Any
+                             ) -> tuple[Decision, tuple[str, ...], tuple[str, ...]]:
+        """**唯一** waterfall 求值实现(S3-2-1;B1)。
+
+        返回 ``(verdict, guard_ids, policy_refs)``——三者来自**同一次**实际求值:
+        verdict 与命中面在同一循环迭代内产生并同时返回,**不重跑、不缓存、不读
+        历史事件**(S3-2-1 明令)。
 
         规则(spec 伪代码权威):
         - scope 前置:can_use 不可见 → 终局 REJECT(guard_id=scope-hidden,
@@ -683,7 +688,6 @@ class GuardChain:
         - 每次求值恰好一条 guard.evaluated(INV-04:执行前必有;缺 = 非法执行);
           reject 再强同步 guard.rejected(sync=True,崩溃不丢拦截事实,INV-05);
         - 全链 allow 才返回 ALLOW——guard 无放行权,执行权归 executor 关3。
-        返回 Decision(StrEnum;executor 伪码 `d == "reject"` 直接可比较)。
         异常:append 强同步失败按 PERS-202/EVT-1xx 语义上抛(拒绝事实必须落地,
         调用方 fail-closed:缺 evaluated/rejected 不进入 Provider)。
         """
@@ -694,7 +698,7 @@ class GuardChain:
         if not can_use(call.name):                # scope 前置:不可见 → 终局
             await self._audit(call, Decision.REJECT, "scope-hidden", "GRD-401")
             await self._append_rejected(call, "scope-hidden", "GRD-401")
-            return Decision.REJECT
+            return Decision.REJECT, ("scope-hidden",), ("GRD-401",)
         enabled = self.enabled_guard_ids()
         for g in self.chain:                      # 按注册序 waterfall
             if g.id in self.disabled:
@@ -716,9 +720,32 @@ class GuardChain:
                 await self._audit(call, d, g.id, policy)
                 if d is Decision.REJECT:          # 强同步:拦了且没执行(INV-05)
                     await self._append_rejected(call, g.id, policy)
-                return d                          # reject/approval 都到此为止
+                return d, (g.id,), ((policy,) if policy else ())  # reject/approval 到此为止
         await self._audit(call, Decision.ALLOW, enabled, None)
-        return Decision.ALLOW                     # 全链 allow → executor 关3
+        return Decision.ALLOW, tuple(enabled), ()  # 全链 allow → executor 关3
+
+    async def evaluate(self, call: Any, scope: Any) -> Decision:
+        """兼容 wrapper(签名/返回类型/求值语义逐行不变)。
+
+        返回 ``Decision``(StrEnum;executor 伪码 ``d == "reject"`` 直接可比较)。
+        实现是 ``_evaluate_full`` 的**视图**,不是第二套求值。
+        """
+        return (await self._evaluate_full(call, scope))[0]
+
+    async def evaluate_detailed(self, call: Any, scope: Any) -> Any:
+        """rich result API(S3-2-1;B1):同一次求值的结构化投影。
+
+        返回 ``governance.decision.EvaluationResult``(verdict + guard_ids +
+        policy_refs),供治理层装配 ``Decision``。**不重跑求值、不缓存上次结果、
+        不读历史事件**——直接复用 ``_evaluate_full`` 的返回值。
+
+        ``EvaluationResult`` 经**函数内**延迟 import 取得,避免给 ``core`` 增加
+        模块级治理依赖(import 图不变)。
+        """
+        from pyharness.governance.decision import EvaluationResult
+        d, guard_ids, policy_refs = await self._evaluate_full(call, scope)
+        return EvaluationResult(verdict=str(d), guard_ids=tuple(guard_ids),
+                                policy_refs=tuple(policy_refs))
 
     # ------------------------------------------------------------ 插件挂载
     def register_plugin_guard(self, guard: Guard) -> None:

@@ -511,7 +511,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core.tools_executor import ToolExecutor
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core import tool_fs
-    from pyharness.governance import GovernanceContext
+    from pyharness.governance import DecisionEngine, GovernanceContext
 
     tool_reg = ToolRegistry()
     tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
@@ -644,7 +644,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         session=log_, bus=bus, registry=registry,
         scope=scope, llm=llm_client, tools=tools,
         guard=guard, approval=approval,
-        governance=GovernanceContext(policy=gov_policy),
+        governance=GovernanceContext(policy=gov_policy,
+                                     decisions=DecisionEngine()),
         counters=counters, sysprompt=sysprompt, compactor=compactor,
         goals=goals, todos=todos, ask=ask, skills=skills,
         plugins=plg_mgr, plugin_state=plg_state, tool_registry=tool_reg,

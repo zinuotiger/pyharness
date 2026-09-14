@@ -19,7 +19,8 @@
 from __future__ import annotations
 
 from pyharness.governance.context import GovernanceContext
-from pyharness.governance.decision import Decision, Principal, Verdict
+from pyharness.governance.decision import (Decision, DecisionEngine, Principal,
+                                           Verdict)
 from pyharness.governance.policy import (POLICY_OPS, EVENT_POLICY_UPDATED,
                                          Policy, PolicyEngine, PolicyRegistry,
                                          PolicyRule, compute_fingerprint)
@@ -28,6 +29,6 @@ __all__ = [
     "GovernanceContext",
     "Policy", "PolicyEngine", "PolicyRegistry", "PolicyRule",
     "compute_fingerprint", "POLICY_OPS", "EVENT_POLICY_UPDATED",
-    # S3-1:决策数据契约(仅此三项;Receipt/Evidence/Audit 不导出)
-    "Decision", "Verdict", "Principal",
+    # S3-1/S3-2:决策数据契约与决策引擎(Receipt/Evidence/Audit 不导出)
+    "Decision", "Verdict", "Principal", "DecisionEngine",
 ]

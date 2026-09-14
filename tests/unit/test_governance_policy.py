@@ -308,11 +308,19 @@ def test_t9_engine_from_descriptors_and_injection():
 
 
 def test_t9_governance_context_m2_shape():
-    """GovernanceContext M2 形状:只挂 policy;其余为 None 占位(缺失可见)。"""
+    """GovernanceContext 形状:policy 在岗;receipts/evidence/audit 为 None 占位。
+
+    S3-2-1(B4):``authorize()`` 已接线,取代 S2-1 Δ-5 的"M2 不声明"阶段断言;
+    治理层**无执行/放行 API**(INV-G5)的约束以更严断言继续钉死。
+    """
     eng = PolicyEngine.from_config(_cfg(), rules=tools_guard.describe_rules())
     g = GovernanceContext(policy=eng)
     assert g.policy is eng
     assert g.decisions is None and g.receipts is None
     assert g.evidence is None and g.audit is None
-    assert not hasattr(g, "authorize")           # Δ-5:M2 不声明(偏离登记)
+    # authorize 现为唯一治理入口(S3-2-1);执行/放行面仍必须缺失
+    assert callable(getattr(g, "authorize", None))
+    for banned in ("execute", "bypass", "force_allow", "override", "allow",
+                   "run", "emit"):
+        assert not hasattr(g, banned), banned
     assert g.policy_fingerprint() == eng.fingerprint()

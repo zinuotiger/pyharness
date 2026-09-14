@@ -468,13 +468,19 @@ class ToolExecutor:
         # Decision + decision.issued。scope 前置的运行时**唯一所有者**是
         # GuardChain._evaluate_full(职责上提,非重复计算);executor 不再自算
         # scope.can_use,也不再直呼 ctx.guard.evaluate。
-        d = await ctx.governance.authorize(call, ctx)
+        # S4-P1-1:授权↔执行绑定摘要(既有 `_approval_binding` 语义,**复用不重写**)
+        # 注入为 `Decision.inputs_digest`。治理层不得 import 本模块(ADR-018:308),
+        # 故由执行侧计算后经 `authorize(inputs_digest=...)` 传入——与 `chain_factory`
+        # 注入先例同型(装配/执行侧适配,治理层只持有)。全流程只算一次。
+        digest = _approval_binding(call, args)
+        d = await ctx.governance.authorize(call, ctx, inputs_digest=digest)
         if d == "reject":                               # 终局拒(含 scope-hidden)
             self._rejected.add(call.call_id)            # 广义防重放(偏离 11)
             return ExecResult(ok=False, summary="guard 拒绝,未执行")
         # ---- 关2.5 审批(F015;danger≥high 由链出 approval 决策)
         if d == "approval":
-            round_ = await self._approval_round(ctx, call, args, prior=d)
+            round_ = await self._approval_round(ctx, call, args, prior=d,
+                                                binding=digest)
             if not round_.executed:
                 return ExecResult(ok=False, summary=round_.message)  # 非放行 → 不执行
         # ---- 关3 Provider 执行(线程池 + 超时掐断 TLB-805)
@@ -561,7 +567,8 @@ class ToolExecutor:
                             "拒绝执行(S3-2-2)")
 
     async def _approval_round(self, ctx: Any, call: ToolCall,
-                              args: dict, *, prior: Any) -> ApprovalRoundResult:
+                              args: dict, *, prior: Any,
+                              binding: str) -> ApprovalRoundResult:
         """关2.5 审批编排(request → granted 重入治理授权 → 放行/拒绝裁决)。
 
         返回 ``ApprovalRoundResult``(S3-2-2:取代混合字符串契约)。语义:
@@ -583,7 +590,8 @@ class ToolExecutor:
             raise_code("CYC-999", module="tools_executor",
                        hint="ctx.approval 未接线:guard 判 need_approval 但审批"
                             "服务缺失;拒绝执行(fail-closed)")
-        binding = _approval_binding(call, args)         # 绑定指纹:授权↔执行一致性
+        # binding:由 execute() 传入的授权↔执行绑定指纹(与 Decision.inputs_digest
+        # 同源,全流程只算一次;不再在本函数重复计算)。
         try:
             verdict = await ap.request(call, summarize(args), ctx, binding=binding)
         except PyHError as e:
@@ -598,7 +606,9 @@ class ToolExecutor:
                                        executed=False,
                                        message=f"审批{verdict},未执行")
         # granted ≠ 放行:重入治理授权(第二次求值 → D2;supersedes=D1)
-        d2 = await ctx.governance.authorize(call, ctx, prior=prior)
+        # inputs_digest 与首次一致(同 call/同 args → 同绑定指纹)。
+        d2 = await ctx.governance.authorize(call, ctx, prior=prior,
+                                            inputs_digest=binding)
         if d2 == "reject":                              # 批准时策略收紧 → 作废
             self._rejected.add(call.call_id)
             return ApprovalRoundResult(decision=d2, approved=True, executed=False,

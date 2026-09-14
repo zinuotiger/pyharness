@@ -1032,3 +1032,99 @@ class TestGovernanceWiring:
         assert dec[0]["payload"]["supersedes"] is None
         assert len(sess.of("guard.evaluated")) == 1       # 未重入求值
         assert sess.of("tool.result") == []
+
+
+# ================================ S4-P1-1:inputs_digest 接入 decision.issued
+class TestInputsDigestBinding:
+    """S4-P1-1:``Decision.inputs_digest`` 复用既有 ``_approval_binding`` 语义
+    (授权↔执行绑定),由执行侧计算并经 ``authorize(inputs_digest=...)`` 注入。
+
+    铁律:测**真实运行路径**(真 GuardChain / 真 approval / 真事件),不 mock 内部。
+    """
+
+    @staticmethod
+    def _reader(sess, prov, tmp_path):
+        reg = make_registry(mk_defn(), providers={"fs.read_file": prov})
+        return reg, make_ctx(sess, FakeScope(str(tmp_path)),
+                             chain=GuardChain(session=sess))
+
+    @staticmethod
+    def _writer(sess, prov, tmp_path, *, danger="high"):
+        defn = mk_defn(name="fs.write_file", danger=danger, schema=WRITE_SCHEMA)
+        reg = make_registry(defn, providers={defn.name: prov})
+        return reg, make_ctx(sess, FakeScope(str(tmp_path)),
+                             chain=GuardChain(session=sess))
+
+    async def test_allow_path_digest_not_empty(self, tmp_path):
+        sess, prov = AsyncSess(), Recorder({"content": "hi"})
+        reg, ctx = self._reader(sess, prov, tmp_path)
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="dg1"), ctx)
+        assert r.ok
+        p = sess.of("decision.issued")[0]["payload"]
+        assert p["verdict"] == "allow"
+        assert p["inputs_digest"] != ""                   # 不再恒为空
+
+    async def test_reject_path_digest_not_empty(self, tmp_path):
+        sess, prov = AsyncSess(), Recorder()
+        defn = mk_defn(name="fs.delete", danger="critical", schema=WRITE_SCHEMA)
+        reg = make_registry(defn, providers={defn.name: prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess))
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.delete", raw_args={"path": "x"}, call_id="dg2"), ctx)
+        assert not r.ok
+        p = sess.of("decision.issued")[0]["payload"]
+        assert p["verdict"] == "reject" and p["inputs_digest"] != ""
+
+    async def test_digest_deterministic_and_input_sensitive(self, tmp_path):
+        """同 inputs → 同 digest;不同 inputs → 不同 digest。"""
+        async def digest_of(args, tag):
+            sess, prov = AsyncSess(), Recorder({"content": "hi"})
+            reg, ctx = self._reader(sess, prov, tmp_path)
+            await ToolExecutor(reg).execute(
+                ToolCall(name="fs.read_file", raw_args=args, call_id=tag), ctx)
+            return sess.of("decision.issued")[0]["payload"]["inputs_digest"]
+        a1 = await digest_of({"path": "a.txt"}, "k1")
+        a2 = await digest_of({"path": "a.txt"}, "k2")
+        b = await digest_of({"path": "b.txt"}, "k3")
+        assert a1 != "" and a1 == a2 and b != a1
+
+    async def test_digest_equals_approval_recorded_binding(self, tmp_path):
+        """**批准 A 执行 B 防线**:decision.issued 的 digest 与审批侧为该 call_id
+        记录的绑定**同源** ⇒ 参数被替换时 digest 不一致即可识别。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        reg, ctx = self._writer(sess, prov, tmp_path, danger="high")
+        ap = ApprovalProvider(channel="cli")
+        ctx.approval = ap
+        call = ToolCall(name="fs.write_file",
+                        raw_args={"path": "sub/x.txt", "content": "n"},
+                        call_id="dAB")
+        task = asyncio.create_task(ToolExecutor(reg).execute(call, ctx))
+        await wait_until(lambda: sess.of("approval.requested"))
+        ap.approve(sess.of("approval.requested")[-1]["seq"], by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok
+        recorded = ap.grant_binding("dAB")
+        dec = sess.of("decision.issued")
+        assert len(dec) == 2                              # D1 + D2
+        d1, d2 = dec[0]["payload"], dec[1]["payload"]
+        assert d1["inputs_digest"] == recorded            # 与审批绑定同源
+        assert d2["inputs_digest"] == recorded            # D2 与 D1 同源(同 call/args)
+        assert d1["verdict"] == "approval"
+        assert d2["supersedes"] == d1["decision_id"]      # D1→D2 关系未被破坏
+
+    async def test_binding_mismatch_still_denies(self, tmp_path):
+        """既有绑定校验行为未被本次改动破坏(不一致 → GRD-403,未执行)。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        reg, ctx = self._writer(sess, prov, tmp_path, danger="high")
+        ap = FakeApproval(["granted"])
+        ap.grant_binding = lambda _cid: "wrong-binding"
+        ctx.approval = ap
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "a.txt", "content": "x"},
+                     call_id="dBAD"), ctx)
+        assert not r.ok and "GRD-403" in r.summary
+        assert prov.calls == 0

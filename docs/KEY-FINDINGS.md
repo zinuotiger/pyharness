@@ -162,8 +162,8 @@
 | **影响** | ⚠️ **不变量**:`INV-02` 字面与意图均被违反。⚠️ **控制**:该调用**不经过**轮数/取消/预算前置闸(预算超支仅**下一轮**可见)。✅ **未受损**:审计留痕(`llm.request`/`llm.usage`/`llm.response` 齐全)、单端点路径、超时闸(F017)、降级链、无工具副作用(`tools=None`)。**非安全漏洞**。 |
 | **附带规格偏离(F042 共 5 项)** | ① 出口 `mini`→`chat`;② 输入截断 `first[:200]`→`first[:500]`(`auto_title.py:22`);③ 标题上限 `≤24`→`TITLE_MAX=64`(`:16,:42`,而模块 docstring `:3` 仍写 ≤24);④ 失败/空降级"**前 20 字符**"→`return None`(`:40,:44`);⑤ PRD 要求的 `test_f042_title.py`(`PRD:1878`)不存在。(另 `ctx.session.has_title` 不存在,实现改用日志派生判断 —— **等价且更合 INV-01**,不计偏离。) |
 | **裁定** | **Option A:违反成立**;违规点 = **出口选择**(+ 无闸,已划归 KF-B)。**不修改 INV-02 定义、不扩大例外范围**。 |
-| **处置** | **不修**(S6-2 纪律 14)。修复设计见 `S6-2_COVERAGE_MATRIX.md` §11;需**人工授权**后另行实施。 |
-| **状态** | `OPEN` |
+| **处置** | **已修复**(commit **`50c19ca`** `fix: restore F042 mini LLM endpoint`):新增 `LLMClient.mini()`(`pyharness/core/llm.py:974-985`)· `auto_title` 改走 `mini`(`pyharness/core/auto_title.py:36`)· `docs/specs/llm.py.md` 补最小接口说明。**修复范围仅"出口选择"**。判定见 `S6-2a-P0-F_FINAL_REVIEW.md`。 |
+| **状态** | `CLOSED`(2026-09-15, commit `50c19ca`) —— **仅限本条的"出口选择"违约**;F042 其余 6 项(见上行)与 **KF-B** 仍**各自独立登记**,不因本条关闭而消解 |
 | **关联** | `docs/INVARIANT_REGISTRY.md` INV-02 · `S6-2_COVERAGE_MATRIX.md` §7 / §10 / §11 |
 
 ## A.2 KF-B(P1)— 系统工具类 LLM 出口不经运行时三闸(**独立于 INV-02**)

@@ -351,3 +351,137 @@ def test_inv01_write_scan_detects_rogue_writer(tmp_path):
     sites = _write_sites(pkg)
     assert "core/rogue.py" in sites, "扫描器漏检第二条持久化写路径(假阴性)"
     assert "core/reader.py" not in sites, "只读打开被误判为写站点(假阳性;防简单 grep 误报)"
+
+
+# ================================================================ INV-03 · rebuild 与缓存一致
+# 本段只补 S6-2b-2 审计确认的 3 条 partial 性质(session 侧),**不重复**以下已充分覆盖者:
+#   二次 rebuild 无重复      -> tests/unit/test_session.py::test_rebuild_from_log_invariant_inv03
+#                              tests/unit/test_session_query.py::test_rebuild_then_incremental_no_dup
+#   全量 <-> 增量一致        -> tests/unit/test_session.py::test_events_after_incremental_gwt_s3_04
+#                              tests/unit/test_session_query.py::test_rebuild_full_matches_incremental
+#   编辑重放(query 侧)      -> test_session_query.py::test_rebuild_full_matches_incremental
+#   cache invalidation       -> tests/unit/test_session.py::test_rebuild_derived_cache_invalidation_on_append
+#   重启恢复 == 崩溃前      -> tests/unit/test_session.py::test_open_session_recovers_state
+
+
+def _wired_log(sid: str, tmp_path):
+    """真实装配:`SessionLog` + `EventBus` → **真实 `SessionStore`(文件真源)**。
+
+    与生产同一条落盘路径(镜像 `engine._record_to` 的订阅语义);词表全量订阅,
+    故 `store.replay()` 即真源读取入口 —— rebuild 走真实 replay 路径。
+    """
+    from pyharness.bus import EventBus
+    from pyharness.core.session import SessionLog
+    from pyharness.events import EVENT_TYPES
+    from pyharness.persistence import open_store
+
+    store = open_store(sid, dir=tmp_path)
+    bus = EventBus()
+    rec = _record_to_store(store)
+    for t in EVENT_TYPES:
+        bus.subscribe(t, rec)
+    return SessionLog(sid=sid, persistence=store, bus=bus), store
+
+
+async def _seed_rebuild_fixture(log) -> None:
+    """固定语料(多类型事件 + 一条编辑)——**不含时间/随机量**,供确定性用例复用。"""
+    await log.append("session.created", {"title": "", "model": "m"}, actor="system")
+    await log.append("user.message", {"content": "把 D:/杂乱 按主题归类"}, actor="user")
+    await log.append("user.message_edited",
+                     {"target_seq": 2, "new_content": "把 D:/work 归档"}, actor="user")
+    await log.append("llm.response", {"model": "m", "finish_reason": "stop",
+                                      "content": "好的"}, actor="llm")
+    await log.append("tool.result", {"name": "list_dir", "call_id": "call_1", "ok": True,
+                                     "summary": "42 项:3 文件夹,39 文件",
+                                     "truncated": False}, actor="tool")
+    await log.append("guard.rejected", {"tool": "shell_exec", "guard_id": "g-danger-cmd",
+                                        "reason": "rm -rf 高危"}, actor="tool")
+
+
+# ---------------------------------------------------------------- T-1(INV-03 · 编辑重放 · session 侧)
+async def test_inv03_rebuild_preserves_edit_override(tmp_path):
+    """INV-03(T-1):含 `user.message_edited` 的日志经 **session 侧** `rebuild_from_log()`
+    后,`derive_messages()` 仍取**编辑后的新版**内容,且日志**原文两行都在**。
+
+    子性质:**编辑重放(edited 覆盖目标行)** 在**会话内存缓存**这一侧成立 ——
+    此前只有 query 投影侧(`test_rebuild_full_matches_incremental`)有证据。
+    前置:`store.flush()` 把非强同步事件落盘,保证 rebuild 的 replay 输入完整。
+    """
+    log, store = _wired_log("s-inv03-edit", tmp_path)
+    await log.append("session.created", {"title": "", "model": "m"}, actor="system")
+    await log.append("user.message", {"content": "把 D:/杂乱 按主题归类"}, actor="user")
+    await log.append("user.message_edited",
+                     {"target_seq": 2, "new_content": "把 D:/work 归档"}, actor="user")
+    await store.flush()                     # 前置:replay 输入完整
+
+    before_msgs = log.derive_messages()
+    assert before_msgs == [{"role": "user", "content": "把 D:/work 归档"}], \
+        "前置条件:rebuild 前派生应已取新版(否则本用例无鉴别力)"
+
+    log.rebuild_from_log()                  # ★ session 侧 rebuild(真实 replay 路径)
+
+    assert log.derive_messages() == before_msgs, \
+        "INV-03 违约:rebuild 后未取编辑后的新版(edited 覆盖丢失)"
+    evs = list(log.events_after())
+    assert [e.type for e in evs] == ["session.created", "user.message",
+                                     "user.message_edited"]
+    assert evs[1].payload["content"] == "把 D:/杂乱 按主题归类", \
+        "INV-03 违约:rebuild 改写了日志原文(取新版须留旧痕)"
+    assert evs[2].payload["new_content"] == "把 D:/work 归档"
+    store.close()
+
+
+# ---------------------------------------------------------------- T-2(INV-03 · 真源零变化)
+async def test_inv03_rebuild_does_not_touch_truth_source(tmp_path):
+    """INV-03(T-2):`rebuild_from_log()` **只读**真源 —— 事件日志 bytes / sha256 /
+    事件序列在 rebuild 前后**完全一致**(可变更的只有状态派生)。
+
+    子性质:**rebuild 无错误副作用**(rebuild 是纯派生,绝不回写事件日志)。
+    """
+    log, store = _wired_log("s-inv03-notouch", tmp_path)
+    await _seed_rebuild_fixture(log)
+    await store.flush()
+
+    before_bytes = store.path.read_bytes()
+    before_sha = hashlib.sha256(before_bytes).hexdigest()
+    before_seqs = [(e.seq, e.type) for e in store.replay()]
+    assert before_bytes and before_seqs, "前置条件:真源应已落盘且非空"
+
+    log.rebuild_from_log()
+
+    assert store.path.read_bytes() == before_bytes, \
+        "INV-03 违约:rebuild 改动了真源字节(事件日志必须零变化)"
+    assert hashlib.sha256(store.path.read_bytes()).hexdigest() == before_sha, \
+        "INV-03 违约:真源 sha256 变化"
+    assert [(e.seq, e.type) for e in store.replay()] == before_seqs, \
+        "INV-03 违约:rebuild 后真源事件序列变化"
+    store.close()
+
+
+# ---------------------------------------------------------------- T-3(INV-03 · 确定性)
+async def test_inv03_rebuild_is_deterministic(tmp_path):
+    """INV-03(T-3):**同一日志、输入不变**,连续 `rebuild_from_log()` 多次 ⇒
+    结果(A/B/C 三次快照)**完全一致**。
+
+    子性质:**rebuild 的确定性**。快照只取**稳定量**(事件 seq/type 序列 · 派生消息 ·
+    `stats()` 字典),**不含时间 / 随机 ID / 调用次数**等不稳定因素。
+    """
+    log, store = _wired_log("s-inv03-det", tmp_path)
+    await _seed_rebuild_fixture(log)
+    await store.flush()
+
+    def snapshot():
+        return ([(e.seq, e.type) for e in log.events_after()],
+                log.derive_messages(),
+                log.stats())
+
+    log.rebuild_from_log()
+    a = snapshot()
+    log.rebuild_from_log()                  # 输入未变
+    b = snapshot()
+    log.rebuild_from_log()                  # 第三次:加强验证
+    c = snapshot()
+
+    assert a == b, "INV-03 违约:连续两次 rebuild 结果不一致(非确定性)"
+    assert b == c, "INV-03 违约:第三次 rebuild 结果不一致(非确定性)"
+    store.close()

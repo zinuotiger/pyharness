@@ -827,3 +827,247 @@ async def test_inv04_tool_error_two_classes(tmp_path):
         f"② guard.evaluated 必须先于 tool.error -> {types_}"
     assert (ge[0]["trace"] or {}).get("call_id") == te[0]["payload"]["call_id"] == "c-3"
     assert prov.calls == 1, "② 已进入执行路径(Provider 恰 1 次)"
+
+
+# ================================================================ INV-05 · 拒绝后零副作用
+# 语义来源:docs/INVARIANT_REGISTRY.md(Canonical INV-05,**2026-09-15 按 F-2 裁定调整**):
+#   任意 reject 后 **Provider 调用计数 = 0** 且**无该 call_id 的 tool.result**;
+#   **拒绝事实须强同步可证,按来源分列** —— guard 链来源(scope/guard/critical)⇒
+#   `guard.rejected`(sync=True);审批来源(denied/timeout)⇒ `approval.denied`/
+#   `approval.timeout`(sync=True)。**不引入统一的 rejection event**。落盘失败即 fail-closed 上抛。
+#
+# 本段只补审计确认的缺口(**G-1 无编号化用例 · G-2 无单一锚点**),**不重复**已 covered 的
+# C1/C2/C4/C5 既有断言:
+#   tests/unit/test_tools_guard.py::test_reject_event_pair_order_and_sync   (guard 侧 sync)
+#   tests/unit/test_tools_guard.py::test_append_failure_fail_closed         (C4 guard 侧)
+#   tests/unit/test_tools_executor.py::test_guard_reject_critical_zero_side_effects
+#   tests/unit/test_tools_executor.py::test_scope_hidden_terminal_reject
+#   tests/unit/test_tools_executor.py::test_verdict_not_granted_no_execute  (denied/timeout 替身)
+#   tests/unit/test_tool_fs.py::test_executor_critical_delete_denied_zero_side_effect
+#   tests/unit/test_approval.py::test_deny_flow / ::test_timeout_ttl_expiry (真实 Provider 强同步)
+
+_INV05_WRITE_SCHEMA = {"type": "object",
+                       "properties": {"path": {"type": "string"},
+                                      "content": {"type": "string"}},
+                       "required": ["path"]}
+
+
+class _FailSess(_Sess):
+    """append 对指定事件类型抛错(模拟强同步落盘失败,C4 端到端用)。"""
+
+    def __init__(self, fail_on: str) -> None:
+        super().__init__()
+        self._fail_on = fail_on
+
+    async def append(self, type_, payload, *, actor, **kw):
+        if type_ == self._fail_on:
+            raise RuntimeError(f"injected flush failure: {type_}")
+        return await super().append(type_, payload, actor=actor, **kw)
+
+
+class _FakeApproval:
+    """审批裁决替身(逐次脚本);**不发射** approval.* 事件 —— 真实 Provider 的强同步由 T-4 验证。"""
+
+    def __init__(self, verdicts: list) -> None:
+        self.verdicts = list(verdicts)
+        self.requests: list = []
+
+    async def request(self, call, args_summary, ctx, *, ttl_ms=None, binding=None):
+        self.requests.append((call.name, args_summary, ctx))
+        return self.verdicts.pop(0) if self.verdicts else "denied"
+
+    def approval_ref_of(self, call_id):
+        return None
+
+
+async def _wait(pred, timeout: float = 4.0) -> None:
+    """轮询等条件(审批请求已落 / 裁决已产生);超时即失败。"""
+    import asyncio as _a
+    loop = _a.get_running_loop()
+    deadline = loop.time() + timeout
+    while not pred():
+        if loop.time() > deadline:
+            raise AssertionError("_wait 超时:条件未满足")
+        await _a.sleep(0.005)
+
+
+def _inv05_scope(root, allowed=None):
+    """scope 替身;allowed=[] ⇒ can_use 恒 False(scope-hidden 场景)。"""
+    allow = None if allowed is None else set(allowed)
+    return types.SimpleNamespace(
+        policy=types.SimpleNamespace(workspace_root=str(root), allowed_domains=set(),
+                                     sandbox_level="basic"),
+        can_use=(lambda name: True) if allow is None else (lambda name: name in allow))
+
+
+def _inv05_registry(prov, *, name="fs.read_file", danger="none"):
+    from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
+    reg = ToolRegistry()
+    schema = _INV05_WRITE_SCHEMA if name == "fs.write_file" else _READ_SCHEMA_INV04
+    reg.register_tool(ToolDefinition(name=name, description="inv05 工具",
+                                     schema=schema, danger=danger, owner="builtin"))
+    reg.bind_provider(name, prov)
+    return reg
+
+
+async def _inv05_reject(case: str, tmp_path):
+    """按 case 装备并执行**一次必然被拒**的调用;返回 (sess, prov, result)。
+
+    case ∈ {scope-hidden, guard, critical, approval-denied, approval-timeout}
+    """
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    sess, prov = _Sess(), _Prov()
+    if case == "scope-hidden":
+        name, raw, danger, allowed = "fs.read_file", {"path": "a.txt"}, "none", []
+        verdict = None
+    elif case == "guard":                                  # 越出 workspace ⇒ g-fs-path
+        name, raw, danger, allowed = ("fs.read_file",
+                                      {"path": "C:/Windows/win.ini"}, "none", None)
+        verdict = None
+    elif case == "critical":
+        name, raw, danger, allowed = "fs.delete_file", {"path": "a.txt"}, "critical", None
+        verdict = None
+    else:                                                  # 审批来源(denied / timeout)
+        name, raw, danger, allowed = (
+            "fs.write_file", {"path": "a.txt", "content": "x"}, "high", None)
+        verdict = case.split("-", 1)[1]
+    chain = GuardChain(session=sess)
+    approval = _FakeApproval([verdict]) if verdict else None
+    ctx = types.SimpleNamespace(session=sess, scope=_inv05_scope(tmp_path, allowed),
+                                guard=chain, governance=_inv04_gov(chain),
+                                approval=approval, storage=None, channel="cli",
+                                headless=False, session_id=sess.sid)
+    r = await ToolExecutor(_inv05_registry(prov, name=name, danger=danger)).execute(
+        _inv04_call(name=name, raw=raw, call_id="c-inv05"), ctx)
+    return sess, prov, r
+
+
+# ---------------------------------------------------------------- T-1(INV-05 · C1·C2·C5 + 编号化锚点)
+@pytest.mark.parametrize("case", ["scope-hidden", "guard", "critical",
+                                  "approval-denied", "approval-timeout"])
+async def test_inv05_reject_sources_zero_side_effect_and_strong_sync(tmp_path, case):
+    """INV-05(T-1):**五类拒绝来源**逐个验证 —— Provider 零调用 · 无 `tool.result` ·
+    拒绝事实存在 · 强同步可证。
+
+    强同步锚点**按 F-2 裁定的来源分列**:
+      · guard 链来源(scope-hidden / guard / critical)⇒ `guard.rejected` 恰一条且 `sync is True`;
+      · 审批来源(denied / timeout)⇒ **不落 `guard.rejected`**;其强同步留痕为
+        `approval.*`(本用例用替身故不发射)⇒ 此处以 `decision.issued`(强同步)为锚,
+        **`approval.*` 的强同步由 T-4 用真实 `ApprovalProvider` 证明**。
+    """
+    sess, prov, r = await _inv05_reject(case, tmp_path)
+
+    # ① Provider 零调用
+    assert prov.calls == 0, f"{case}:拒绝后 Provider 不得被调用"
+    # ② 无该 call_id 的 tool.result
+    assert not sess.of("tool.result"), f"{case}:拒绝后不得产生 tool.result"
+    assert not r.ok, f"{case}:结果应为失败"
+    # ③ 拒绝事实存在
+    ge = sess.of("guard.evaluated")
+    assert len(ge) == 1, f"{case}:恰一条 guard.evaluated -> {sess.types()}"
+    assert ge[0]["payload"]["decision"] in ("deny", "need_approval"), case
+    # ④ 强同步可证(按来源)
+    if case.startswith("approval"):
+        assert not sess.of("guard.rejected"), \
+            f"{case}:审批来源**不落** guard.rejected(F-2 裁定,由 approval.* 承载)"
+        dec = sess.of("decision.issued")
+        assert len(dec) == 1 and dec[0]["sync"] is True, f"{case}:治理决策应强同步"
+    else:
+        rj = sess.of("guard.rejected")
+        assert len(rj) == 1, f"{case}:guard 链来源应有恰一条 guard.rejected"
+        assert rj[0]["sync"] is True, f"{case}:guard.rejected 必须强同步(sync=True)"
+
+
+# ---------------------------------------------------------------- T-2(INV-05 · C3 guard 侧 + 对照面)
+async def test_inv05_guard_reject_strong_sync_contrast(tmp_path):
+    """INV-05(T-2):guard 链来源拒绝 —— `guard.rejected` **强同步**、`guard.evaluated`
+    **非强同步**(**对照面**,防"全部事件都强同步"式的假绿)。
+    """
+    sess, prov, _ = await _inv05_reject("guard", tmp_path)
+
+    ev, rj = sess.of("guard.evaluated"), sess.of("guard.rejected")
+    assert len(ev) == 1 and len(rj) == 1
+    assert ev[0]["sync"] is False, "evaluated 是普通异步落盘(非强同步)"
+    assert rj[0]["sync"] is True, "rejected 是拒绝事实,必须强同步"
+    assert rj[0]["payload"]["guard_id"] and rj[0]["payload"]["policy_ref"], \
+        "拒绝留痕须含 guard_id 与 policy_ref"
+    assert (rj[0]["trace"] or {}).get("call_id") == "c-inv05"
+    assert prov.calls == 0
+
+
+# ---------------------------------------------------------------- T-3(INV-05 · C4 端到端 fail-closed)
+async def test_inv05_reject_flush_failure_does_not_reach_provider(tmp_path):
+    """INV-05(T-3):`guard.rejected` **强同步落盘失败** ⇒ `execute()` **上抛**
+    (fail-closed),且 **Provider 绝不被调用**。
+
+    子性质:把 guard 侧已覆盖的 C4(`test_append_failure_fail_closed`)提升到
+    **executor 端到端** —— 确认 `authorize()` 抛错时**整条执行链不再继续**。
+    """
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    sess, prov = _FailSess("guard.rejected"), _Prov()
+    chain = GuardChain(session=sess)
+    ctx = types.SimpleNamespace(session=sess, scope=_inv05_scope(tmp_path),
+                                guard=chain, governance=_inv04_gov(chain),
+                                approval=None, storage=None, channel="cli",
+                                headless=False, session_id=sess.sid)
+    reg = _inv05_registry(prov, name="fs.read_file")
+    with pytest.raises(Exception):
+        await ToolExecutor(reg).execute(
+            _inv04_call(raw={"path": "C:/Windows/win.ini"}, call_id="c-fail"), ctx)
+
+    assert prov.calls == 0, "落盘失败后 Provider 绝不能被调用(fail-closed)"
+    assert not sess.of("tool.result")
+    assert sess.of("guard.evaluated"), "evaluated 应先于 rejected 落盘"
+
+
+# ---------------------------------------------------------------- T-4(INV-05 · 审批来源强同步 · 真实 Provider)
+@pytest.mark.parametrize("verdict", ["denied", "timeout"])
+async def test_inv05_approval_reject_real_provider_strong_sync(tmp_path, verdict):
+    """INV-05(T-4):**真实 `ApprovalProvider`** 的审批拒绝路径 —— `approval.denied` /
+    `approval.timeout` **强同步落盘**,且**不落 `guard.rejected`**(F-2 裁定的来源分列)。
+
+    与既有证据的关系:`tests/unit/test_approval.py::test_deny_flow` /
+    `::test_timeout_ttl_expiry` 已在 **approval 模块层**用真实 Provider 证明强同步;
+    本用例**只补 INV-05 的编号化锚点**(拒绝事实存在 + 零副作用),**不重复建设**。
+    """
+    import asyncio
+
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    sess, prov = _Sess(), _Prov()
+    # TTL 经 config 注入(provider 逐层 getattr 只读);timeout 路径 40ms 即触发
+    cfg = types.SimpleNamespace(
+        security=types.SimpleNamespace(approval=types.SimpleNamespace(ttl_ms=40)))
+    ap = ApprovalProvider(session=sess, bus=None, channel="cli", config=cfg)
+    chain = GuardChain(session=sess)
+    ctx = types.SimpleNamespace(session=sess, scope=_inv05_scope(tmp_path),
+                                guard=chain, governance=_inv04_gov(chain),
+                                approval=ap, storage=None, channel="cli",
+                                headless=False, session_id=sess.sid)
+    reg = _inv05_registry(prov, name="fs.write_file", danger="high")
+    task = asyncio.create_task(ToolExecutor(reg).execute(
+        _inv04_call(name="fs.write_file",
+                    raw={"path": "a.txt", "content": "x"}, call_id="c-ap"), ctx))
+
+    await _wait(lambda: sess.of("approval.requested"))     # 审批请求已强同步落盘
+    if verdict == "denied":
+        ap.deny(sess.of("approval.requested")[-1]["seq"], by="cli:alice")
+    r = await asyncio.wait_for(task, 5)
+
+    # 零副作用
+    assert not r.ok and prov.calls == 0, f"{verdict}:审批拒绝后不得执行 Provider"
+    assert not sess.of("tool.result")
+    # F-2:审批来源**不落** guard.rejected
+    assert not sess.of("guard.rejected"), \
+        f"{verdict}:审批来源的拒绝不得落 guard.rejected(由 approval.* 承载)"
+    # 强同步留痕存在
+    ev = sess.of(f"approval.{verdict}")
+    assert len(ev) == 1, f"{verdict}:应恰有一条 approval.{verdict} -> {sess.types()}"
+    assert ev[0]["sync"] is True, f"{verdict}:审批拒绝事实必须强同步(sync=True)"
+    assert sess.of("approval.requested")[0]["sync"] is True

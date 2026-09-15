@@ -38,7 +38,7 @@ from pyharness.core.tools_guard import GuardChain, ToolCall
 from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
 from pyharness.errors import PyHError
 from pyharness.governance import (DecisionEngine, GovernanceContext,
-                                  Principal)
+                                  Principal, ReceiptStore)
 from pyharness.governance.policy import Policy, PolicyEngine, PolicyRegistry
 
 # ===================================================================== 替身
@@ -184,18 +184,20 @@ def make_registry(*defns, providers: dict | None = None) -> ToolRegistry:
 
 def make_ctx(sess: AsyncSess, scope: FakeScope, *, chain=None, approval=None,
              spill=None, channel: str = "cli", headless: bool = False,
-             governance: bool = True):
+             governance: bool = True, receipts: bool = False):
     """execute 的 ctx 替身(会话门面注入面 = session/scope/guard/approval/storage)。
 
     S3-2-2:关 2 走 ``ctx.governance.authorize(...)`` 唯一治理入口,故默认按
     ``chain`` 装配一个真实 ``GovernanceContext``(纯治理编排,无 I/O 追加)。
+    ``receipts=True`` 时额外装配 ``ReceiptStore``(M4 凭证发射面)。
     """
     storage = types.SimpleNamespace(spill=spill) if spill is not None else None
     gov = None
     if governance and chain is not None:
         eng = PolicyEngine(policy=Policy("test:v1", "1.0"),
                            registry=PolicyRegistry(), chain=chain)
-        gov = GovernanceContext(policy=eng, decisions=DecisionEngine())
+        gov = GovernanceContext(policy=eng, decisions=DecisionEngine(),
+                                receipts=ReceiptStore() if receipts else None)
     return types.SimpleNamespace(session=sess, scope=scope, guard=chain,
                                  approval=approval, storage=storage,
                                  governance=gov,
@@ -1464,4 +1466,123 @@ class TestPrincipalIdentity:
         dec = [e for e in store2.replay() if e.type == "decision.issued"][0]
         assert (dec.payload["principal_kind"], dec.payload["principal_id"],
                 dec.payload["principal_channel"]) == ("human", "bob", "acp")
+        store2.close()
+
+
+# ================================ S4-M4:凭证发射(真实 executor 路径)
+class TestReceiptEmission:
+    """M4 四场景(真实 GuardChain / 真实 approval / 真实事件 + JSONL replay):
+
+    A 普通 ALLOW → decision 凭证;B 普通 REJECT → decision 凭证;
+    C D1 APPROVAL → **无凭证**;D D2 → approval 凭证(携带 approval_ref)。
+    """
+
+    async def test_case_a_allow_emits_decision_receipt(self, tmp_path):
+        sess, prov = AsyncSess(), Recorder({"content": "hi"})
+        reg = make_registry(mk_defn(), providers={"fs.read_file": prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), receipts=True)
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.read_file", raw_args={"path": "a.txt"},
+                     call_id="RA"), ctx)
+        assert r.ok
+        rec = sess.of("receipt.emitted")
+        assert len(rec) == 1 and rec[0]["payload"]["kind"] == "decision"
+        assert rec[0]["sync"] is True
+        d = sess.of("decision.issued")[0]["payload"]
+        assert rec[0]["payload"]["decision_id"] == d["decision_id"]
+
+    async def test_case_b_reject_emits_decision_receipt(self, tmp_path):
+        sess, prov = AsyncSess(), Recorder()
+        dn = mk_defn(name="fs.delete", danger="critical", schema=WRITE_SCHEMA)
+        reg = make_registry(dn, providers={dn.name: prov})
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), receipts=True)
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.delete", raw_args={"path": "x"}, call_id="RB"),
+            ctx)
+        assert not r.ok
+        rec = sess.of("receipt.emitted")
+        assert len(rec) == 1 and rec[0]["payload"]["kind"] == "decision"
+
+    async def test_case_c_d1_emits_no_receipt(self, tmp_path):
+        """D1(审批请求决策)不产生凭证,即使它已 `decision.issued`。"""
+        sess, prov = AsyncSess(), Recorder({"ok": True})
+        dn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        reg = make_registry(dn, providers={dn.name: prov})
+        ap = FakeApproval(["denied"])
+        ctx = make_ctx(sess, FakeScope(str(tmp_path)),
+                       chain=GuardChain(session=sess), approval=ap,
+                       receipts=True)
+        r = await ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "a.txt", "content": "x"}, call_id="RC"),
+            ctx)
+        assert not r.ok
+        assert len(sess.of("decision.issued")) == 1       # D1 有
+        assert sess.of("receipt.emitted") == []           # 但无凭证
+
+    async def test_case_d_d2_emits_approval_receipt(self, tmp_path):
+        """D2(granted 后重入)→ approval 凭证,且经 JSONL replay 可重建+可验。"""
+        from pyharness.bus import EventBus
+        from pyharness.core.session import SessionLog
+        from pyharness.events import EVENT_TYPES, SYNC_TYPES
+        from pyharness.governance.receipt import rebuild_from_log, verify_chain
+        from pyharness.persistence import open_store
+
+        sid = "s-m4-receipt"
+        store = open_store(sid, dir=tmp_path)
+        bus = EventBus()
+
+        async def adapter(t, p):
+            if hasattr(p, "model_dump_json"):
+                await store.append(p, sync=t in SYNC_TYPES)
+
+        for t in EVENT_TYPES:
+            bus.subscribe(t, adapter, owner="persistence")
+        log = SessionLog(sid=sid, persistence=store, bus=bus)
+        await log.append("session.created", {"title": "", "model": "m"},
+                         actor="system")
+        await store.flush()
+        ap = ApprovalProvider(channel="cli")
+        dn = mk_defn(name="fs.write_file", danger="high", schema=WRITE_SCHEMA)
+        prov = Recorder({"ok": True})
+        reg = make_registry(dn, providers={dn.name: prov})
+        eng = PolicyEngine(policy=Policy("test:v1", "1.0"),
+                           registry=PolicyRegistry(),
+                           chain=GuardChain(session=log))
+        ctx = make_ctx(log, FakeScope(str(tmp_path)),
+                       chain=eng.chain, approval=ap, governance=False)
+        ctx.governance = GovernanceContext(policy=eng, decisions=DecisionEngine(),
+                                           receipts=ReceiptStore())
+
+        task = asyncio.create_task(ToolExecutor(reg).execute(
+            ToolCall(name="fs.write_file",
+                     raw_args={"path": "s/x.txt", "content": "n"},
+                     call_id="RD"), ctx))
+        await wait_until(lambda: any(
+            e.type == "approval.requested" for e in store.replay()))
+        rid = next(e.seq for e in store.replay()
+                   if e.type == "approval.requested")
+        ap.approve(rid, by="cli:alice")
+        r = await asyncio.wait_for(task, 5)
+        assert r.ok
+        await store.flush()
+        store.close()
+
+        store2 = open_store(sid, dir=tmp_path)
+        evs = list(store2.replay())
+        emitted = [e for e in evs if e.type == "receipt.emitted"]
+        assert len(emitted) == 1                          # 仅 D2 产生
+        p = emitted[0].payload
+        assert p["kind"] == "approval" and p["prev_hash"] is None
+        # 链路 D2:approval_ref == approval.granted.approval_id
+        d2 = [e for e in evs if e.type == "decision.issued"][-1]
+        granted = [e for e in evs if e.type == "approval.granted"][0]
+        assert d2.payload["approval_ref"] == granted.payload["approval_id"] == rid
+        assert p["decision_id"] == d2.payload["decision_id"]
+        # 由真源重建 → 全部可验 + 链完整(INV-G2/G3/R2)
+        reb = rebuild_from_log(store2)
+        assert len(reb) == 1 and verify_chain(reb) is True
+        assert reb[0].kind == "approval" and reb[0].approval_ref == rid
         store2.close()

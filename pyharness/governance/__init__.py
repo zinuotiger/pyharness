@@ -24,6 +24,8 @@ from pyharness.governance.decision import (Decision, DecisionEngine, Principal,
 from pyharness.governance.policy import (POLICY_OPS, EVENT_POLICY_UPDATED,
                                          Policy, PolicyEngine, PolicyRegistry,
                                          PolicyRule, compute_fingerprint)
+from pyharness.governance.receipt import (DecisionReceipt, ReceiptStore,
+                                          verify_receipt)
 
 __all__ = [
     "GovernanceContext",
@@ -31,4 +33,6 @@ __all__ = [
     "compute_fingerprint", "POLICY_OPS", "EVENT_POLICY_UPDATED",
     # S3-1/S3-2:决策数据契约与决策引擎(Receipt/Evidence/Audit 不导出)
     "Decision", "Verdict", "Principal", "DecisionEngine",
+    # S4/M4:决策凭证(Evidence/Audit 仍不导出)
+    "DecisionReceipt", "ReceiptStore", "verify_receipt",
 ]

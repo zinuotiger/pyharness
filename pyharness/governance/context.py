@@ -34,6 +34,7 @@ from pyharness.errors import raise_code
 from pyharness.governance.decision import (Decision, DecisionEngine,
                                            Principal)
 from pyharness.governance.policy import PolicyEngine
+from pyharness.governance.receipt import ReceiptStore
 
 # 无通道时的主体(M5/S4-P1-3):headless / 无人类通道 = 框架自身驱动;**沿用**
 # approval 侧 ``by="system"`` 的既有语义(非新规则),经 ``from_legacy_by`` 统一派生。
@@ -47,7 +48,7 @@ class GovernanceContext:
     policy: PolicyEngine
     # ---- S3~S5 形状占位(None = "尚未接线")----
     decisions: Optional[DecisionEngine] = None   # S3: DecisionEngine(关 2 出口升格)
-    receipts: Any = None        # S4: ReceiptStore(凭证)
+    receipts: Optional[ReceiptStore] = None      # S4/M4: 凭证(已接线)
     evidence: Any = None        # S5: EvidenceCollector(证据)
     audit: Any = None           # S5: AuditSystem(审计因果链)
 
@@ -112,6 +113,12 @@ class GovernanceContext:
             inputs_digest=inputs_digest, prior=prior, approval_ref=approval_ref)
         # 3) 治理证据事件(强同步;一次 authorize 恰一条)
         await self._emit_decision_issued(ctx, decision, call)
+        # 4) 决策凭证(M4;强同步):按 receipt_kind_of 产生规则发射——
+        #    ALLOW/REJECT → kind="decision";审批后重新授权(D2)→ kind="approval";
+        #    D1(审批请求决策)→ 不产生(R-2)。未接线(纯内存/单测)时降级为不发射。
+        if self.receipts is not None:
+            await self.receipts.emit(ctx, decision,
+                                     call_id=getattr(call, "call_id", "") or "")
         return decision
 
     @staticmethod

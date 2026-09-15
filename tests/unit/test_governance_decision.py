@@ -269,10 +269,13 @@ def test_t15_legacy_decision_enum_unchanged():
 
 # ---------------------------------------------------------------- 门面与协议
 def test_facade_exports_only_s3_1_surface():
+    """门面导出面随阶段演进(M4 起含凭证);Evidence/Audit 仍未实现即不导出。"""
     import pyharness.governance as g
     assert {"Decision", "Verdict", "Principal"} <= set(g.__all__)
-    for out_of_scope in ("DecisionReceipt", "ReceiptStore", "Evidence",
-                         "EvidenceCollector", "AuditSystem"):
+    # S4/M4:凭证已接线并导出
+    assert {"DecisionReceipt", "ReceiptStore"} <= set(g.__all__)
+    # Evidence / Audit 属 S5,尚未实现 ⇒ 不导出
+    for out_of_scope in ("Evidence", "EvidenceCollector", "AuditSystem"):
         assert out_of_scope not in set(g.__all__)
         assert not hasattr(g, out_of_scope)
 

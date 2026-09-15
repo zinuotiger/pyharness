@@ -1,7 +1,7 @@
 """pyharness/events/payload.py — 各事件负载模型 (specs/events.py.md 词表清单)
 
 按 EVENT-SCHEMA §3 词汇总表为每个事件实现一个 pydantic 负载模型
-(extra="forbid",拒多余字段——F026 同纪律);75 事件词表(73 payload 模型) + llm.retry
+(extra="forbid",拒多余字段——F026 同纪律);76 事件词表(74 payload 模型) + llm.retry
 落盘注册见 vocab.py 的 _CORE_EVENT_TYPES。
 
 约定:✓=必填字段不带默认值;—=可选字段 Optional/显式默认;载荷内
@@ -615,6 +615,28 @@ class DecisionIssuedPayload(_PayloadBase):
     ts: str = ""
     approval_ref: Optional[int] = None
     supersedes: Optional[str] = None
+
+
+class ReceiptEmittedPayload(_PayloadBase):
+    """receipt.emitted:治理凭证生成事实(设计 §3.4;M4)。
+
+    **薄引用 + 完整性链**——只承载凭证自身的定位与防篡改信息,不复制 Decision
+    字段(违 INV-G4"只含引用与哈希"):
+
+    - ``receipt_id`` / ``decision_id``:凭证主键与所绑定的决策(外键);
+    - ``kind`` ∈ ``decision|approval``;
+    - ``digest`` = **`Receipt.content_hash`**(R-1(a) 冻结:与相邻 ``prev_hash``
+      同属完整性链;**不是** ``inputs_digest``——后者表达"本次授权针对什么 inputs");
+    - ``prev_hash`` = 前一条 receipt 的 ``content_hash``(创世为 ``None``)。
+
+    完整的 ``DecisionReceipt`` 字段由 ``decision_id`` 指向的 ``decision.issued``
+    **派生**,故事件日志仍为唯一真源。强同步(与 decision.issued 同族)。
+    """
+    receipt_id: str = Field(min_length=1)
+    decision_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    digest: str = Field(min_length=1)
+    prev_hash: Optional[str] = None
 
 
 class SkillInstalledPayload(_PayloadBase):

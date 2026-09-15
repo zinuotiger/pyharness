@@ -50,6 +50,7 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     PolicyUpdatedPayload,
     QueueResumedPayload,
     QueueSuspendedPayload,
+    ReceiptEmittedPayload,
     ScheduleBlockedPayload,
     ScheduleMissedPayload,
     ScheduleRegisteredPayload,
@@ -102,6 +103,7 @@ SYNC_TYPES = frozenset({
     "fork.created", "context.compacted",
     "policy.updated",                      # 治理层策略事件(ADR-020:强同步)
     "decision.issued",                     # 治理层决策事件(ADR-015:M3;强同步)
+    "receipt.emitted",                     # 治理层凭证事件(M4;强同步)
 })
 
 # 瞬时事件(仅总线,禁 append 入日志;registry.updated 为总线内部广播,无 payload 模型)
@@ -177,11 +179,11 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 75 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前
-# 计数] + 词表外扩展 18 项 = 75;按 §7 登记:llm.retry F028 /
+# 76 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前
+# 计数] + 词表外扩展 19 项 = 76;按 §7 登记:llm.retry F028 /
 # plan.done·plan.aborted F046 / schedule.registered·updated·removed·blocked·
-# missed F048 / policy.updated ADR-020 / decision.issued ADR-015;
-# PARAMETER-ANCHOR 基线 57,扩展只增不改)。
+# missed F048 / policy.updated ADR-020 / decision.issued ADR-015 /
+# receipt.emitted M4;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
 _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # ---- A 会话生命周期(§3.1)
@@ -276,6 +278,9 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # 治理层决策事件(ADR-015:M3;每次治理求值一条,含全放行;强同步见 SYNC_TYPES;
     # call_id 经 Envelope.trace 携带,不入载荷;verdict∈{allow,reject,approval})
     ("decision.issued", DecisionIssuedPayload, False),
+    # 治理层凭证事件(M4;薄引用 + 完整性链:receipt_id/decision_id/kind/digest/
+    # prev_hash;完整 Receipt 由 decision.issued 派生;强同步见 SYNC_TYPES)
+    ("receipt.emitted", ReceiptEmittedPayload, False),
 )
 
 

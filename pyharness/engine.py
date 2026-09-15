@@ -511,8 +511,9 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core.tools_executor import ToolExecutor
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core import tool_fs
-    from pyharness.governance import (DecisionEngine, EvidenceCollector,
-                                      GovernanceContext, ReceiptStore)
+    from pyharness.governance import (AuditSystem, DecisionEngine,
+                                      EvidenceCollector, GovernanceContext,
+                                      ReceiptStore)
 
     tool_reg = ToolRegistry()
     tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
@@ -651,6 +652,11 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         for t in _EVIDENCE_EVENT_TYPES:
             bus.subscribe(t, evidence.on_event, owner=ev_owner)
 
+    # 治理审计装配(S5-3b):**只构造、只注入** —— ``AuditSystem`` 是 **replay-only**
+    # (仅重放)的派生视图:**不订阅**任何事件、**不缓存**跨调用状态、**不写**事件。
+    # 故此处**刻意不加** ``bus.subscribe``(与 EvidenceCollector 的关键差异)。
+    audit = AuditSystem(session=log_)
+
     spine = EngineSpine(
         session=log_, bus=bus, registry=registry,
         scope=scope, llm=llm_client, tools=tools,
@@ -658,7 +664,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         governance=GovernanceContext(policy=gov_policy,
                                      decisions=DecisionEngine(),
                                      receipts=ReceiptStore(),
-                                     evidence=evidence),
+                                     evidence=evidence,
+                                     audit=audit),
         counters=counters, sysprompt=sysprompt, compactor=compactor,
         goals=goals, todos=todos, ask=ask, skills=skills,
         plugins=plg_mgr, plugin_state=plg_state, tool_registry=tool_reg,

@@ -237,3 +237,44 @@ async def test_inv_e3_evidence_index_is_rederivable_not_truth_source():
     assert ([x.evidence_id for x in rebuilt.collect_for_task("t-1")]
             == [x.evidence_id for x in col.collect_for_task("t-1")] == ["E1"])
     assert len(log.events) == before               # 只读:零写入
+
+
+# ================================================================ INV-A1~A3
+async def test_inv_a1_a2_a3_audit_is_replay_only_fail_closed_report():
+    """INV-A1(缺失显式,不臆造)/ A2(纯只读,无写点)/ A3(拒绝可追溯,可证未执行)。"""
+    from pyharness.governance.audit import AuditSystem
+
+    log = _Log()
+    log.events += [
+        _Ev(1, "tool.call", {"name": "fs.delete", "call_id": "cB"}),
+        _Ev(2, "guard.rejected", {"tool": "fs.delete", "guard_id": "g-danger",
+                                  "reason": "POL-DGR-1",
+                                  "policy_ref": "POL-DGR-1"},
+            trace={"call_id": "cB"}),
+        _Ev(3, "decision.issued", {"decision_id": "D-B", "verdict": "reject",
+                                   "tool": "fs.delete",
+                                   "policy_refs": ["POL-DGR-1"],
+                                   "guard_ids": ["g-danger"],
+                                   "approval_ref": None},
+            trace={"call_id": "cB"}),
+    ]
+    audit = AuditSystem(session=log)
+
+    # INV-A1:不存在的 decision_id ⇒ 显式缺失,不臆造、不抛
+    chain = audit.causal_chain("NOPE")
+    assert chain["missing"] == ["decision.issued"]
+    for seg in ("request", "policy", "decision", "approval", "receipt",
+                "execution"):
+        assert chain[seg] is None
+
+    # INV-A2:纯只读 —— 事件数不变
+    before = len(log.events)
+    audit.causal_chain("D-B")
+    audit.denied_report()
+    assert len(log.events) == before
+
+    # INV-A3:拒绝可追溯 → 两类来源可区分,且可证"拦了且没执行"
+    rows = audit.denied_report()
+    assert {r["source"] for r in rows} == {"guard.rejected", "decision.issued"}
+    assert all(r["executed"] is False for r in rows)
+    assert {r["call_id"] for r in rows} == {"cB"}

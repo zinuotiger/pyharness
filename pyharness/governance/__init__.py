@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+from pyharness.governance.audit import AuditSystem
 from pyharness.governance.context import GovernanceContext
 from pyharness.governance.decision import (Decision, DecisionEngine, Principal,
                                            Verdict)
@@ -39,4 +40,6 @@ __all__ = [
     "DecisionReceipt", "ReceiptStore", "verify_receipt",
     # S5/M6(第一步):证据数据契约与归档入口(Audit 仍不导出)
     "Evidence", "EvidenceRef", "EvidenceCollector",
+    # S5/M7:审计视图(replay-only)
+    "AuditSystem",
 ]

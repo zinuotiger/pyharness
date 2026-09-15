@@ -3,12 +3,12 @@
 一句话职责:治理层的**唯一挂载面**——``ctx.governance``(ADR-018 契约冻结:
 单实例挂载,**禁止**向 ``Ctx`` 追加治理散字段)。
 
-形状:
+形状(全部已接线):
     policy     : PolicyEngine        ← S2-1
-    decisions  : DecisionEngine      ← S3-2-1(已接线)
-    receipts   : ReceiptStore        ← S4/M4(已接线)
-    evidence   : EvidenceCollector   ← S5/M6(S5-2b 已接线)
-    audit      : Any = None          ← S5 后续: AuditSystem(审计因果链)
+    decisions  : DecisionEngine      ← S3-2-1
+    receipts   : ReceiptStore        ← S4/M4
+    evidence   : EvidenceCollector   ← S5/M6
+    audit      : AuditSystem         ← S5/M7(replay-only,不订阅)
 
 ``authorize()``(S3-2-1,B4):``tool_executor`` 关 2 的**唯一治理入口**——
 ``GuardChain.evaluate_detailed() → EvaluationResult → DecisionEngine.decide()
@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from pyharness.errors import raise_code
+from pyharness.governance.audit import AuditSystem
 from pyharness.governance.decision import (Decision, DecisionEngine,
                                            Principal)
 from pyharness.governance.evidence import EvidenceCollector
@@ -47,11 +48,11 @@ class GovernanceContext:
     """治理层上下文(policy + decisions 已接线;receipts/evidence/audit 仍为形状占位)。"""
 
     policy: PolicyEngine
-    # ---- S5 形状占位(仅 audit 仍未接线;None = "尚未接线")----
+    # ---- S5 形状:五个构件全部已接线(None 仅表示"该环境未装配")----
     decisions: Optional[DecisionEngine] = None   # S3: DecisionEngine(关 2 出口升格)
     receipts: Optional[ReceiptStore] = None      # S4/M4: 凭证(已接线)
     evidence: Optional[EvidenceCollector] = None   # S5/M6: 证据(S5-2b 已接线)
-    audit: Any = None           # S5: AuditSystem(审计因果链)
+    audit: Optional[AuditSystem] = None          # S5/M7: 审计(S5-3b 已接线)
 
     def policy_fingerprint(self) -> str:
         """当前策略指纹(审计/凭证引用面;纯只读)。"""

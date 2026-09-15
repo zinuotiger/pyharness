@@ -208,14 +208,20 @@ def test_t6_no_side_effects():
             return f"{dotted(node.value)}.{node.attr}"
         return ""
 
-    # 结构证据:不得对**会话类对象**写入(列表的 ``rows.append`` 不算)
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "append"):
-            continue
-        recv = dotted(node.func.value)
-        assert "sess" not in recv.lower(), f"audit.py 疑似写事件:{recv}.append"
+    # 结构证据:**两个只读方法内**不得对会话对象写入
+    # (S5-4 起,``reconcile`` 是唯一受控写点,不在本断言范围内)
+    readonly = {n.name: n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name in ("causal_chain", "denied_report")}
+    assert set(readonly) == {"causal_chain", "denied_report"}
+    for name, fn in readonly.items():
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "append"):
+                continue
+            recv = dotted(node.func.value)
+            assert "sess" not in recv.lower(), f"{name} 疑似写事件:{recv}.append"
 
 
 # ================================================================ T-7 缺失语义
@@ -336,3 +342,182 @@ class TestAuditWiring:
         assert gov.audit.causal_chain("NOPE")["missing"] == ["decision.issued"]
         assert gov.audit.denied_report() == []
         assert len(list(ctx.session.events_after(0))) == before   # 零副作用
+
+
+# ============================== S5-4a:reconcile(默认只读)+ legacy 适配
+class TestReconcile:
+    """S5-4a:三类对账 + **默认零写** + 旧审计面兼容(**经注入**)。"""
+
+    @staticmethod
+    def _clean() -> _Log:
+        """一致日志:guard.evaluated 齐备、granted 有 D2 且有凭证。"""
+        log = _log()
+        log.events.append(_Ev(16, "guard.evaluated",
+                              {"tool": "fs.write_file", "decision": "allow",
+                               "guard_ids": ["g-schema"], "reasons": None},
+                              trace={"call_id": "cA"}))
+        log.events.append(_Ev(17, "guard.evaluated",
+                              {"tool": "fs.write_file", "decision": "allow",
+                               "guard_ids": ["g-schema"], "reasons": None},
+                              trace={"call_id": "cC"}))
+        return log
+
+    # ---------------------------------------------------------- T-1 SEQ-GAP
+    async def test_t1_seq_gap_reported_and_declarable(self):
+        log = self._clean()
+        log.events = [e for e in log.events if e.seq != 5]     # 挖洞(seq=5)
+        a = AuditSystem(session=log)
+        assert "SEQ-GAP:5" in await a.reconcile()
+        # 声明覆盖后不再报(context.compacted.ranges)
+        log.events.append(_Ev(18, "context.compacted",
+                              {"ranges": [[5, 5]], "summary": "压缩"}))
+        assert await a.reconcile() == []
+
+    # ---------------------------------------------------- T-2 NO-GUARD-EVENT
+    async def test_t2_no_guard_event_reported_and_fixable(self):
+        a = AuditSystem(session=_log())            # 有 tool.result 但无 guard.evaluated
+        f = await a.reconcile()
+        assert "NO-GUARD-EVENT:call_id=cA" in f
+        assert "NO-GUARD-EVENT:call_id=cC" in f
+        assert "NO-GUARD-EVENT:call_id=cB" not in f   # 被拒 ⇒ 无 tool.result
+        assert await AuditSystem(session=self._clean()).reconcile() == []
+
+    # ------------------------------------------------ T-3 NO-RECEIPT-FOR-GRANT
+    async def test_t3_no_receipt_for_grant_both_shapes(self):
+        # ① granted 有 D2 但缺凭证
+        log = self._clean()
+        log.events = [e for e in log.events if e.seq != 14]   # 去掉 R-C2
+        assert "NO-RECEIPT-FOR-GRANT:approval_id=11" in \
+            await AuditSystem(session=log).reconcile()
+        # ② granted 无 D2(重入未发生)
+        log2 = self._clean()
+        log2.events = [e for e in log2.events if e.seq != 13]
+        assert "NO-RECEIPT-FOR-GRANT:approval_id=11" in \
+            await AuditSystem(session=log2).reconcile()
+        # ③ 完整链路 ⇒ 不报
+        assert await AuditSystem(session=self._clean()).reconcile() == []
+
+    # ------------------------------------------------ T-4/T-5 默认零写(★)
+    async def test_t4_default_emit_is_false_zero_writes(self):
+        """★默认(``emit=False``):findings 非空亦**零写入**。"""
+        log = _log()
+        before = len(log.events)
+        a = AuditSystem(session=log)
+        f = await a.reconcile()                    # 默认
+        assert f != []                             # 确有发现
+        assert len(log.events) == before           # 但零写入
+        assert not [e for e in log.events if e.type == "syscheck.fail"]
+
+    async def test_t4_emit_true_writes_exactly_one_syscheck_fail(self):
+        log = _log()
+        before = len(log.events)
+        findings = await AuditSystem(session=log).reconcile(emit=True)
+        new = [e for e in log.events if e.type == "syscheck.fail"]
+        assert len(log.events) - before == 1 and len(new) == 1
+        assert new[0].payload["findings"] == findings
+        assert new[0].payload["trigger"] == "governance.reconcile"
+
+    async def test_t5_emit_true_but_clean_log_writes_nothing(self):
+        """findings 空 ⇒ 即便 ``emit=True`` 也**零写入**。"""
+        log = self._clean()
+        before = len(log.events)
+        assert await AuditSystem(session=log).reconcile(emit=True) == []
+        assert len(log.events) == before
+
+    # ---------------------------------------------------------- T-6 幂等
+    async def test_t6_reconcile_is_idempotent(self):
+        log = _log()
+        a = AuditSystem(session=log)
+        f1 = await a.reconcile(emit=True)
+        f2 = await a.reconcile(emit=True)
+        assert f1 == f2                            # 写入的 syscheck.fail 不引入新发现
+
+    # ---------------------------------------------------------- T-7 确定性
+    async def test_t7_deterministic_across_instances(self):
+        log = _log()
+        assert (await AuditSystem(session=log).reconcile()
+                == await AuditSystem(session=log).reconcile())
+
+    # ---------------------------------------------------------- T-8 降级
+    async def test_t8_degrades_without_session(self):
+        assert await AuditSystem().reconcile() == []
+        assert await AuditSystem().reconcile(emit=True) == []
+
+    # ------------------------------------------------- T-9/T-10 legacy
+    def test_t9_legacy_delegates_with_same_session(self):
+        calls = []
+
+        def fake(sess):
+            calls.append(sess)
+            return {"ok": 1}
+
+        a = AuditSystem(session=_log(), legacy_audit=fake)
+        assert a.legacy_session_audit("S") == {"ok": 1}
+        assert calls == ["S"]
+
+    def test_t9_legacy_result_equals_telemetry(self):
+        from pyharness.core.telemetry import session_audit
+        log = _log()
+        got = AuditSystem(legacy_audit=session_audit).legacy_session_audit(log)
+        assert got == session_audit(log)           # 适配为**透传**,不改语义
+        assert isinstance(got, dict)
+
+    def test_t10_legacy_not_injected_is_fail_closed(self):
+        from pyharness.errors import PyHError
+        with pytest.raises(PyHError) as ei:
+            AuditSystem(session=_log()).legacy_session_audit(_log())
+        assert ei.value.code == "CYC-999"
+
+    # ---------------------------------------------------------- T-11/12
+    def test_t11_no_core_telemetry_import(self):
+        """``audit.py`` 不得 import ``core.telemetry``(必须经注入;ADR-018:308)。"""
+        tree = ast.parse((_ROOT / "pyharness/governance/audit.py")
+                         .read_text(encoding="utf-8"))
+        mods = {n.module or "" for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom)}
+        mods |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                 for a in n.names}
+        assert not any("telemetry" in m for m in mods), mods
+        assert not any(m.startswith("pyharness.core") for m in mods), mods
+
+    def test_t12_schema_unchanged(self):
+        """``syscheck.fail`` 通道不变;**绝对计数**由
+        ``tests/unit/test_events.py::test_vocab_full`` 覆盖(运行期注册表只增,
+        全量跑时会被追加合成类型 ⇒ 此处不做绝对计数断言)。
+        """
+        from pyharness.events import vocab as V
+        assert V.is_registered("syscheck.fail") is True
+        assert V.is_transient("syscheck.fail") is False
+        assert "syscheck.fail" not in V.SYNC_TYPES
+        assert "evidence.archived" not in V.SYNC_TYPES
+
+
+class TestReconcileWiring:
+    """S5-4b 等价装配验证(与 S5-3b 同颗粒度)。"""
+
+    @staticmethod
+    def _cfg(tmp_path):
+        from pyharness.config import load_settings
+        cfg = load_settings()
+        cfg.storage.root = str(tmp_path)
+        cfg.storage.sessions_dir = str(tmp_path / "sessions")
+        cfg.storage.workspaces_dir = str(tmp_path / "workspaces")
+        cfg.storage.spill_dir = str(tmp_path / "spill")
+        cfg.storage.db_path = str(tmp_path / "pyharness.db")
+        return cfg
+
+    async def test_legacy_audit_injected_in_real_spine(self, tmp_path):
+        from pyharness.core.telemetry import session_audit
+        from pyharness.engine import assemble_real_engine
+        ctx = await assemble_real_engine(
+            self._cfg(tmp_path), sid="s-eng-aud-000003",
+            sessions_dir=tmp_path / "sessions")
+        gov = ctx.engine_spine.governance
+        await ctx.session.append("session.created",
+                                 {"title": "", "model": "m"}, actor="system")
+        assert gov.audit.legacy_session_audit(ctx.session) == \
+            session_audit(ctx.session)
+        # 默认只读:reconcile 不写事件
+        before = len(list(ctx.session.events_after(0)))
+        await gov.audit.reconcile()
+        assert len(list(ctx.session.events_after(0))) == before

@@ -653,9 +653,11 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
             bus.subscribe(t, evidence.on_event, owner=ev_owner)
 
     # 治理审计装配(S5-3b):**只构造、只注入** —— ``AuditSystem`` 是 **replay-only**
-    # (仅重放)的派生视图:**不订阅**任何事件、**不缓存**跨调用状态、**不写**事件。
-    # 故此处**刻意不加** ``bus.subscribe``(与 EvidenceCollector 的关键差异)。
-    audit = AuditSystem(session=log_)
+    # (仅重放)的派生视图:**不订阅**任何事件、**不缓存**跨调用状态。**默认零写**;
+    # 唯一写点是 ``reconcile(emit=True)`` 的既有 ``syscheck.fail``。
+    # S5-4:旧审计面兼容适配**经注入**(治理层不得 import core,ADR-018:308)。
+    from pyharness.core.telemetry import session_audit as _legacy_audit
+    audit = AuditSystem(session=log_, legacy_audit=_legacy_audit)
 
     spine = EngineSpine(
         session=log_, bus=bus, registry=registry,

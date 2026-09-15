@@ -278,3 +278,44 @@ async def test_inv_a1_a2_a3_audit_is_replay_only_fail_closed_report():
     assert {r["source"] for r in rows} == {"guard.rejected", "decision.issued"}
     assert all(r["executed"] is False for r in rows)
     assert {r["call_id"] for r in rows} == {"cB"}
+
+
+# ================================================================ INV-A4~A6
+async def test_inv_a4_a5_a6_reconcile_and_legacy():
+    """INV-A4(确定性)/ A5(默认只读 + 唯一受控写点)/ A6(兼容等价 + 注入纪律)。"""
+    from pyharness.governance.audit import AuditSystem
+
+    log = _Log()
+    log.events += [
+        _Ev(1, "tool.call", {"name": "fs.delete", "call_id": "cX"}),
+        _Ev(2, "tool.result", {"name": "fs.delete", "call_id": "cX",
+                               "ok": True, "summary": "ok"}),
+        _Ev(3, "approval.granted", {"approval_id": 3, "by": "cli:alice"}),
+    ]
+    audit = AuditSystem(session=log)
+
+    # INV-A4:确定性 —— 同日志、不同实例 ⇒ 同 findings(含顺序)
+    f1 = await audit.reconcile()
+    f2 = await AuditSystem(session=log).reconcile()
+    assert f1 == f2
+    assert "NO-GUARD-EVENT:call_id=cX" in f1          # 有执行但无 guard.evaluated
+    assert "NO-RECEIPT-FOR-GRANT:approval_id=3" in f1  # granted 但无 D2 / 无凭证
+
+    # INV-A5:默认(emit=False)**零写**;emit=True 且 findings 非空 ⇒ 恰一条既有事件
+    before = len(log.events)
+    await audit.reconcile()
+    assert len(log.events) == before
+    await audit.reconcile(emit=True)
+    new = [e for e in log.events if e.type == "syscheck.fail"]
+    assert len(new) == 1 and len(log.events) - before == 1
+    assert V.is_registered("syscheck.fail") and not V.is_transient("syscheck.fail")
+
+    # INV-A6:兼容等价(透传) + 未注入 fail-closed(不 import core.telemetry)
+    def _fake(sess): return {"marker": id(sess)}
+    assert AuditSystem(legacy_audit=_fake).legacy_session_audit(log) == \
+        {"marker": id(log)}
+    try:
+        AuditSystem(session=log).legacy_session_audit(log)
+        raise AssertionError("未注入应 fail-closed")
+    except Exception as e:
+        assert getattr(e, "code", "") == "CYC-999"

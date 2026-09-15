@@ -20,14 +20,22 @@
 只覆盖**被归档**的证据);Audit 回答"**这条决策**为什么发生、经过了什么"
 (因果轴,覆盖**全部**决策,含未归档者)。
 
-**本步(S5-3a)边界**:只有 ``causal_chain`` 与 ``denied_report``,**无写点**。
-``reconcile()`` / ``legacy_session_audit()`` 属 **S5-4**;``TraceabilityMatrix`` 属 **S7**。
+**边界**：
+
+- **S5-3**：``causal_chain``（因果链）与 ``denied_report``（拒绝清单）—— **零写**。
+- **S5-4**：``reconcile``（三类一致性对账）+ ``legacy_session_audit``（旧面兼容，
+  **经注入**）。``reconcile`` **默认纯只读**（``emit=False``）;仅 ``emit=True``
+  且 findings 非空才追加**一条既有** ``syscheck.fail``（**唯一写点**，不新增事件类型）。
+  ``CACHE-STALE`` **本版未实现**（deferred debt：避免依赖 ``EvidenceCollector`` 内部结构）。
+- **S7**：``TraceabilityMatrix``。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from pyharness.errors import raise_code
+from pyharness.events.envelope import check_seq_gap
 from pyharness.governance.receipt import _read_events
 
 # 因果链各段名(输出字典的键;``missing`` 里出现即表示"应有而未找到")
@@ -48,9 +56,15 @@ def _receipt_expected(verdict: str, approval_ref: Any) -> bool:
 
 @dataclass(frozen=True)
 class AuditSystem:
-    """治理审计视图(**replay-only**;无订阅、无写点、无跨调用状态)。"""
+    """治理审计视图(**默认纯只读**;无订阅、无状态)。
+
+    ``legacy_audit`` 是**注入**的旧审计适配入口(装配层传入
+    ``core.telemetry.session_audit``);本模块**不得** import ``pyharness.core.*``
+    (ADR-018:308)。未注入时 ``legacy_session_audit`` **fail-closed**(``CYC-999``)。
+    """
 
     session: Optional[Any] = None
+    legacy_audit: Optional[Any] = None
 
     # ------------------------------------------------------------ 只读重放
     def _events(self, ctx: Any = None) -> list:
@@ -207,6 +221,122 @@ class AuditSystem:
                     "executed": bool(cid) and cid in executed})
         rows.sort(key=lambda r: r["seq"])
         return rows
+
+
+    # ------------------------------------------------------------ 对账
+    @staticmethod
+    def _declared_holes(events: list) -> list:
+        """合法空洞声明(**只读**)：
+
+        - ``context.compacted.ranges`` —— ``[[lo, hi], …]``（折叠闭区间）;
+        - ``session.recovered.lost`` —— ``[seq, …]``（修复丢弃的单个 seq）。
+        """
+        out: list = []
+        for e in events:
+            t = getattr(e, "type", None)
+            p = getattr(e, "payload", None) or {}
+            if t == "context.compacted":
+                for pair in (p.get("ranges") or []):
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                        out.append((int(pair[0]), int(pair[1])))
+            elif t == "session.recovered":
+                for s in (p.get("lost") or []):
+                    out.append((int(s), int(s)))
+        return out
+
+    async def reconcile(self, *, session_id: str = "", ctx: Any = None,
+                        emit: bool = False) -> list[str]:
+        """治理一致性对账(**默认纯只读**)。
+
+        **三类检查**(判据)：
+
+        - ``SEQ-GAP`` —— 事件 seq 中**未被声明区间覆盖**的空洞(复用既有
+          ``events.envelope.check_seq_gap``);
+        - ``NO-GUARD-EVENT`` —— 某 ``call_id`` 有 ``tool.result`` 但**无**同
+          ``call_id``(经 ``trace``)的 ``guard.evaluated``(``INV-04``);
+        - ``NO-RECEIPT-FOR-GRANT`` —— 某 ``approval.granted(approval_id=N)``
+          找不到对应 D2(``approval_ref=N``),**或**找到但其 ``decision_id``
+          无 ``receipt.emitted``(**INV-G2** 的运行时哨兵)。
+
+        ``CACHE-STALE`` **本版未实现**(登记 deferred debt:避免依赖
+        ``EvidenceCollector`` 内部结构)。
+
+        **写点(默认关)**：仅当 ``emit=True`` **且** findings 非空 **且** 会话在位,
+        才追加**一条既有** ``syscheck.fail``(不新增事件类型)。``findings`` 是
+        建议性事实,可由重跑复得,故该事件为**普通攒批**(非强同步)。
+
+        返回:排序后的 findings(**确定性**;空列表 = 一致);无会话 ⇒ ``[]`` 不抛。
+        """
+        events = self._events(ctx)
+        if session_id:
+            events = [e for e in events
+                      if str(getattr(e, "session_id", "") or "") == session_id]
+        if not events:
+            return []
+        findings: list[str] = []
+
+        # ① SEQ-GAP
+        seqs = [int(getattr(e, "seq", 0) or 0) for e in events]
+        holes = check_seq_gap(seqs, self._declared_holes(events))
+        if holes:
+            findings.append("SEQ-GAP:" + ",".join(str(h) for h in holes))
+
+        # ② NO-GUARD-EVENT(执行了但没有规则级求值留痕)
+        executed = {str((getattr(e, "payload", None) or {}).get("call_id") or "")
+                    for e in events
+                    if getattr(e, "type", None) == "tool.result"}
+        guarded = {self._trace_call_id(e) for e in events
+                   if getattr(e, "type", None) == "guard.evaluated"}
+        for cid in sorted(c for c in executed if c and c not in guarded):
+            findings.append(f"NO-GUARD-EVENT:call_id={cid}")
+
+        # ③ NO-RECEIPT-FOR-GRANT
+        d2_by_ref: dict[int, str] = {}
+        for e in events:
+            if getattr(e, "type", None) != "decision.issued":
+                continue
+            ref = (getattr(e, "payload", None) or {}).get("approval_ref")
+            if ref is not None:
+                d2_by_ref[int(ref)] = str(
+                    (getattr(e, "payload", None) or {}).get("decision_id") or "")
+        receipt_dids = {str((getattr(e, "payload", None) or {})
+                            .get("decision_id") or "")
+                        for e in events
+                        if getattr(e, "type", None) == "receipt.emitted"}
+        grants = {int((getattr(e, "payload", None) or {}).get("approval_id") or -1)
+                  for e in events if getattr(e, "type", None) == "approval.granted"}
+        for aid in sorted(g for g in grants if g >= 0):
+            did = d2_by_ref.get(aid)
+            if not did or did not in receipt_dids:
+                findings.append(f"NO-RECEIPT-FOR-GRANT:approval_id={aid}")
+
+        findings.sort()                              # 确定性(顺序稳定)
+        if emit and findings:
+            sess = (getattr(ctx, "session", None) if ctx is not None
+                    else self.session)
+            if sess is not None:
+                r = sess.append("syscheck.fail",
+                                {"findings": list(findings),
+                                 "trigger": "governance.reconcile"},
+                                actor="system")
+                if hasattr(r, "__await__"):
+                    await r                          # 真实 SessionLog.append 为 async
+        return findings
+
+    # ------------------------------------------------------------ 旧面兼容
+    def legacy_session_audit(self, session: Any) -> dict:
+        """旧审计面兼容适配(**经注入**,不 import ``core``)。
+
+        转调装配层注入的 ``legacy_audit``(生产值 = ``telemetry.session_audit``),
+        **输出语义完全等价**。**未注入 ⇒ ``CYC-999`` fail-closed**(不静默返回空
+        dict —— 那会掩盖装配缺失)。
+        """
+        if self.legacy_audit is None:
+            raise_code("CYC-999", module="governance.audit",
+                       field="legacy_audit",
+                       why="legacy 审计适配未注入(fail-closed);装配层须注入 "
+                           "core.telemetry.session_audit")
+        return self.legacy_audit(session)
 
 
 __all__ = ["CHAIN_SEGMENTS", "AuditSystem"]

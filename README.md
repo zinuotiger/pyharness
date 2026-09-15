@@ -1,7 +1,13 @@
 # PyHarness — DeepSeek Harness 的 Python 全功能复刻
 
-> 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,71 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
-> 状态: 核心主链与用户入口接地完成 — 1,481 collected / 1,479 passed / 2 skipped(快照 2026-09-14;现行值见 docs/baseline/),事件词表 74 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
+> 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
+> 状态: 核心主链与用户入口接地完成 — 1,704 collected / 1,702 passed / 2 skipped(快照 2026-09-15;全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
+
+## 治理不变量测试面(S6-2b,已冻结)
+
+> **S6-2b 是什么**:把「治理型 Agent 运行时」的 5 条架构不变量(INV-01~INV-05)转成 **31 条可执行断言**,用「若该性质被破坏,测试是否必然失败」的口径逐条证伪,并以 **14 次 mutation** 反证测试自身的鉴别力。
+> **完成了什么 / 为什么值得看**:它不只补了测试 —— 这套方法**真的抓出一条 P0 生产违约**(`auto_title` 越过 Agent Loop 直调对话出口,违反 INV-02),根因是规格指定的 `mini` 出口在实现中缺失;修复**仅 +15 行生产代码**,并以类别式出口边界(而非例外名单)固化。
+> 冻结锚点 `a0c0917` · 完整导览:**[S6-2b_RELEASE_README.md](S6-2b_RELEASE_README.md)**
 
 ## 架构图
 
@@ -81,7 +87,7 @@
 | 目的 | 读什么 |
 |------|--------|
 | 先懂全局 | MAP.md(架构总览图)→ PRD-Core.md §1-2 |
-| 了解设计决策 | ADD.md(12 条 ADR,每条含"违反后果") |
+| 了解设计决策 | ADD.md(20 条 ADR,每条含"违反后果") |
 | 写核心代码 | DIS-CORE.md(脊柱 8 模块伪代码)+ specs/(编码规格) |
 | 写能力代码 | DIS-SEAM.md(seam 三件套+插件总线)+ specs/ |
 | 事件格式 | EVENT-SCHEMA.md(信封/词表/JSONL) |
@@ -142,7 +148,7 @@ pyharness-native
 | 6 | CLI 完整/**桌面程序(pywebview:对话+轨迹回放+审批)** | 双击 exe 桌面对话 |
 
 ## 面试叙事(30 秒版)
-"我完整分析了 DeepSeek Harness(9,044 文件),然后用 Python 全功能复刻了它的架构——事件溯源会话日志、guard 单调拒绝的工具管道、能力 seam 三件套、自研插件总线,71 项功能分 6 阶段推进,产出 60 份文档 1.24MB(含 32 份编码规格/313 函数),每阶段可运行可演示,最终形态是双击即用的 Windows 桌面程序,带 Agent 干活轨迹回放。代码和全套规格文档都在 GitHub。"
+"我完整分析了 DeepSeek Harness(9,044 文件),然后用 Python 全功能复刻了它的架构——事件溯源会话日志、guard 单调拒绝的工具管道、能力 seam 三件套、自研插件总线,66 项功能分 6 阶段推进,产出 60 份文档 1.24MB(含 32 份编码规格/313 函数),每阶段可运行可演示,最终形态是双击即用的 Windows 桌面程序,带 Agent 干活轨迹回放。代码和全套规格文档都在 GitHub。"
 
 ## 关联
 - 需求文档.md / 架构设计.md(早期草案,PRD-Core.md 为准)

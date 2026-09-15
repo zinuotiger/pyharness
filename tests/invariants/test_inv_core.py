@@ -1,14 +1,18 @@
-"""tests/invariants/test_inv_core.py — 核心不变量:INV-02(无绕过 agent-loop 直调 llm)。
+"""tests/invariants/test_inv_core.py — 核心不变量编号化用例:INV-01 / INV-02 / INV-03 / INV-04。
 
-冻结依据:`docs/INVARIANT_REGISTRY.md`(Canonical INV-02)· `docs/PRD-Core.md:838,634`
-· `docs/CONSTRAINTS-06-Testing.md:63` · `docs/DIS-CORE.md:186`
-· `docs/PRD-Core.md:1251`(F042 指定出口 = `ctx.llm.mini`)。
+唯一语义来源 = `docs/INVARIANT_REGISTRY.md`(Canonical Invariant Registry):
+  · **INV-02** 无绕过 agent-loop 直调 llm —— 冻结依据 `PRD-Core.md:838,634` ·
+    `CONSTRAINTS-06-Testing.md:63` · `DIS-CORE.md:186` · `PRD-Core.md:1251`(F042 指定出口 `ctx.llm.mini`)。
+  · **INV-01** 日志只追加 / 历史必由日志派生 —— 冻结依据 `CONSTRAINTS-06-Testing.md:62` · `PRD-Core.md:360`。
+  · **INV-03** rebuild 与缓存一致 —— 冻结依据 `CONSTRAINTS-06-Testing.md:64` · `EVENT-SCHEMA.md:503,526`。
+  · **INV-04** 无 guard 事件即非法执行(含单调拒绝 / 无 bypass)—— 冻结依据 `CONSTRAINTS-06-Testing.md:65` ·
+    `SECURITY.md:199,212` · `DIS-SEAM.md:582,640`;`tool.error` 两类区分见 **F-1 裁定**(2026-09-15)。
 
-来源:本文件由 S6-2a-P0-F(KF-A 修复)建立,是 INV-02 的**正式不变量测试资产**;
-S6-2b 将在**同一文件**扩展 INV-01 / INV-03~09 的编号化用例(不另建第二套)。
+来源:本文件由 S6-2a-P0-F(KF-A 修复)建立,S6-2b-1/2/3 在**同一文件**逐条扩展
+(不另建第二套编号化用例)。
 
 边界:静态扫描对象 = 运行时包 `pyharness/`。`scripts/` 下的人工探针(e2e / probe)
-不参与装配、不被 `pyharness` import,不在 INV-02 的运行时边界内。
+不参与装配、不被 `pyharness` import,不在这些不变量的运行时边界内。
 
 **类别式边界**(非例外名单):`chat`/`chat_stream` = Agent Loop **对话出口**(唯一合法
 调用方 = `agent_loop`);`mini`/`summarize`/`json_chat` = **System Tool LLM 出口**,
@@ -20,6 +24,7 @@ import ast
 import hashlib
 import pathlib
 import types
+from typing import Optional
 
 import pytest
 
@@ -485,3 +490,340 @@ async def test_inv03_rebuild_is_deterministic(tmp_path):
     assert a == b, "INV-03 违约:连续两次 rebuild 结果不一致(非确定性)"
     assert b == c, "INV-03 违约:第三次 rebuild 结果不一致(非确定性)"
     store.close()
+
+
+# ================================================================ INV-04 · guard 事件与单调拒绝
+# 语义来源:docs/INVARIANT_REGISTRY.md(Canonical INV-04)——(a) 执行前必有求值事实 +
+#          (b) 结构单调性。
+#
+# **F-1 裁定(2026-09-15,设计理解更新;未改 Registry)**:
+#   INV-04(a)「执行前必有 guard.evaluated」的适用范围 = **真实工具执行路径**——
+#     · ``tool.result``            ⇒ 必须有同 ``call_id`` 的 ``guard.evaluated``;
+#     · ``tool.error`` 执行前失败  ⇒ **不要求** ``guard.evaluated``,但**必须证明
+#                                     Provider 未调用**(unknown tool / invalid args /
+#                                     wiring failure —— 三者都在关 2 之前返回);
+#     · ``tool.error`` 执行后失败  ⇒ **必须**有 ``guard.evaluated``,且**先于** ``tool.error``
+#                                     (Provider 已进入执行路径)。
+#
+# 本段只补审计确认的缺口(A4 / A5 / G-1 / G-2 + F-1 裁定新增的"两类 tool.error"),
+# **不重复**已 covered 的 8 条(A1/A2/A3/B1~B6 —— 既有断言见 §"无重复建设"注释)。
+
+# ---------------------------------------------------------------- INV-04 本地夹具
+_READ_SCHEMA_INV04 = {"type": "object",
+                      "properties": {"path": {"type": "string"}},
+                      "required": ["path"]}
+
+
+class _Sess:
+    """最小异步事件落点(SessionLog 同型:append → 信封;记录强同步/trace)。"""
+
+    def __init__(self, sid: str = "s-inv04") -> None:
+        self.sid = sid
+        self.events: list[dict] = []
+        self._seq = 0
+
+    async def append(self, type_, payload, *, actor, **kw):
+        self._seq += 1
+        self.events.append({"type": type_, "payload": dict(payload), "actor": actor,
+                            "seq": self._seq, "sync": kw.get("sync", False),
+                            "trace": kw.get("trace")})
+        return types.SimpleNamespace(seq=self._seq, type=type_,
+                                     payload=dict(payload))
+
+    def types(self) -> list[str]:
+        return [e["type"] for e in self.events]
+
+    def of(self, t: str) -> list[dict]:
+        return [e for e in self.events if e["type"] == t]
+
+
+class _Prov:
+    """记录型 Provider:计数 + 可选抛错(制造"执行后失败"路径)。"""
+
+    def __init__(self, *, err: Optional[Exception] = None) -> None:
+        self.calls = 0
+        self.err = err
+
+    def handle(self, args, ctx):
+        self.calls += 1
+        if self.err is not None:
+            raise self.err
+        return {"ok": True}
+
+
+def _inv04_registry(prov):
+    from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
+    reg = ToolRegistry()
+    reg.register_tool(ToolDefinition(name="fs.read_file", description="inv04 工具",
+                                     schema=_READ_SCHEMA_INV04, danger="none",
+                                     owner="builtin"))
+    reg.bind_provider("fs.read_file", prov)
+    return reg
+
+
+def _inv04_scope(root):
+    return types.SimpleNamespace(
+        policy=types.SimpleNamespace(workspace_root=str(root), allowed_domains=set(),
+                                     sandbox_level="basic"),
+        can_use=lambda name: True)
+
+
+def _inv04_gov(chain):
+    from pyharness.governance import (DecisionEngine, GovernanceContext, Policy,
+                                      PolicyEngine, PolicyRegistry)
+    eng = PolicyEngine(policy=Policy("test:v1", "1.0"), registry=PolicyRegistry(),
+                       chain=chain)
+    return GovernanceContext(policy=eng, decisions=DecisionEngine(), receipts=None)
+
+
+def _inv04_ctx(sess, root, *, chain=None, gov=None,
+               with_session=True, with_scope=True,
+               with_guard=True, with_governance=True):
+    """可逐件置 None 的 ctx(缺件矩阵用);缺省四件齐备。"""
+    return types.SimpleNamespace(
+        session=sess if with_session else None,
+        scope=_inv04_scope(root) if with_scope else None,
+        guard=chain if with_guard else None,
+        governance=gov if with_governance else None,
+        approval=None, storage=None, channel="cli", headless=False,
+        session_id=getattr(sess, "sid", "s-inv04"))
+
+
+def _inv04_call(name="fs.read_file", raw=None, call_id="c-inv04"):
+    from pyharness.core.tools_guard import ToolCall
+    return ToolCall(name=name, raw_args=dict(raw or {"path": "a.txt"}),
+                    call_id=call_id)
+
+
+# ---------------------------------------------------------------- T-1(INV-04 · A4 缺件 fail-closed)
+@pytest.mark.parametrize("missing", ["session", "scope", "guard", "governance"])
+async def test_inv04_require_wiring_fail_closed_all_parts(tmp_path, missing):
+    """INV-04(A4):执行前置装配**缺任一件** ⇒ fail-closed(``CYC-999``),
+    且 **Provider 零调用**、**无 ``tool.result``**(绝不带缺件执行)。
+
+    子性质:**缺 guard.evaluated 的执行非法**的结构保证 —— 四件(session/scope/
+    guard/governance)任一缺失都在关 1 之前上抛,调用方拿不到任何执行结果。
+    既有用例只覆盖 guard / governance 两分支(缺口 G-3),本用例补齐四分支。
+    """
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.errors import PyHError
+
+    sess, prov = _Sess(), _Prov()
+    reg = _inv04_registry(prov)
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain),
+                     with_session=(missing != "session"),
+                     with_scope=(missing != "scope"),
+                     with_guard=(missing != "guard"),
+                     with_governance=(missing != "governance"))
+
+    with pytest.raises(PyHError) as ei:
+        await ToolExecutor(reg).execute(_inv04_call(), ctx)
+
+    assert ei.value.code == "CYC-999", f"缺 {missing} 应 fail-closed(CYC-999)"
+    assert prov.calls == 0, f"缺 {missing} 时 Provider 不得被调用"
+    assert not sess.of("tool.result"), f"缺 {missing} 时不得产生 tool.result"
+
+
+# ---------------------------------------------------------------- T-2(INV-04 · A5 无绕过路径)
+# Provider 的两道闸:①**获取** = `registry.lookup_provider()`;②**调用** = `.handle(...)`。
+# 二者各自白名单化:任何新增旁路都会在对应闸门 RED。
+_INV04_ACQUIRE_ALLOWLIST = {
+    "core/tools_executor.py": "唯一 Provider **获取**入口 —— `_provider_handle()` 经 "
+                              "`registry.lookup_provider()` 取回可调用面",
+}
+_INV04_HANDLE_ALLOWLIST = {
+    "core/tool_skill.py": "skill Provider 调用其**私有** `_SkillHandle` 对象的同名方法"
+                          "(内层委派),非 registry 提供的 Provider",
+}
+
+
+def _inv04_attr_calls(root: pathlib.Path, attr: str) -> list:
+    """[(相对路径, 行号, 所在函数名)] —— 全包 `.<attr>(` 属性调用点。
+
+    语法不可解析的文件**不静默跳过**(跳过会让扫描不完整),直接失败。
+    """
+    sites = []
+    for p in sorted(root.rglob("*.py")):
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except SyntaxError as e:                 # 扫描不完整 ⇒ 响亮失败
+            raise AssertionError(
+                f"扫描无法覆盖 {p.relative_to(root).as_posix()}(语法不可解析): {e}") from e
+        funcs = [(n.lineno, n.name) for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == attr):
+                enclosing = max((f for f in funcs if f[0] <= n.lineno),
+                                default=(0, "?"), key=lambda x: x[0])[1]
+                sites.append((p.relative_to(root).as_posix(), n.lineno, enclosing))
+    return sites
+
+
+def _inv04_gate(attr: str, allow: dict, what: str) -> list:
+    """通用闸门断言:调用点 ⊆ 白名单(双向校验)+ 返回调用点。"""
+    sites = _inv04_attr_calls(_PKG, attr)
+    files = {f for f, _, _ in sites}
+    unlisted = sorted(files - set(allow))
+    assert not unlisted, (
+        f"INV-04 违约:出现未登记的 Provider {what}(疑绕过 tools_executor) -> "
+        + ", ".join(f"{f}:{[ln for ff, ln, _ in sites if ff == f]}" for f in unlisted))
+    stale = sorted(set(allow) - files)
+    assert not stale, (
+        f"白名单过期:{what}侧下列文件已无 `.{attr}(` 调用点,须同步收缩 -> "
+        + ", ".join(stale))
+    return sites
+
+
+def test_inv04_provider_acquisition_surface_is_executor_only():
+    """INV-04(A5 · 闸①):`registry.lookup_provider()` 调用点 ⊆ `{tools_executor}`,
+    且归属 `_provider_handle` —— **任何模块想拿到已注册 Provider 都必须过此门**,
+    故旁路获取在执行面上不可能。正向控制防止"删掉调用即变绿"。
+    """
+    sites = _inv04_gate("lookup_provider", _INV04_ACQUIRE_ALLOWLIST, "获取面")
+    assert sites and all(fn == "_provider_handle" for _, _, fn in sites), (
+        f"Provider 获取点应归属 _provider_handle -> {sites}")
+
+
+def test_inv04_provider_handle_call_surface_is_allowlisted():
+    """INV-04(A5 · 闸②):`.handle(` **调用点** ⊆ 白名单(逐条写明理由)。
+
+    子性质:**无绕过路径** —— 任何新增的 Provider 对象直调都会在此 RED。
+    """
+    _inv04_gate("handle", _INV04_HANDLE_ALLOWLIST, "调用面")
+
+
+# ---------------------------------------------------------------- T-3(INV-04 · G-1 call_id 配对)
+async def test_inv04_guard_evaluated_and_tool_result_share_call_id(tmp_path):
+    """INV-04(A1/A3):同一次调用的 `guard.evaluated` 与 `tool.result` 的
+    **`call_id` 逐字段一致**(仅断言"事件序"不足以发现 call_id 被写成常量/异值)。
+
+    子性质:`call_id` 是规则级留痕与执行结果的**配对锚点**;配对断裂 ⇒ 审计
+    无法证明"这次执行过了 guard"。
+    """
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    sess, prov = _Sess(), _Prov()
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain))
+    await ToolExecutor(_inv04_registry(prov)).execute(
+        _inv04_call(call_id="c-pair"), ctx)
+
+    ge = sess.of("guard.evaluated")
+    tr = sess.of("tool.result")
+    assert len(ge) == 1 and len(tr) == 1
+    assert (ge[0]["trace"] or {}).get("call_id") == "c-pair", \
+        f"guard.evaluated 的 call_id 应经 trace 携带 -> {ge[0]['trace']}"
+    assert tr[0]["payload"]["call_id"] == "c-pair"
+    assert (ge[0]["trace"] or {}).get("call_id") == tr[0]["payload"]["call_id"], \
+        "INV-04 违约:guard.evaluated 与 tool.result 的 call_id 不一致(配对断裂)"
+
+
+async def test_inv04_reject_path_call_id_pairing(tmp_path):
+    """INV-04(A3 · 拒绝路径):`guard.evaluated` / `guard.rejected` / `tool.call`
+    三者的 `call_id` 一致,且**无 `tool.result`**(拦了且没执行,INV-05)。"""
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    sess, prov = _Sess(), _Prov()
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain))
+    # danger=critical ⇒ g-danger 直接 reject(不可审批)
+    reg = _inv04_registry(prov)
+    from pyharness.core.tools_registry import ToolDefinition
+    reg.register_tool(ToolDefinition(name="fs.delete_file", description="危险工具",
+                                     schema=_READ_SCHEMA_INV04, danger="critical",
+                                     owner="builtin"))
+    reg.bind_provider("fs.delete_file", prov)
+    await ToolExecutor(reg).execute(
+        _inv04_call(name="fs.delete_file", call_id="c-rej"), ctx)
+
+    ge = sess.of("guard.evaluated")
+    gr = sess.of("guard.rejected")
+    tc = sess.of("tool.call")
+    assert len(ge) == 1 and len(gr) == 1 and len(tc) == 1
+    ids = {(ge[0]["trace"] or {}).get("call_id"),
+           (gr[0]["trace"] or {}).get("call_id"),
+           tc[0]["payload"]["call_id"]}
+    assert ids == {"c-rej"}, f"拒绝路径 call_id 应三处一致 -> {ids}"
+    assert not sess.of("tool.result"), "reject 后不得产生 tool.result(INV-05)"
+    assert prov.calls == 0
+
+
+# ---------------------------------------------------------------- T-4(INV-04 · G-2 挂载恒链尾)
+def test_inv04_plugin_guard_appends_to_tail_only():
+    """INV-04(B5):`register_plugin_guard` **恒在链尾**,既有 id 序列**前缀恒等**,
+    装配版本号单调 +1(绝无插队/重排)。
+
+    子性质:"只增拒绝面"的**顺序面**保证 —— 插件 guard 只能追加,不能插到既有
+    guard 之前(那会改变求值序)。既有用例只断言"不可翻回",未断言链尾位置。
+    """
+    from pyharness.core.tools_guard import Guard, GuardChain
+
+    class _AllowAll(Guard):
+        id = "g-plugin-inv04"
+        def match(self, call): return True
+        def check(self, call, scope): return ("allow", None)
+
+    chain = GuardChain()
+    before = [g.id for g in chain.chain]
+    version0 = chain.chain_version()
+
+    chain.register_plugin_guard(_AllowAll())
+
+    after = [g.id for g in chain.chain]
+    assert after[:len(before)] == before, "既有 guard 序列被改动(前缀恒等被破)"
+    assert after[-1] == "g-plugin-inv04", "新挂 guard 未落在链尾"
+    assert len(after) == len(before) + 1
+    assert chain.chain_version() == version0 + 1, "装配版本号应单调 +1"
+
+
+# ---------------------------------------------------------------- T-5(INV-04 · F-1 两类 tool.error)
+async def test_inv04_tool_error_two_classes(tmp_path):
+    """INV-04(F-1 裁定):`tool.error` 分**两类**,审计要求不同。
+
+    **① 执行前失败**(unknown tool / invalid args)⇒ **不要求** `guard.evaluated`,
+    但**必须证明 Provider 未调用**;
+    **② 执行后失败**(Provider 已进入执行路径)⇒ **必须**有 `guard.evaluated`,
+    且**先于** `tool.error`,且两者 `call_id` 一致。
+    """
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+
+    # ---- ①a 执行前失败:unknown tool(TLB-802)
+    sess, prov = _Sess(), _Prov()
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain))
+    await ToolExecutor(_inv04_registry(prov)).execute(
+        _inv04_call(name="no.such_tool", raw={}, call_id="c-1"), ctx)
+    assert sess.types() == ["tool.error"], f"①a 应只发 tool.error -> {sess.types()}"
+    assert not sess.of("guard.evaluated"), "①a 执行前失败**不要求** guard.evaluated"
+    assert prov.calls == 0, "①a 必须证明 Provider 未调用"
+
+    # ---- ①b 执行前失败:invalid args(TLB-803)
+    sess, prov = _Sess(), _Prov()
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain))
+    await ToolExecutor(_inv04_registry(prov)).execute(
+        _inv04_call(raw={"path": 123}, call_id="c-2"), ctx)
+    assert sess.types() == ["tool.error"], f"①b 应只发 tool.error -> {sess.types()}"
+    assert not sess.of("guard.evaluated"), "①b 执行前失败**不要求** guard.evaluated"
+    assert prov.calls == 0, "①b 必须证明 Provider 未调用"
+
+    # ---- ② 执行后失败:Provider 抛错(已进入执行路径)
+    sess, prov = _Sess(), _Prov(err=RuntimeError("boom"))
+    chain = GuardChain(session=sess)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=_inv04_gov(chain))
+    await ToolExecutor(_inv04_registry(prov)).execute(
+        _inv04_call(call_id="c-3"), ctx)
+    types_ = sess.types()
+    assert "tool.error" in types_, f"② 应发 tool.error -> {types_}"
+    ge, te = sess.of("guard.evaluated"), sess.of("tool.error")
+    assert len(ge) == 1, f"② 执行后失败**必须**有 guard.evaluated -> {types_}"
+    assert types_.index("guard.evaluated") < types_.index("tool.error"), \
+        f"② guard.evaluated 必须先于 tool.error -> {types_}"
+    assert (ge[0]["trace"] or {}).get("call_id") == te[0]["payload"]["call_id"] == "c-3"
+    assert prov.calls == 1, "② 已进入执行路径(Provider 恰 1 次)"

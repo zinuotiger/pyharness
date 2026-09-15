@@ -114,7 +114,7 @@
 |---|---|
 | **ID** | `INV-05` |
 | **Canonical Name** | 拒绝后零副作用 |
-| **Canonical Definition** | 任意 reject（scope / guard / critical / 审批 `denied` / `timeout`）后，**Provider 调用计数 = 0** 且**无该 `call_id` 的 `tool.result`**；拒绝须**强同步**落 `guard.rejected`（`sync=True`），落盘失败即 fail-closed 上抛。 |
+| **Canonical Definition** | 任意 reject（scope / guard / critical / 审批 `denied` / `timeout`）后，**Provider 调用计数 = 0** 且**无该 `call_id` 的 `tool.result`**。**拒绝事实须强同步可证**，按**拒绝来源**分列：**guard 链来源**（scope / guard / critical）⇒ 强同步落 **`guard.rejected`**（`sync=True`）；**审批来源**（审批 `denied` / `timeout`）⇒ 强同步落 **`approval.denied`** / **`approval.timeout`**（`sync=True`）。**不引入统一的 rejection event**。落盘失败即 fail-closed 上抛。 |
 | **Intent** | 使"**拦了且没执行**"**可证**。防最严重失效模式：`reject` 后仍执行 → 日志说 `seq31` 拒、文件其实被删 —— **审计与真实世界分叉**，单调性的全部价值押于此（`SECURITY.md:214`）。 |
 | **Evidence Source** | `docs/PRD-Core.md:838`（"拒绝后零副作用"）· `PRD-Core.md:401,404,1771` · `docs/CONSTRAINTS-06-Testing.md:66` · `docs/SECURITY.md:200,214` · `docs/DIS-SEAM.md:582,650,814`（"G4=INV-05"）· 实现 `pyharness/core/tools_guard.py:13,689,721,832` · `pyharness/core/scope.py:278` · `pyharness/governance/receipt.py:188` |
 | **Existing Test Evidence** | `tests/unit/test_tools_guard.py::test_reject_event_pair_order_and_sync` · `::test_scope_hidden_reject_events_grd401` · `::test_reject_deterministic_not_flippable`（亦涉 INV-04）· `tests/unit/test_tools_executor.py::test_scope_hidden_terminal_reject` · `tests/unit/test_tool_fs.py::test_executor_critical_delete_denied_zero_side_effect` · `tests/unit/test_cli.py::test_run_headless_rejected_listing` |
@@ -306,6 +306,7 @@
 | 日期 | 变更 | 依据 | 状态 |
 |---|---|---|---|
 | 2026-09-15 | **建立本 Registry（v1.0）**：确立 `INV-01`~`INV-09` 的 Canonical 定义与 `Legacy Mapping`（L-1~L-10）、Retired References（R-1/R-2） | `S6-1_INV_CLASSIFICATION.md` §12（人工裁定，2026-09-15） | `established` |
+| 2026-09-15 | **`INV-05` 的 `Canonical Definition` 按拒绝来源分列**（F-2）：原表述"拒绝须强同步落 `guard.rejected`" **未区分来源** —— **guard 链来源**（scope / guard / critical）⇒ `guard.rejected`(`sync=True`)；**审批来源**（`denied` / `timeout`）⇒ `approval.denied` / `approval.timeout`(`sync=True`)。**不引入统一的 rejection event**。其余字段（ID / Canonical Name / Intent / Evidence Source / Existing Test Evidence / Coverage Gap / Legacy Mapping / Status）**未改** | `S6-2b-4_COVERAGE_AUDIT.md` §2.4 **F-2**（人工裁定，2026-09-15） | `established` |
 
 ---
 

@@ -1,6 +1,6 @@
 """events 模块单测 — 契约:specs/events.py.md + EVENT-SCHEMA.md §3
 
-覆盖面:词表完整(76 名全量核对:基线 57 + §7 词表外扩展 19 项,含 llm.retry/
+覆盖面:词表完整(77 名全量核对:基线 57 + §7 词表外扩展 20 项,含 llm.retry/
 plan.done/plan.aborted/schedule.registered/updated/removed/blocked/missed/
 policy.updated/decision.issued)、Envelope 三要素(seq/type/ts UTC)、seq 连续性(EVT-101)、非法
 输入抛码(EVT-100/102/106)、payload 二次强校验、SeqState 分配器、check_seq_gap
@@ -65,8 +65,10 @@ EXPECTED_ALL = (
     "decision.issued",
     # 治理层凭证事件(M4;强同步)
     "receipt.emitted",
+    # 治理层证据事件(M6;普通攒批,非强同步)
+    "evidence.archived",
 )
-assert len(EXPECTED_ALL) == 76, "测试词表清单必须恰为 76 名"
+assert len(EXPECTED_ALL) == 77, "测试词表清单必须恰为 77 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -82,8 +84,9 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 # 词表完整
 # =====================================================================
 def test_vocab_full():
-    """词表 76 名(74 核心 + policy.updated/decision.issued/receipt.emitted 治理层事件)。"""
-    assert len(EVENT_TYPES) == 76
+    """词表 77 名(74 核心 + policy.updated/decision.issued/receipt.emitted/
+    evidence.archived 治理层事件)。"""
+    assert len(EVENT_TYPES) == 77
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 
@@ -399,12 +402,15 @@ def test_s25_scope_events_are_registered():
 
 
 def test_s25_channel_counts():
-    """通道计数冻结:强同步 14、瞬时 3(总数 76 由 test_vocab_full 覆盖)。"""
+    """通道计数冻结:强同步 14、瞬时 3(总数 77 由 test_vocab_full 覆盖)。"""
     assert len(EV.SYNC_TYPES) == 14
     assert len(EV.TRANSIENT_TYPES) == 3
     assert "policy.updated" in EV.SYNC_TYPES          # 治理事件:强同步(ADR-020 Q3)
     assert "decision.issued" in EV.SYNC_TYPES         # 治理决策:强同步(ADR-015)
     assert "receipt.emitted" in EV.SYNC_TYPES         # 治理凭证:强同步(M4)
+    # M6/S5-1:证据是**索引**,普通攒批,**不得**入强同步(冻结通道定义)
+    assert "evidence.archived" not in EV.SYNC_TYPES
+    assert EV.is_transient("evidence.archived") is False
     assert "decision.issued" not in EV.TRANSIENT_TYPES
 
 
@@ -472,7 +478,7 @@ def test_s25_scope_and_policy_event_boundary_frozen():
 #      (PARAMETER-ANCHOR 基线 57),属**基线引用**而非当前计数 → 放行。
 #   ② 本守卫只扫 ``pyharness/**/*.py`` 的**注释与 docstring 文本**;
 #      ``docs/**`` 有意保留基线引用(specs/CODE-MATRIX/baseline),不在此扫描面。
-_ALLOWED_COUNTS = {"76"}                    # 当前真值(类型数)
+_ALLOWED_COUNTS = {"77"}                    # 当前真值(类型数)
 _COUNT_RE = re.compile(r"(?<![\w-])(\d{2,3})\s*(?:个)?\s*(?:事件|词表|核心类型)")
 _WHITELIST_NEAR = ("基线", "A-E", "权威", "PARAMETER-ANCHOR")
 
@@ -507,5 +513,5 @@ def test_s25_no_stale_vocab_count_in_source():
                 rel = path.relative_to(repo).as_posix()
                 offenders.append(f"{rel}:{tok.start[0]}: {m.group(0)!r}")
     assert not offenders, (
-        "源码注释中出现过期词表计数(应订正为 76,或标注为基线引用):\n  "
+        "源码注释中出现过期词表计数(应订正为 77,或标注为基线引用):\n  "
         + "\n  ".join(offenders))

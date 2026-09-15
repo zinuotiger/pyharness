@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from pyharness.errors import raise_code
-from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 76 词表,见偏离 5)
+from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 77 词表,见偏离 5)
 
 if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖
     from pyharness.core.tools_guard import ToolCall

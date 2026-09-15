@@ -24,6 +24,7 @@ from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册�
     ConfigUpdatedPayload,
     ContextCompactedPayload,
     DecisionIssuedPayload,
+    EvidenceArchivedPayload,
     ForkCreatedPayload,
     GoalCompletedPayload,
     GoalCreatedPayload,
@@ -179,11 +180,11 @@ def validate_payload(type_: str, payload: dict) -> dict:
 
 
 # ------------------------------------------------------------------ 核心词表
-# 76 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前
-# 计数] + 词表外扩展 19 项 = 76;按 §7 登记:llm.retry F028 /
+# 77 事件类型全量入册(EVENT-SCHEMA §3 的 57 A-E 分组**权威**[基线引用,非当前
+# 计数] + 词表外扩展 20 项 = 77;按 §7 登记:llm.retry F028 /
 # plan.done·plan.aborted F046 / schedule.registered·updated·removed·blocked·
 # missed F048 / policy.updated ADR-020 / decision.issued ADR-015 /
-# receipt.emitted M4;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
+# receipt.emitted M4 / evidence.archived M6;PARAMETER-ANCHOR 基线 57,扩展只增不改)。
 # 元组元素:(type, payload_model, transient)
 _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # ---- A 会话生命周期(§3.1)
@@ -281,6 +282,9 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # 治理层凭证事件(M4;薄引用 + 完整性链:receipt_id/decision_id/kind/digest/
     # prev_hash;完整 Receipt 由 decision.issued 派生;强同步见 SYNC_TYPES)
     ("receipt.emitted", ReceiptEmittedPayload, False),
+    # 治理层证据事件(M6;S5-1:只存引用,不复制事件内容,INV-G4;**普通攒批,
+    # 不入 SYNC_TYPES**——证据是索引,丢失可由既有事件再派生,INV-E3)
+    ("evidence.archived", EvidenceArchivedPayload, False),
 )
 
 

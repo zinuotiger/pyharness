@@ -26,6 +26,8 @@ from pyharness.governance.policy import (POLICY_OPS, EVENT_POLICY_UPDATED,
                                          PolicyRule, compute_fingerprint)
 from pyharness.governance.receipt import (DecisionReceipt, ReceiptStore,
                                           verify_receipt)
+from pyharness.governance.evidence import (Evidence, EvidenceCollector,
+                                           EvidenceRef)
 
 __all__ = [
     "GovernanceContext",
@@ -35,4 +37,6 @@ __all__ = [
     "Decision", "Verdict", "Principal", "DecisionEngine",
     # S4/M4:决策凭证(Evidence/Audit 仍不导出)
     "DecisionReceipt", "ReceiptStore", "verify_receipt",
+    # S5/M6(第一步):证据数据契约与归档入口(Audit 仍不导出)
+    "Evidence", "EvidenceRef", "EvidenceCollector",
 ]

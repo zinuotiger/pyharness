@@ -1,7 +1,7 @@
 """pyharness/events/payload.py — 各事件负载模型 (specs/events.py.md 词表清单)
 
 按 EVENT-SCHEMA §3 词汇总表为每个事件实现一个 pydantic 负载模型
-(extra="forbid",拒多余字段——F026 同纪律);76 事件词表(74 payload 模型) + llm.retry
+(extra="forbid",拒多余字段——F026 同纪律);77 事件词表(75 payload 模型) + llm.retry
 落盘注册见 vocab.py 的 _CORE_EVENT_TYPES。
 
 约定:✓=必填字段不带默认值;—=可选字段 Optional/显式默认;载荷内
@@ -9,9 +9,15 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# 证据引用种类(与 ``governance.evidence.REF_KINDS`` 同源;events 不得反向 import
+# governance,故本地声明 + **一致性测试**守卫——见
+# tests/unit/test_governance_evidence.py::test_ref_kinds_match_evidence_module)
+_EVIDENCE_REF_KINDS: tuple[str, ...] = ("seq", "decision_id", "receipt_id",
+                                        "segment", "test")
 
 # 所有负载模型的公共基类:拒绝多余字段(严格模式纪律)
 class _PayloadBase(BaseModel):
@@ -637,6 +643,41 @@ class ReceiptEmittedPayload(_PayloadBase):
     kind: str = Field(min_length=1)
     digest: str = Field(min_length=1)
     prev_hash: Optional[str] = None
+
+
+class EvidenceArchivedPayload(_PayloadBase):
+    """evidence.archived:治理证据归档事实(M6;S5-1)。
+
+    **只存引用,不复制事件内容**(INV-G4 / INV-E1):
+
+    - ``evidence_id``:工件主键;
+    - ``claim``:被支持的断言;
+    - ``refs``:指向**真源**的引用列表,每项 ``{"kind": <enum>, "locator": str}``。
+      顶层 ``extra="forbid"`` 不约束嵌套 dict,故此处用 ``field_validator`` 把
+      内层严格性补回(键集恰为两键 + kind 值域 + locator 非空);
+    - ``artifact_path``:可选**外部附件**引用——**不承载治理事实**(不得作为
+      治理判定输入;缺失/损坏不影响任何不变量)。
+
+    **通道 = 普通(攒批),非强同步**(EVENT-SCHEMA §3.6 冻结):证据是**索引**,
+    丢失可由既有事件**再派生**(INV-E3)。
+    """
+    evidence_id: str = Field(min_length=1)
+    claim: str = Field(min_length=1)
+    refs: list = Field(default_factory=list)
+    artifact_path: Optional[str] = None
+
+    @field_validator("refs")
+    @classmethod
+    def _check_refs(cls, v: Any) -> Any:
+        for item in v or ():
+            if not isinstance(item, dict) or set(item) != {"kind", "locator"}:
+                raise ValueError("refs 每项必须是 {kind, locator} 且仅此两键")
+            if item.get("kind") not in _EVIDENCE_REF_KINDS:
+                raise ValueError(f"refs.kind 必须是 {_EVIDENCE_REF_KINDS} 之一")
+            loc = item.get("locator")
+            if not isinstance(loc, str) or not loc:
+                raise ValueError("refs.locator 必须为非空字符串")
+        return v
 
 
 class SkillInstalledPayload(_PayloadBase):

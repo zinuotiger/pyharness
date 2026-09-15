@@ -274,8 +274,10 @@ def test_facade_exports_only_s3_1_surface():
     assert {"Decision", "Verdict", "Principal"} <= set(g.__all__)
     # S4/M4:凭证已接线并导出
     assert {"DecisionReceipt", "ReceiptStore"} <= set(g.__all__)
-    # Evidence / Audit 属 S5,尚未实现 ⇒ 不导出
-    for out_of_scope in ("Evidence", "EvidenceCollector", "AuditSystem"):
+    # S5/M6(第一步):证据数据契约与归档入口已导出
+    assert {"Evidence", "EvidenceRef", "EvidenceCollector"} <= set(g.__all__)
+    # Audit 属 S5 后续,尚未实现 ⇒ 不导出
+    for out_of_scope in ("AuditSystem", "TraceabilityMatrix"):
         assert out_of_scope not in set(g.__all__)
         assert not hasattr(g, out_of_scope)
 

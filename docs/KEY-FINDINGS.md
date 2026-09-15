@@ -140,3 +140,43 @@
 ---
 
 *— KEY-FINDINGS v1.0 完 — 12 决策 × 14 坑位 × 5 亮点;开工前重读第 3 节,面试前重读第 4 节。*
+
+---
+---
+
+# 附录 A — S6-2 阶段登记(2026-09-15)
+
+> **本附录为新增记录**(S6-2a-P0 人工裁定后登记),**不修改 §1~§6 任何既有条目**。
+> 编号用 `KF-A` / `KF-B`,与 §1 的 ADR 系列、§3 的 PIT 系列**不重叠**。
+> 两条 Finding **相互独立**:KF-A 是**不变量违约**(编号问题),KF-B 是**控制面缺口**(工程风险)。**KF-B 不新建 INV 编号。**
+> 裁定依据:`S6-2_COVERAGE_MATRIX.md` §10 / §11 / §12 · `docs/INVARIANT_REGISTRY.md`(INV-02)。
+
+## A.1 KF-A(P0)— `auto_title` 越过 Agent Loop 直接调用 `llm.chat`,违反 INV-02
+
+| 字段 | 内容 |
+|---|---|
+| **现象** | `pyharness/core/auto_title.py:36` 调用 `ctx.llm.chat([...], tools=None, ctx=ctx)`;经 `pyharness/engine.py:805-806` 在生产路径接线(`res.reason=="complete"` 且 `spine._auto_titled` 为假时,于 `loop.wake()` **返回之后**触发);**零测试**(`grep -rln auto_title tests/` 为空);**无 spec**(`docs/specs/auto_title.py.md` 不存在)。 |
+| **根因** | **错误的 LLM 出口选择**。F042 属"系统工具"类直调,PRD 为其指定的出口是 **`ctx.llm.mini(...)`**(`docs/PRD-Core.md:1251`),但 **`mini()` 在实现中不存在**(`grep -rn "def mini" pyharness/` 零命中)⇒ 实现者落到唯一可用的对话出口 `chat`。 |
+| **规格证据** | `PRD-Core.md:838`(F018)"INV-02 无绕过 agent-loop 直调 llm" · `CONSTRAINTS-06-Testing.md:63` 断言"**全库 `llm.chat` 唯一合法调用方 = agent-loop**" · `DIS-CORE.md:186`"本模块是 llm.chat 唯一合法调用方;绕过即架构违规" · `docs/specs/agent_loop.py.md:262`"(测试钉死)" · `PRD-Core.md:634`(意图=三闸只在循环内) · `PRD-Core.md:1241-1254`(F042 规格) |
+| **实现证据** | `auto_title.py:36`(调用点) · `engine.py:800`→`:802-806`(调用时机在循环外) · `agent_loop.py:196-199`(三闸全在循环内:`_must_stop` / `scope.check_budget`) · `llm.py:647-684`(`LLMAdapter.chat` 只计量不阻断) · `llm.py:957`(`_chat_any` 为四出口唯一汇聚点) |
+| **影响** | ⚠️ **不变量**:`INV-02` 字面与意图均被违反。⚠️ **控制**:该调用**不经过**轮数/取消/预算前置闸(预算超支仅**下一轮**可见)。✅ **未受损**:审计留痕(`llm.request`/`llm.usage`/`llm.response` 齐全)、单端点路径、超时闸(F017)、降级链、无工具副作用(`tools=None`)。**非安全漏洞**。 |
+| **附带规格偏离(F042 共 5 项)** | ① 出口 `mini`→`chat`;② 输入截断 `first[:200]`→`first[:500]`(`auto_title.py:22`);③ 标题上限 `≤24`→`TITLE_MAX=64`(`:16,:42`,而模块 docstring `:3` 仍写 ≤24);④ 失败/空降级"**前 20 字符**"→`return None`(`:40,:44`);⑤ PRD 要求的 `test_f042_title.py`(`PRD:1878`)不存在。(另 `ctx.session.has_title` 不存在,实现改用日志派生判断 —— **等价且更合 INV-01**,不计偏离。) |
+| **裁定** | **Option A:违反成立**;违规点 = **出口选择**(+ 无闸,已划归 KF-B)。**不修改 INV-02 定义、不扩大例外范围**。 |
+| **处置** | **不修**(S6-2 纪律 14)。修复设计见 `S6-2_COVERAGE_MATRIX.md` §11;需**人工授权**后另行实施。 |
+| **状态** | `OPEN` |
+| **关联** | `docs/INVARIANT_REGISTRY.md` INV-02 · `S6-2_COVERAGE_MATRIX.md` §7 / §10 / §11 |
+
+## A.2 KF-B(P1)— 系统工具类 LLM 出口不经运行时三闸(**独立于 INV-02**)
+
+| 字段 | 内容 |
+|---|---|
+| **现象** | ① `LLMClient` 的**全部**出口(`chat` / `chat_stream` / `summarize` / `json_chat`)**均不执行** budget / cancellation / guard / governance 判定 —— `llm.py` 全文**无相关执行代码**(`grep -n "scope\|budget\|guard\|governance\|cancelled" pyharness/core/llm.py` 命中全为 docstring/签名);三闸**只**在 `agent_loop.py:197-199`。② 非循环消费者同样不过闸:`plan_mode` → `json_chat`(`plan_mode.py:341-352`)、`compaction` → `summarize`(`compaction.py:510-516`)。③ **`summarize(prompt, *, budget: int = 400, ctx)` 的 `budget` 参数只出现在签名,函数体内从未被使用**(`llm.py:974-982`),而 `compaction.py:266,299` 的 spec 声称该上界存在。 |
+| **根因** | **三闸的实现位置绑定在"循环"而非"LLM 出口"**。`agent_loop.run()` 在每轮前置判定(轮数 `:197` / 预算 `:199` / 取消 `:197,204`),而 `LLMClient` 任一出口都只是"请求-归一-计量-落盘",**不含任何准入判定**。⇒ 任何**非循环**的 LLM 调用路径天然不受闸。 |
+| **为何独立于 INV-02** | `json_chat` / `summarize` **不使用 `llm.chat`**(经 `_chat_any("chat", …)` 直接下发),故**不违反 `INV-02`**;反之 `auto_title` 修复后(KF-A)也**仍不过闸**。⇒ "**不违反 INV-02**" ≠ "**无工程风险**"。**不为其新建 INV 编号。** |
+| **缺失的控制** | 预算前置(F032)· 取消(F025)· 轮数归属。**未缺失**:审计留痕 · 单端点路径 · 超时(F017) · 降级链 · guard(无工具调用,不适用)。 |
+| **风险** | **P1**(资源/控制面)。系统工具类调用可**越过预算上界**(超支仅下一轮可见)、**不受取消令牌约束**;且 `summarize.budget` 的"有上界"印象与实现不符(**比没有参数更易误导调用方**)。无审计缺失、无安全绕过面。 |
+| **处置** | **不修**;**不归入 INV-02**;建议独立评估(可与 durability/reliability 阶段合并)。未来测试**只设计不实施**(见 `S6-2_COVERAGE_MATRIX.md` §12)。 |
+| **状态** | `OPEN` |
+| **关联** | `S6-2_COVERAGE_MATRIX.md` §12 · `pyharness/core/llm.py:957,974` · `pyharness/core/agent_loop.py:197-199` |
+
+**登记口径声明**:本附录仅登记**事实、证据、影响与裁定**,**不包含任何修复动作**;两条 Finding 的修复均**需另行人工授权**,且**不得在测试阶段(S6-2)内实施生产代码改动**。

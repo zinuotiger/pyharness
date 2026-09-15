@@ -33,12 +33,11 @@ async def auto_title(ctx: Any) -> Optional[str]:
     prompt = (f"给这段会话起一个简洁中文标题,≤24 字,只输出标题本身,"
               f"不要引号/句号/解释:\n用户第一条消息: {first}")
     try:
-        resp = await ctx.llm.chat([{"role": "user", "content": prompt}],
-                                  tools=None, ctx=ctx)
+        text = await ctx.llm.mini(prompt, ctx=ctx)
     except PyHError as e:                        # LLM 失败:标题留空(下次再试)
         log.info("auto_title skipped code=%s", e.code)
         return None
-    title = (resp.content or "").strip().strip('"“”\' ').splitlines()[0:1]
+    title = text.strip().strip('"“”\' ').splitlines()[0:1]
     title = (title[0] if title else "").strip()[:TITLE_MAX]
     if not title:
         return None

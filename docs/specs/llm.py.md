@@ -253,6 +253,23 @@ async def chat_stream(self, messages, tools=None, *, ctx):
 
 **关联测试**:GWT-L4-04、test_f027_stream(chunk 只上总线/聚合一致)。
 
+### `async def mini(prompt: str, *, ctx) -> str` — 系统工具 LLM 出口(F042)
+
+**功能一句话**:单 prompt 进 → 纯文本出;`_chat_any("chat", …, None, ctx)` 薄包装,超时(F017)/计量(F029)/事件/降级链全复用 `chat` 链路,**单一真源不新增**。
+
+```python
+async def mini(self, prompt, *, ctx):
+    resp = await self._chat_any("chat", [{"role": "user", "content": prompt}],
+                                None, ctx)
+    return (resp.content or "").strip()
+```
+
+**出口类别(与 `chat` 的边界)**:`chat` / `chat_stream` = **Agent Loop LLM 出口**(INV-02:唯一合法调用方 = agent-loop,经 `getattr(ctx.llm, chat_fn)` 派发);`mini` = **System Tool LLM 出口**,与 `summarize`(F058)/`json_chat`(F045)同类,**不受 INV-02 的调用方约束**。区别在**契约面**:`chat` 收全量 messages + tools、返回 `LLMResponse`、语义为一轮对话;`mini` 收单 prompt、无 tools 面、返回 `str`、无对话轮语义。
+**禁止**:把 `mini` 实现为 `chat` 的换名包装;把非循环调用方列入 INV-02 的**例外名单**(此处是**类别式边界**,成员由 `LLMClient` 公开面枚举,非枚举例外)。
+
+**参数表**:`prompt`=提示原文(单串)· `ctx`=**必填**(超时/计量/事件落盘依赖)。**异常表**:同 `chat`(LLM-301/302/303/304)。**不设** `budget` 参数。
+**关联测试**:`tests/invariants/test_inv_core.py`(`test_inv02_*`)。
+
 ### `def report_usage(usage, model: str, *, ctx) -> Envelope` — token 计量(F029/DIS-CORE §4.3.4)
 
 **功能一句话**:每成功请求落 `llm.usage`(in/out/cost_est)+ 更新计数器;usage 事件即事实,计数器可重建。

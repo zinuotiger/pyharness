@@ -971,6 +971,19 @@ class LLMClient:
         """流式出口(代理到适配器/降级链;chunk 上总线不入日志)。"""
         return await self._chat_any("chat_stream", messages, tools, ctx)
 
+    async def mini(self, prompt: str, *, ctx: Any) -> str:
+        """系统工具级单次文本出口(F042 auto_title 等消费):单 prompt 进 → 纯文本出。
+
+        与 ``chat`` 属**不同类**:无 messages 列表 / 无 tools 面 / 无对话轮语义 /
+        不返回 ``LLMResponse``。``chat``/``chat_stream`` 是 **Agent Loop 对话出口**
+        (INV-02:唯一合法调用方 = agent-loop);本出口是 **System Tool LLM 出口**,
+        与 ``summarize``/``json_chat`` 同类(同为 ``_chat_any`` 薄包装),差别仅在输出
+        形态。超时(F017)/计量(F029)/事件/降级链全部复用既有链,不新增真源。
+        """
+        resp = await self._chat_any("chat", [{"role": "user", "content": prompt}],
+                                    None, ctx)
+        return (resp.content or "").strip()
+
     async def summarize(self, prompt: str, *, budget: int = 400,
                         ctx: Any = None) -> str:
         """压缩摘要出口(F058 Consumer):单次 chat 取 content;同走降级链。

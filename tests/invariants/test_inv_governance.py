@@ -192,3 +192,48 @@ async def test_inv_g1_g2_r2_r6_r7_full_approval_lifecycle():
     reb = rebuild_from_log(log)
     assert len(reb) == 1 and verify_chain(reb) is True
     assert reb[0].approval_ref == granted.payload["approval_id"]
+
+
+# ================================================================ INV-E3
+class _EvE:
+    def __init__(self, seq, type_, payload):
+        self.seq, self.type, self.payload = seq, type_, payload
+
+
+class _LogE:
+    """会话日志替身(``events_after`` + ``append``,与 SessionLog 同型)。"""
+
+    def __init__(self):
+        self.events: list[_EvE] = []
+
+    async def append(self, type_, payload, *, actor, sync=False, trace=None):
+        e = _EvE(len(self.events) + 1, type_, dict(payload))
+        self.events.append(e)
+        return e
+
+    def events_after(self, after: int = 0):
+        return [e for e in self.events if e.seq > after]
+
+
+async def test_inv_e3_evidence_index_is_rederivable_not_truth_source():
+    """INV-E3:``evidence.archived`` **非强同步** ⇒ 证据索引**可由事件日志完全再派生**
+    (索引是缓存,不是事实源);且 ``on_event`` 只读(事件数不变)。"""
+    from pyharness.governance.evidence import EvidenceCollector
+
+    log = _LogE()
+    log.events.append(_EvE(1, "segment.start", {"task_id": "t-1"}))
+    log.events.append(_EvE(2, "evidence.archived",
+                           {"evidence_id": "E1", "claim": "c",
+                            "refs": [{"kind": "segment", "locator": "t-1:seg"}],
+                            "artifact_path": None}))
+
+    # 订阅态
+    col = EvidenceCollector()
+    for e in log.events:
+        await col.on_event(e)
+    before = len(log.events)
+    # 再派生:全新 collector 仅靠 replay
+    rebuilt = await EvidenceCollector.from_log(log)
+    assert ([x.evidence_id for x in rebuilt.collect_for_task("t-1")]
+            == [x.evidence_id for x in col.collect_for_task("t-1")] == ["E1"])
+    assert len(log.events) == before               # 只读:零写入

@@ -1,12 +1,16 @@
-"""tests/unit/test_governance_evidence.py — S5-1 证据契约与归档入口单测。
+"""tests/unit/test_governance_evidence.py — 证据模块单测(S5-1 + S5-2a + S5-2b)。
 
-范围(S5-1):``EvidenceRef`` / ``Evidence`` / ``archive()`` / 事件注册 / payload
-validator / INV-E1(只引用) / INV-E2(引用可解析) / INV-E4(唯一写点)。
-**不含** ``on_event`` / ``collect_for_task``(S5-2)与 ``TraceabilityMatrix``(S7)。
+- **S5-1**:``EvidenceRef`` / ``Evidence`` / ``archive()`` / 事件注册 / payload
+  validator / INV-E1(只引用) / INV-E2(引用可解析) / INV-E4(唯一写点)。
+- **S5-2a**:``on_event``(只读索引) / ``from_log``(日志重建) /
+  ``collect_for_task``(段锚聚合) / INV-E3(索引可再派生,非真源)。
+- **S5-2b**:``engine`` 装配(构造 → 订阅 → 注入)· 单实例 · 订阅真送达。
+- **不含**:``TraceabilityMatrix``(S7)。
 """
 from __future__ import annotations
 
 import ast
+import asyncio
 import pathlib
 
 import pytest
@@ -201,3 +205,162 @@ async def test_archive_accepts_dict_refs_and_dedupes_nothing():
     assert log.events[-1].payload["refs"] == [
         {"kind": "decision_id", "locator": "D1"},
         {"kind": "receipt_id", "locator": "R1"}]
+
+
+# ============================== S5-2a:只读索引 + 段锚聚合(D-1(a))
+class TestEvidenceIndex:
+    """D-1(a):``collect_for_task`` 的 Evidence **只来自 ``evidence.archived`` 事件**;
+    索引是**派生缓存**(可由 ``from_log`` 完全重建),**非事实源**。
+
+    日志布局(seq → type):
+        1 segment.start(t-3) · 2 decision.issued(D1) · 3 receipt.emitted(R1)
+        4 E-dec(decision_id D1) · 5 E-receipt(receipt_id R1) · 6 E-seg(segment t-3)
+        7 E-seq(seq s-abc12345:10) · 8 segment.end(t-3) · 9 segment.start(t-9)
+       10 tool.call(c1)
+    """
+
+    @staticmethod
+    def _log() -> _Log:
+        log = _Log()
+        log.events.append(_Ev(1, "segment.start", {"task_id": "t-3"}))
+        log.events.append(_Ev(2, "decision.issued", {"decision_id": "D1"}))
+        log.events.append(_Ev(3, "receipt.emitted", {"receipt_id": "R1"}))
+        for seq, eid, ref in (
+            (4, "E-dec", {"kind": "decision_id", "locator": "D1"}),
+            (5, "E-receipt", {"kind": "receipt_id", "locator": "R1"}),
+            (6, "E-seg", {"kind": "segment", "locator": "t-3:seg"}),
+            (7, "E-seq", {"kind": "seq", "locator": "s-abc12345:10"}),
+        ):
+            log.events.append(_Ev(seq, "evidence.archived",
+                                  {"evidence_id": eid, "claim": "c",
+                                   "refs": [ref], "artifact_path": None}))
+        log.events.append(_Ev(8, "segment.end",
+                              {"task_id": "t-3", "start_seq": 1}))
+        log.events.append(_Ev(9, "segment.start", {"task_id": "t-9"}))
+        log.events.append(_Ev(10, "tool.call", {"call_id": "c1"}))
+        return log
+
+    async def _indexed(self) -> EvidenceCollector:
+        col = EvidenceCollector()
+        for e in self._log().events:
+            await col.on_event(e)
+        return col
+
+    # ------------------------------------------------------------ T-1
+    async def test_t1_on_event_builds_index(self):
+        col = await self._indexed()
+        assert col.evidence_count() == 4
+
+    # ------------------------------------------------------------ T-4 / T-5
+    async def test_t4_t5_aggregate_by_segment_anchor(self):
+        """段锚聚合:四类 ref 均能归入正确 task;跨段不串。"""
+        col = await self._indexed()
+        t3 = col.collect_for_task("t-3")
+        assert [e.evidence_id for e in t3] == ["E-dec", "E-receipt", "E-seg"]
+        assert [e.evidence_id for e in col.collect_for_task("t-9")] == ["E-seq"]
+
+    async def test_t6_unknown_or_empty_task_returns_empty(self):
+        col = await self._indexed()
+        assert col.collect_for_task("nope") == ()
+        assert col.collect_for_task("") == ()
+
+    # ------------------------------------------------------------ T-2
+    async def test_t2_rebuild_from_log_matches_subscription_state(self):
+        """INV-E3 核心:新 collector 仅靠 replay 重建 ⇒ 与订阅态**逐条相等**。"""
+        col = await self._indexed()
+        rebuilt = await EvidenceCollector.from_log(self._log())
+        assert rebuilt.evidence_count() == col.evidence_count()
+        for task in ("t-3", "t-9"):
+            assert ([e.evidence_id for e in rebuilt.collect_for_task(task)]
+                    == [e.evidence_id for e in col.collect_for_task(task)])
+
+    # ------------------------------------------------------------ T-3
+    async def test_t3_on_event_is_read_only(self):
+        """只读铁证:喂完全部事件后**事件数不变**;且 ``on_event`` 体内无 ``append``。"""
+        log = self._log()
+        before = len(log.events)
+        col = EvidenceCollector()
+        for e in log.events:
+            await col.on_event(e)
+        assert len(log.events) == before              # 零写入
+        tree = ast.parse((_ROOT / "pyharness/governance/evidence.py")
+                         .read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "on_event")
+        assert not any(isinstance(x, ast.Attribute) and x.attr == "append"
+                       for x in ast.walk(fn)), "on_event 不得写事件"
+
+    # ------------------------------------------------------------ T-7
+    async def test_t7_exception_safe_on_malformed_events(self):
+        """畸形事件不得抛穿,亦不破坏已建索引。"""
+        col = await self._indexed()
+        good = col.evidence_count()
+        for bad in (_Ev(99, "evidence.archived", None),
+                    _Ev(100, "evidence.archived", {"evidence_id": "X",
+                                                   "refs": ["not-a-dict"]}),
+                    _Ev(101, "evidence.archived", {}),
+                    _Ev(102, "segment.end", {}),
+                    _Ev(103, "unknown.type", {"x": 1}),
+                    object()):
+            await col.on_event(bad)                   # 不抛
+        assert col.evidence_count() == good           # 索引未被破坏
+
+    # ------------------------------------------------------------ 索引非真源
+    async def test_index_is_cache_not_truth_source(self):
+        """约束 ③/⑤:``archive()`` **不维护索引**;索引只由 ``on_event`` 建(可重建)。"""
+        log = _Log(); _seed(log)
+        col = EvidenceCollector()
+        await col.archive("c", [EvidenceRef("decision_id", "D1")],
+                          ctx=_Ctx(log))
+        assert col.evidence_count() == 0              # archive 不写索引
+        await col.on_event(log.events[-1])            # 由事件面进入索引
+        assert col.evidence_count() == 1
+
+
+# ============================== S5-2b:engine 装配(构造 → 订阅 → 注入)
+class TestEvidenceWiring:
+    """S5-2b:``EvidenceCollector`` 由 engine 装配、订阅真送达、注入单实例。
+
+    自带 cfg 辅助(不跨测试文件引用),保持 S5-2b 白名单不变。
+    """
+
+    @staticmethod
+    def _cfg(tmp_path):
+        from pyharness.config import load_settings
+        cfg = load_settings()
+        cfg.storage.root = str(tmp_path)
+        cfg.storage.sessions_dir = str(tmp_path / "sessions")
+        cfg.storage.workspaces_dir = str(tmp_path / "workspaces")
+        cfg.storage.spill_dir = str(tmp_path / "spill")
+        cfg.storage.db_path = str(tmp_path / "pyharness.db")
+        return cfg
+
+    async def test_spine_wires_evidence_single_instance(self, tmp_path):
+        """注入 + 单实例(与 ``ctx.governance`` 同一对象)。"""
+        from pyharness.engine import assemble_real_engine
+        ctx = await assemble_real_engine(
+            self._cfg(tmp_path), sid="s-eng-ev-000003",
+            sessions_dir=tmp_path / "sessions")
+        gov = ctx.engine_spine.governance
+        assert isinstance(gov.evidence, EvidenceCollector)
+        assert ctx.governance is gov                    # 单实例挂载
+
+    async def test_subscription_delivers_events_to_index(self, tmp_path):
+        """构造→订阅→注入 顺序正确:事件真流入**只读**索引,聚合可用。"""
+        from pyharness.engine import assemble_real_engine
+        ctx = await assemble_real_engine(
+            self._cfg(tmp_path), sid="s-eng-ev-000004",
+            sessions_dir=tmp_path / "sessions")
+        gov = ctx.engine_spine.governance
+        await ctx.session.append("session.created",
+                                 {"title": "", "model": "m"}, actor="system")
+        await ctx.session.append("segment.start", {"task_id": "t-1"},
+                                 actor="system")
+        await ctx.session.append("evidence.archived", {
+            "evidence_id": "E1", "claim": "c",
+            "refs": [{"kind": "segment", "locator": "t-1:seg"}],
+            "artifact_path": None}, actor="system")
+        await asyncio.sleep(0.05)                       # 总线异步投递
+        assert gov.evidence.evidence_count() == 1
+        assert [e.evidence_id for e in gov.evidence.collect_for_task("t-1")] \
+            == ["E1"]

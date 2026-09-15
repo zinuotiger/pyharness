@@ -511,8 +511,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core.tools_executor import ToolExecutor
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core import tool_fs
-    from pyharness.governance import (DecisionEngine, GovernanceContext,
-                                      ReceiptStore)
+    from pyharness.governance import (DecisionEngine, EvidenceCollector,
+                                      GovernanceContext, ReceiptStore)
 
     tool_reg = ToolRegistry()
     tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
@@ -641,13 +641,24 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         if store is not None:
             log_._bus = bus                  # append → 分发 → 落盘闭环
 
+    # 治理证据装配(S5-2b):**构造 → 订阅 → 注入**(顺序不可颠倒,否则首事件丢失)
+    # ``EvidenceCollector`` 的索引是**只读派生缓存**(可由事件日志完全重建,INV-E3);
+    # 它只**消费**事件、不产生事件——唯一写点仍是 ``archive()`` 的 evidence.archived。
+    # 订阅 owner 与落盘订阅区分开,便于 deactivate 时各自摘除。
+    evidence = EvidenceCollector(session=log_)
+    if bus is not None:
+        ev_owner = f"governance-evidence:{getattr(log_, 'session_id', '?')}"
+        for t in _EVIDENCE_EVENT_TYPES:
+            bus.subscribe(t, evidence.on_event, owner=ev_owner)
+
     spine = EngineSpine(
         session=log_, bus=bus, registry=registry,
         scope=scope, llm=llm_client, tools=tools,
         guard=guard, approval=approval,
         governance=GovernanceContext(policy=gov_policy,
                                      decisions=DecisionEngine(),
-                                     receipts=ReceiptStore()),
+                                     receipts=ReceiptStore(),
+                                     evidence=evidence),
         counters=counters, sysprompt=sysprompt, compactor=compactor,
         goals=goals, todos=todos, ask=ask, skills=skills,
         plugins=plg_mgr, plugin_state=plg_state, tool_registry=tool_reg,
@@ -686,6 +697,15 @@ def _EVENT_TYPES_OR_ALL() -> tuple:
                 "llm.response", "llm.usage", "llm.chunk", "system.error",
                 "session.finished", "session.recovered", "context.compacted",
                 "segment.start", "segment.end", "fork.created")
+
+
+_EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
+    "evidence.archived",                 # 证据工件(索引主来源)
+    "segment.start", "segment.end",      # 段锚(把引用解析到 task)
+    "decision.issued", "receipt.emitted",  # 锚 → seq(解析 decision_id/receipt_id)
+)
+"""治理证据订阅面(S5-2b):``EvidenceCollector.on_event`` 只**消费**这些事件以建
+**只读派生索引**。**不订阅** ``tool.result``(属工具执行因果关系,由 S5-3 Audit 承担)。"""
 
 
 def _record_to(store: Any):

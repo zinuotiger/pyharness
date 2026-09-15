@@ -8,9 +8,17 @@
 **禁止** ``pyharness.core.*`` / ``engine`` / ``bus`` / ``persistence``。会话经
 ``ctx.session``/构造注入**鸭子类型**只读使用(与 ``receipt.py`` 同型)。
 
-**本步(S5-1)边界**:只含数据契约 + ``archive()``(唯一写点)。
-``on_event``(只读订阅)与 ``collect_for_task``(段锚聚合)属 **S5-2**;
-``TraceabilityMatrix`` 属 **S7**(冻结计划 §5.2)——**本步均不实现、不声明**。
+**边界**:
+
+- **S5-1**:数据契约 + ``archive()``(唯一写点)。
+- **S5-2a**:``on_event()``(**只读**索引) + ``from_log()``(日志重建) +
+  ``collect_for_task()``(段锚聚合)——**索引只是派生缓存,可由事件日志完全重建**
+  (``from_log``),**不是事实源**(INV-E3);``on_event`` 体内**零 ``append``**。
+  订阅面 5 类:``evidence.archived`` / ``segment.start`` / ``segment.end`` /
+  ``decision.issued`` / ``receipt.emitted``;**不订阅** ``tool.result``(属工具执行
+  因果关系,由 S5-3 Audit 承担)。
+- **S5-2b**:``engine`` 装配 + 订阅 + 注入 ``GovernanceContext.evidence``。
+- **S7**:``TraceabilityMatrix``。
 
 INV-E2(引用可解析):``archive()`` 在发射前校验每条 ``EvidenceRef.locator`` 指向
 **真实存在**的真源锚(seq / decision_id / receipt_id / segment);不可解析则
@@ -107,6 +115,13 @@ class EvidenceCollector:
         self._session = session
         self._id_factory = id_factory or (lambda: uuid4().hex)
         self._clock = clock or _utc_now
+        # ---- 派生缓存(S5-2a):**可由事件日志完全重建**,非事实源(INV-E3) ----
+        # ① 证据索引:evidence_id → (事件 seq, Evidence)
+        self._evidence: dict[str, tuple[int, Evidence]] = {}
+        # ② 段索引:task_id → [start_seq, end_seq](end 未闭合时为 None)
+        self._segments: dict[str, list[Optional[int]]] = {}
+        # ③ 锚 seq:decision_id / receipt_id → 其事件 seq(用于把引用解析到段)
+        self._anchor_seq: dict[str, int] = {}
 
     # ------------------------------------------------------------ 校验
     @staticmethod
@@ -184,6 +199,121 @@ class EvidenceCollector:
             r = await r
         return Evidence(evidence_id=evidence_id, claim=claim, refs=norm,
                         summary=summary, artifact_path=artifact_path, ts=ts)
+
+    # ------------------------------------------------------------ 只读索引
+    async def on_event(self, env: Any) -> None:
+        """**只读**消费一条事件,更新派生索引(S5-2a)。
+
+        约束:① 只消费不产生——**本方法体内零 ``append``**;② 索引仅是缓存,
+        可由日志 replay 完全重建(``from_log``);③ 未知类型静默忽略;④ 畸形
+        事件不得抛穿(总线的 EVT-103 隔离之外,**此处亦不抛**)。
+
+        订阅面(5 类):``evidence.archived``(证据索引) · ``segment.start`` /
+        ``segment.end``(段范围) · ``decision.issued`` / ``receipt.emitted``
+        (锚 → seq,用于把引用解析到段)。
+        **不订阅** ``tool.result``(属工具执行因果关系,由 S5-3 Audit 承担)。
+        """
+        try:
+            t = getattr(env, "type", None)
+            p = getattr(env, "payload", None) or {}
+            seq = int(getattr(env, "seq", 0) or 0)
+            if t == EVENT_EVIDENCE_ARCHIVED:
+                ev = self._evidence_of(p, seq)
+                if ev is not None:
+                    self._evidence[ev.evidence_id] = (seq, ev)
+            elif t == "segment.start":
+                task = str(p.get("task_id") or "")
+                if task:
+                    self._segments.setdefault(task, [seq, None])[0] = seq
+            elif t == "segment.end":
+                task = str(p.get("task_id") or "")
+                if task:
+                    st = int(p.get("start_seq") or 0) or seq
+                    self._segments.setdefault(task, [st, None])
+                    self._segments[task][0] = st
+                    self._segments[task][1] = seq      # 闭区间右端 = end 事件 seq
+            elif t == "decision.issued":
+                did = str(p.get("decision_id") or "")
+                if did:
+                    self._anchor_seq[f"decision_id:{did}"] = seq
+            elif t == "receipt.emitted":
+                rid = str(p.get("receipt_id") or "")
+                if rid:
+                    self._anchor_seq[f"receipt_id:{rid}"] = seq
+        except Exception:                            # noqa: BLE001 只读索引:绝不抛穿
+            return
+
+    @classmethod
+    async def from_log(cls, session: Any, **kw: Any) -> "EvidenceCollector":
+        """**由事件日志重建** collector(INV-E3:索引可完全再派生)。"""
+        col = cls(session=session, **kw)
+        for env in _read_events(session):
+            await col.on_event(env)
+        return col
+
+    @staticmethod
+    def _evidence_of(p: Any, seq: int) -> Optional[Evidence]:
+        """由 ``evidence.archived`` 载荷重建 ``Evidence``(只读;载荷非法 → None)。"""
+        if not isinstance(p, dict):
+            return None
+        try:
+            refs = _coerce_refs(p.get("refs") or ())
+        except Exception:                            # noqa: BLE001 载荷非法:跳过
+            return None
+        eid = str(p.get("evidence_id") or "")
+        if not eid:
+            return None
+        return Evidence(evidence_id=eid, claim=str(p.get("claim") or ""),
+                        refs=refs, summary="",
+                        artifact_path=p.get("artifact_path"), ts="")
+
+    def _task_at(self, seq: int) -> Optional[str]:
+        """该事件 seq 落在哪个段内(闭区间;未闭合段视为右端开放)。"""
+        for task, (s, e) in self._segments.items():
+            if s is None or seq < int(s):
+                continue
+            if e is None or seq <= int(e):
+                return task
+        return None
+
+    def _tasks_of(self, ev: Evidence) -> set[str]:
+        """该证据归属的 task 集合(按引用解析;无法解析的引用被忽略)。"""
+        out: set[str] = set()
+        for r in ev.refs:
+            if r.kind == "segment":
+                task = r.locator.rsplit(":", 1)[0]
+                if task:
+                    out.add(task)
+                continue
+            if r.kind == "seq":
+                tail = r.locator.rsplit(":", 1)[-1]
+                try:
+                    t = self._task_at(int(tail))
+                except ValueError:
+                    t = None
+            else:                                    # decision_id / receipt_id
+                anchor = self._anchor_seq.get(f"{r.kind}:{r.locator}")
+                t = self._task_at(anchor) if anchor else None
+            if t:
+                out.add(t)
+        return out
+
+    def collect_for_task(self, task_id: str) -> tuple[Evidence, ...]:
+        """按**段锚**聚合该任务的证据(S5-2a)。
+
+        来源**只有** ``evidence.archived`` 事件(D-1(a));返回按事件 seq 升序的
+        不可变元组;未知/空 ``task_id`` 或无线索 ⇒ ``()``(**不抛**)。
+        """
+        if not task_id:
+            return ()
+        hits = [(seq, ev) for seq, ev in self._evidence.values()
+                if task_id in self._tasks_of(ev)]
+        hits.sort(key=lambda it: it[0])
+        return tuple(ev for _seq, ev in hits)
+
+    def evidence_count(self) -> int:
+        """当前索引内的证据条数(只读;供测试/自检)。"""
+        return len(self._evidence)
 
 
 __all__ = [

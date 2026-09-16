@@ -1232,3 +1232,55 @@ async def test_integration_real_scope_critical_scope_hidden(tmp_path):
                  danger="low"), scope, gate)
     assert d2 is Decision.ALLOW
     assert gate.calls == ["fs.read_file"]
+
+
+# ====================================== ADR-021 / F-27 · 事件汇点的 session kwarg
+async def test_adr021_session_kwarg_routes_guard_events(tmp_path):
+    """ADR-021:`session=` 可选 kwarg(仅 `payload 落点`)——
+
+    ① 缺省 ⇒ 仍落**装配期**会话(主路径逐字不变,零回归);
+    ② 显式传 ⇒ 改落**指定**会话,装配会话不再新增;
+    ③ 判定结果不受 session 影响(同一次求值的 verdict 恒等);
+    ④ 兼容 wrapper `evaluate()` 与 `evaluate_detailed()` 两条入口都支持。
+    """
+    primary, other = FakeSession(), FakeSession()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    pol = make_policy(workspace_root=str(ws))
+    gc = chain(session=primary)
+    c = call("fs.read_file", {"path": "ok.txt"}, call_id="cid-adr021")
+    sc = FakeScope(pol)
+
+    # ① 缺省:落装配期会话
+    d1 = await gc.evaluate(c, sc)
+    assert d1 is Decision.ALLOW
+    assert len(primary.of("guard.evaluated")) == 1
+    assert other.of("guard.evaluated") == []
+
+    # ②+③ 显式传:改落指定会话,且判定不变
+    r = await gc.evaluate_detailed(c, sc, session=other)
+    assert str(r.verdict) == str(d1), "session 不得影响判定"
+    assert len(other.of("guard.evaluated")) == 1
+    assert len(primary.of("guard.evaluated")) == 1, "装配会话不应再新增"
+
+    # ④ evaluate() 兼容 wrapper 同样支持
+    d3 = await gc.evaluate(c, sc, session=other)
+    assert d3 is Decision.ALLOW
+    assert len(other.of("guard.evaluated")) == 2
+
+
+async def test_adr021_reject_path_follows_the_given_session(tmp_path):
+    """ADR-021(A-2):**拒绝**路径的 `guard.evaluated` + `guard.rejected` **同会话**,
+    且 rejected 仍 `sync=True`(成功与拒绝必须同一 audit ownership 模型)。"""
+    primary, other = FakeSession(), FakeSession()
+    pol = make_policy(workspace_root=str(Path.home()))
+    gc = chain(session=primary)
+    c = call("fs.read_file", {"path": "C:/Windows/win.ini"}, call_id="cid-adr021r")
+
+    d = await gc.evaluate(c, FakeScope(pol), session=other)
+
+    assert d is Decision.REJECT
+    assert [e["type"] for e in other.events] == ["guard.evaluated",
+                                                 "guard.rejected"]
+    assert other.of("guard.rejected")[0]["sync"] is True
+    assert primary.events == [], f"装配会话不得留痕:{primary.events}"

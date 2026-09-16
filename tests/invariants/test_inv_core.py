@@ -1071,3 +1071,187 @@ async def test_inv05_approval_reject_real_provider_strong_sync(tmp_path, verdict
     assert len(ev) == 1, f"{verdict}:应恰有一条 approval.{verdict} -> {sess.types()}"
     assert ev[0]["sync"] is True, f"{verdict}:审批拒绝事实必须强同步(sync=True)"
     assert sess.of("approval.requested")[0]["sync"] is True
+
+
+# ============================ ADR-021 / F-27 · guard 事件会话归属(INV-04 证据面)
+# 缺陷:GuardChain 在**装配期**绑定固定 session,其两个事件出口
+# (`_audit`→guard.evaluated / `_append_rejected`→guard.rejected)都写该会话。
+# 子 Agent 运行时 ctx.session 是**子会话**,guard 却是父绑定实例 ⇒ 规则级事件
+# 落父日志、执行链落子日志 ⇒ 子会话 reconcile 恒报 NO-GUARD-EVENT。
+# 修法(ADR-021):`session=` 可选参数,由 `authorize()` 传 `ctx.session`;链仍唯一。
+
+async def _f27_pair(tmp_path, tag: str):
+    """ADR-021 场景:一条链的装配期会话(parent)与**独立**的调用会话(child)。"""
+    parent, _pst = _wired_log(f"s-f27p{tag}01", tmp_path)
+    child, _cst = _wired_log(f"s-f27c{tag}01", tmp_path)
+    for log in (parent, child):
+        await log.append("session.created", {"title": "", "model": "m"},
+                         actor="system")
+    return parent, child
+
+
+async def _f27_tool_trace(log, call, *, result: bool = True) -> None:
+    """在指定会话落下一次调用的执行事实(tool.call / tool.result,均带 call_id)。"""
+    await log.append("tool.call",
+                     {"name": call.name, "args": dict(call.raw_args),
+                      "raw_args": dict(call.raw_args), "call_id": call.call_id},
+                     actor="tool", trace={"call_id": call.call_id})
+    if result:
+        await log.append("tool.result",
+                         {"name": call.name, "call_id": call.call_id,
+                          "ok": True, "truncated": False, "summary": "ok"},
+                         actor="tool", trace={"call_id": call.call_id})
+
+
+async def test_inv04_guard_event_follows_the_calling_session(tmp_path):
+    """T-1(ADR-021):显式 `session=` ⇒ `guard.evaluated` 落**发起调用**的会话,
+    且该会话 `reconcile()` 不再报 `NO-GUARD-EVENT`(INV-04 在子会话内可满足)。"""
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.governance.audit import AuditSystem
+
+    parent, child = await _f27_pair(tmp_path, "a")
+    gc = GuardChain(session=parent)
+    scope = _inv04_scope(tmp_path)
+    call = _inv04_call(call_id="c-f27-follow")
+
+    await child.append("tool.call",
+                       {"name": call.name, "args": dict(call.raw_args),
+                        "raw_args": dict(call.raw_args), "call_id": call.call_id},
+                       actor="tool", trace={"call_id": call.call_id})
+    await gc.evaluate_detailed(call, scope, session=child)
+    await child.append("tool.result",
+                       {"name": call.name, "call_id": call.call_id, "ok": True,
+                        "truncated": False, "summary": "ok"},
+                       actor="tool", trace={"call_id": call.call_id})
+
+    findings = await AuditSystem(session=child).reconcile()
+    assert not [x for x in findings if "NO-GUARD-EVENT" in x], \
+        f"子会话应自足(INV-04 可满足),实际 findings={findings}"
+    ev = [e for e in child.events_after(0) if e.type == "guard.evaluated"]
+    assert len(ev) == 1, "子会话应恰一条 guard.evaluated"
+    assert (ev[0].trace or {}).get("call_id") == call.call_id, "call_id 应配对"
+
+
+async def test_inv04_default_session_stays_on_assembly_session(tmp_path):
+    """T-2(零回归):**不传** `session=` ⇒ 事件仍落装配期会话(主路径逐字不变),
+    且此时子会话**必报** NO-GUARD-EVENT —— 与 T-1 构成**配对判据自检**
+    (证明该判据真能识别"分裂"这一违约,而非恒真)。"""
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.governance.audit import AuditSystem
+
+    parent, child = await _f27_pair(tmp_path, "b")
+    gc = GuardChain(session=parent)
+    scope = _inv04_scope(tmp_path)
+    call = _inv04_call(call_id="c-f27-default")
+
+    await _f27_tool_trace(child, call)
+    await gc.evaluate_detailed(call, scope)          # ← 不传 session(默认)
+
+    assert len([e for e in parent.events_after(0)
+                if e.type == "guard.evaluated"]) == 1, "默认应仍落装配期会话"
+    assert not [e for e in child.events_after(0) if e.type == "guard.evaluated"]
+    findings = await AuditSystem(session=child).reconcile()
+    assert [x for x in findings
+            if f"NO-GUARD-EVENT:call_id={call.call_id}" in x], \
+        f"判据自检失败:分裂时子会话应报 NO-GUARD-EVENT,实际={findings}"
+
+
+async def test_adr021_parent_log_has_no_child_guard_events(tmp_path):
+    """T-3(边界):子调用的守卫事件**不得**出现在父日志(父只留委派事实)。"""
+    from pyharness.core.tools_guard import GuardChain
+
+    parent, child = await _f27_pair(tmp_path, "c")
+    gc = GuardChain(session=parent)
+    call = _inv04_call(call_id="c-f27-denoise")
+    await _f27_tool_trace(child, call)
+    await gc.evaluate_detailed(call, scope=_inv04_scope(tmp_path), session=child)
+
+    ptypes = [e.type for e in parent.events_after(0)]
+    assert "guard.evaluated" not in ptypes, f"父日志被污染:{ptypes}"
+    assert "guard.rejected" not in ptypes, f"父日志被污染:{ptypes}"
+    assert [e.type for e in child.events_after(0)].count("guard.evaluated") == 1
+
+
+async def test_adr021_reject_fact_follows_the_calling_session(tmp_path):
+    """T-4(A-2):**拒绝**路径同归一属 —— `guard.rejected` 落调用会话且 `sync=True`,
+    父会话不留痕(成功与拒绝必须同一 audit ownership 模型)。"""
+    from pyharness.core.tools_guard import GuardChain
+
+    parent, child = _Sess("s-f27pa"), _Sess("s-f27ca")
+    gc = GuardChain(session=parent)
+    scope = types.SimpleNamespace(
+        policy=types.SimpleNamespace(workspace_root=str(tmp_path),
+                                     allowed_domains=set(), sandbox_level="basic"),
+        can_use=lambda name: False)                  # ← scope 前置:终局拒
+    call = _inv04_call(call_id="c-f27-rej")
+
+    res = await gc.evaluate_detailed(call, scope, session=child)
+
+    assert str(res.verdict) == "reject"
+    assert child.types() == ["guard.evaluated", "guard.rejected"], child.types()
+    assert child.of("guard.rejected")[0]["sync"] is True, "拒绝事实须强同步"
+    assert parent.types() == [], f"父会话不得留痕:{parent.types()}"
+
+
+async def test_adr021_session_moves_sink_not_verdict(tmp_path):
+    """T-5:`session=` 只改**事件落点**,**不改判定** —— 异会话下 verdict/ids/refs 恒等。"""
+    from pyharness.core.tools_guard import GuardChain
+
+    a, b = _Sess("s-f27sa"), _Sess("s-f27sb")
+    gc = GuardChain(session=a)
+    scope = _inv04_scope(tmp_path)
+    call = _inv04_call(call_id="c-f27-same")
+
+    r1 = await gc.evaluate_detailed(call, scope)
+    r2 = await gc.evaluate_detailed(call, scope, session=b)
+
+    assert (str(r1.verdict), tuple(r1.guard_ids), tuple(r1.policy_refs)) == \
+        (str(r2.verdict), tuple(r2.guard_ids), tuple(r2.policy_refs)), \
+        "session 不得影响判定结果"
+    assert a.of("guard.evaluated") and b.of("guard.evaluated"), "各落各的会话"
+
+
+async def test_adr021_policy_level_event_is_not_call_scoped(tmp_path):
+    """T-6(封过度修改):`guard.disabled` 是**策略级**事件(非调用级)⇒ 仍落装配期
+    会话,**不**随调用迁移 —— 防止"一刀切"把策略事件也改成调用归属。"""
+    from pyharness.core.tools_guard import GuardChain
+
+    a, b = _Sess("s-f27da"), _Sess("s-f27db")
+    gc = GuardChain(session=a)
+    gc.disable("g-exec", config_ref="security.guards.disabled")
+    # _record 是 fire-and-forget(create_task):等调度落地再断言。
+    # 注:guard.disabled **不在词表** ⇒ 真实 SessionLog 会 EVT-102 拒写,此处用
+    # 记录型替身考察的是"该路径**指向哪个会话**"这一代码事实(不得随调用漂移)。
+    await _wait(lambda: bool(a.of("guard.disabled")), timeout=2.0)
+
+    assert a.of("guard.disabled"), "策略级事件应落装配期会话"
+    assert not b.of("guard.disabled"), "策略级事件不应落调用会话"
+
+
+async def test_adr021_authorize_wires_calling_session_into_guard(tmp_path):
+    """T-8(封**装配层一跳**):`GovernanceContext.authorize()` 必须把 **ctx.session**
+    传进 guard 链 —— 缺这一跳,链的默认落点仍是装配期会话,整条修复失效。
+
+    本用例是 **M-B 变异**(删掉 context.py 的 `session=…`)的**专属判据**:
+    T-1~T-7 均直接驱动链,不会因装配层漏传而 RED。
+    """
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.governance.audit import AuditSystem
+
+    parent, child = await _f27_pair(tmp_path, "d")
+    gc = GuardChain(session=parent)
+    gov = _inv04_gov(gc)
+    ctx = _inv04_ctx(child, tmp_path, chain=gc, gov=gov)
+    call = _inv04_call(call_id="c-f27-authorize")
+
+    await _f27_tool_trace(child, call)
+    await gov.authorize(call, ctx, inputs_digest="d-1")
+
+    ev = [e for e in child.events_after(0) if e.type == "guard.evaluated"]
+    assert len(ev) == 1, \
+        "authorize 应把 ctx.session 传入链(否则守卫事件落到装配期会话)"
+    assert not [e for e in parent.events_after(0)
+                if e.type in ("guard.evaluated", "guard.rejected")], \
+        "装配期会话不得收到该子调用的守卫事件"
+    findings = await AuditSystem(session=child).reconcile()
+    assert not [x for x in findings if "NO-GUARD-EVENT" in x], findings

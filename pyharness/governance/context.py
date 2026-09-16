@@ -107,7 +107,15 @@ class GovernanceContext:
                        why="治理层未接线:guard 链为空,无法求值(fail-closed)")
         scope = getattr(ctx, "scope", None)
         # 1) 求值(唯一真源;verdict 与 refs 来自同一次实际求值)
-        evaluation = await chain.evaluate_detailed(call, scope)
+        #    session=getattr(ctx,"session",None)(ADR-021):guard.evaluated /
+        #    guard.rejected 必须与同 call_id 的 tool.call/tool.result 落在**发起
+        #    该调用**的会话——缺此一跳,子 Agent 的守卫事件会落到装配期会话
+        #    (父),使其日志内 INV-04 不可满足(AuditSystem 报 NO-GUARD-EVENT)。
+        #    链仍唯一,只换汇点。用 getattr 缺省 None = 沿用装配期会话,与本方法
+        #    对 ctx 其余属性(scope/channel)的防御式取法一致,且对未装配 ctx.session
+        #    的调用方(轻装配/单测替身)保持既有语义不变。
+        evaluation = await chain.evaluate_detailed(
+            call, scope, session=getattr(ctx, "session", None))
         # 2) 装配决策(纯;策略取自引擎当前策略——指纹随内容变)
         decision = await self.decisions.decide(
             evaluation, principal=principal or self.principal_of(ctx), call=call,

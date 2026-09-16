@@ -669,7 +669,8 @@ class GuardChain:
         self._tasks: set[asyncio.Task] = set()    # fire-and-forget 任务登记
 
     # ------------------------------------------------------ 单调链求值主函数
-    async def _evaluate_full(self, call: Any, scope: Any
+    async def _evaluate_full(self, call: Any, scope: Any, *,
+                             session: Any = None
                              ) -> tuple[Decision, tuple[str, ...], tuple[str, ...]]:
         """**唯一** waterfall 求值实现(S3-2-1;B1)。
 
@@ -690,14 +691,23 @@ class GuardChain:
         - 全链 allow 才返回 ALLOW——guard 无放行权,执行权归 executor 关3。
         异常:append 强同步失败按 PERS-202/EVT-1xx 语义上抛(拒绝事实必须落地,
         调用方 fail-closed:缺 evaluated/rejected 不进入 Provider)。
+
+        **事件汇点按调用解析(ADR-021)**:``session`` 缺省(None)= 沿用装配期
+        ``self._session``(主路径**逐字不变**);治理层经 ``authorize()`` 显式传入
+        ``ctx.session`` ⇒ 子 Agent 的 ``guard.evaluated``/``guard.rejected`` 与
+        同 ``call_id`` 的 ``tool.call``/``tool.result`` **落同一会话**。链对象仍
+        **唯一**(``spine.guard is policy.chain``),变的是汇点而非链。
         """
+        sess = session if session is not None else self._session
         can_use = getattr(scope, "can_use", None)
         if can_use is None:
             raise_code("GRD-401", hint="evaluate 需要会话 Scope(can_use 前置 "
                        "不可缺);直接传 ScopePolicy 违反调用契约")
         if not can_use(call.name):                # scope 前置:不可见 → 终局
-            await self._audit(call, Decision.REJECT, "scope-hidden", "GRD-401")
-            await self._append_rejected(call, "scope-hidden", "GRD-401")
+            await self._audit(call, Decision.REJECT, "scope-hidden", "GRD-401",
+                              session=sess)
+            await self._append_rejected(call, "scope-hidden", "GRD-401",
+                                        session=sess)
             return Decision.REJECT, ("scope-hidden",), ("GRD-401",)
         enabled = self.enabled_guard_ids()
         for g in self.chain:                      # 按注册序 waterfall
@@ -717,33 +727,42 @@ class GuardChain:
                 elif self._approval_channel is False:
                     d, policy = Decision.REJECT, "APR-501"    # 无通道(R8)
             if d is not Decision.ALLOW:           # 首个非 allow 即短路(waterfall)
-                await self._audit(call, d, g.id, policy)
+                await self._audit(call, d, g.id, policy, session=sess)
                 if d is Decision.REJECT:          # 强同步:拦了且没执行(INV-05)
-                    await self._append_rejected(call, g.id, policy)
+                    await self._append_rejected(call, g.id, policy,
+                                                session=sess)
                 return d, (g.id,), ((policy,) if policy else ())  # reject/approval 到此为止
-        await self._audit(call, Decision.ALLOW, enabled, None)
+        await self._audit(call, Decision.ALLOW, enabled, None, session=sess)
         return Decision.ALLOW, tuple(enabled), ()  # 全链 allow → executor 关3
 
-    async def evaluate(self, call: Any, scope: Any) -> Decision:
-        """兼容 wrapper(签名/返回类型/求值语义逐行不变)。
+    async def evaluate(self, call: Any, scope: Any, *,
+                       session: Any = None) -> Decision:
+        """兼容 wrapper(位置参数/返回类型/求值语义不变;仅新增可选 kwarg)。
 
         返回 ``Decision``(StrEnum;executor 伪码 ``d == "reject"`` 直接可比较)。
         实现是 ``_evaluate_full`` 的**视图**,不是第二套求值。
+        ``session``(ADR-021)同 ``_evaluate_full``:缺省 None = 沿用装配期会话。
         """
-        return (await self._evaluate_full(call, scope))[0]
+        return (await self._evaluate_full(call, scope, session=session))[0]
 
-    async def evaluate_detailed(self, call: Any, scope: Any) -> Any:
+    async def evaluate_detailed(self, call: Any, scope: Any, *,
+                                session: Any = None) -> Any:
         """rich result API(S3-2-1;B1):同一次求值的结构化投影。
 
         返回 ``governance.decision.EvaluationResult``(verdict + guard_ids +
         policy_refs),供治理层装配 ``Decision``。**不重跑求值、不缓存上次结果、
         不读历史事件**——直接复用 ``_evaluate_full`` 的返回值。
 
+        ``session``(ADR-021):治理层经 ``authorize()`` 传 ``ctx.session``,使
+        ``guard.evaluated``/``guard.rejected`` 落在**发起该调用**的会话;缺省
+        None = 沿用装配期会话(主路径不变)。
+
         ``EvaluationResult`` 经**函数内**延迟 import 取得,避免给 ``core`` 增加
         模块级治理依赖(import 图不变)。
         """
         from pyharness.governance.decision import EvaluationResult
-        d, guard_ids, policy_refs = await self._evaluate_full(call, scope)
+        d, guard_ids, policy_refs = await self._evaluate_full(
+            call, scope, session=session)
         return EvaluationResult(verdict=str(d), guard_ids=tuple(guard_ids),
                                 policy_refs=tuple(policy_refs))
 
@@ -810,13 +829,15 @@ class GuardChain:
                              f"attribute {name!r}")
 
     # ------------------------------------------------------------ 事件出口
-    async def _audit(self, call: Any, decision: Decision,
-                     guard_ids: Any, policy_ref: Optional[str]) -> None:
+    async def _audit(self, call: Any, decision: Decision, guard_ids: Any,
+                     policy_ref: Optional[str], *,
+                     session: Any = None) -> None:
         """evaluated 审计点(INV-04):每次求值恰一条,决策落词表词。
 
         payload 适配已落地 GuardEvaluatedPayload(偏离 1):decision ∈
         allow|deny|need_approval(内部 Decision 映射);policy_ref 并入 reasons;
         call_id 经 trace 携带(与 tool.call 配对回放)。普通异步落盘。
+        ``session``(ADR-021):None = 沿用装配期会话;治理层传 ``ctx.session``。
         """
         await self._append(
             "guard.evaluated",
@@ -825,15 +846,18 @@ class GuardChain:
              "guard_ids": ([guard_ids] if isinstance(guard_ids, str)
                            else list(guard_ids or [])),
              "reasons": ([policy_ref] if policy_ref else None)},
-            actor="tool", trace={"call_id": getattr(call, "call_id", "")})
+            actor="tool", trace={"call_id": getattr(call, "call_id", "")},
+            session=session)
 
-    async def _append_rejected(self, call: Any, guard_id: str,
-                               policy_ref: str) -> None:
+    async def _append_rejected(self, call: Any, guard_id: str, policy_ref: str,
+                               *, session: Any = None) -> None:
         """拒绝强同步留痕:guard.rejected 唯一事件出口(INV-05 审计证据)。
 
         sync=True:落盘成功才返回(崩溃不丢"拦了"事实);失败(PERS-202/EVT-1xx)
         上抛——调用方 fail-closed,绝不带着未落盘的拒绝继续(审计不能撒谎)。
         policy_ref 不含参数原文(防凭据入审计,SECURITY §6.4)。
+        ``session``(ADR-021):与 ``_audit`` **同源**——成功与拒绝必须同归一会话,
+        否则同一条链的两个出口分属两处(语义自相矛盾)。
         """
         await self._append(
             "guard.rejected",
@@ -841,13 +865,19 @@ class GuardChain:
              "reason": policy_ref or "GRD-401",
              "policy_ref": policy_ref or "GRD-401"},
             actor="tool", sync=True,
-            trace={"call_id": getattr(call, "call_id", "")})
+            trace={"call_id": getattr(call, "call_id", "")},
+            session=session)
 
     async def _append(self, type_: str, payload: dict, *, actor: str,
                       sync: bool = False,
-                      trace: Optional[dict] = None) -> None:
-        """append 统一封装:兼容同步替身/异步 SessionLog(await 实际返回)。"""
-        sess = self._session
+                      trace: Optional[dict] = None,
+                      session: Any = None) -> None:
+        """append 统一封装:兼容同步替身/异步 SessionLog(await 实际返回)。
+
+        **唯一解析点**(ADR-021):``session is None`` → 沿用装配期 ``self._session``
+        (主路径逐字不变);显式传入 → 该事件落调用方指定会话。
+        """
+        sess = session if session is not None else self._session
         if sess is None:
             log.debug("guard 未接线事件出口,%s 未记录(sync=%s)", type_, sync)
             return

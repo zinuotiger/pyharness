@@ -1,5 +1,12 @@
 # BASELINE_REPORT.md — 当前版本基线报告（S0）
 
+> ⏱ **时点快照（Historical Baseline）** —— 本文固化于 `0cba75d` @ 2026-09-14，描述**当时**的
+> 代码形态与问题清单。**其中部分问题已在此后阶段修复**（例如本文所述「生产防线是否完整：❌ 否
+> ——`engine.py:474` 绕 `GuardChain.from_config` → g1 `g-schema` 恒 allow（P0）」**已由 S1 修复**）。
+> **本文不代表当前状态。** 现行能力与已知限制见 [LIMITATIONS.md](../../LIMITATIONS.md)。
+>
+> **本次仅追加本提示块**：原有结论、数字与行文**一字未改**（阶段记录不得事后修饰）。
+
 > **基线标识**：`0cba75d` @ 2026-09-14 ｜ 分支 `main` ｜ 工作区无代码修改
 > **阶段**：S0 Baseline（Governed Agent Runtime v1.0 开发顺序的第 0 步，见 [ARCHITECTURE_DECISION_RECORD.md](../../ARCHITECTURE_DECISION_RECORD.md) §5）
 > **数据性质**：**所有数字均来自实际执行结果**（pytest 运行产物 + `import` 后运行时计数 + 文件统计），无文档抄录。

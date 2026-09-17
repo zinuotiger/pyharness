@@ -1,5 +1,12 @@
 # REFACTOR_PLAN.md — PyHarness → Governed Agent Runtime v1.0
 
+> ⏱ **时点快照（Historical Baseline）** —— 本文是 **2026-09-14 的架构审计**，固化于
+> `main` @ `0cba75d`。其 §0.2 的 W1~W5 问题清单**描述的是当时状态**：经 S1 阶段修复后，
+> **W1/W2/W4/W5 已完成，W3 未做**（逐项见下方「§0.2.1 W1~W5 修复状态」）。
+> **本文不代表当前状态**；现行能力与已知限制见 [LIMITATIONS.md](LIMITATIONS.md)。
+>
+> **本次仅追加本提示块与 §0.2.1 状态表**：原有结论、数字与行文**一字未改**（审计记录不得事后修饰）。
+
 > 审计日期：2026-09-14
 > 代码基线：`main` @ `0cba75d`（"sync: 审计修复(P0–P3) + Protocol v0.3 + 脱敏"），工作区干净
 > 审计方式：只读。逐文件通读主链 + 4 路并行测绘 + 运行时校验（`EVENT_TYPES`/`SYNC_TYPES`/payload 模型实测计数）
@@ -41,6 +48,19 @@ PyHarness 当前 ~30,900 行（`pyharness/` 62 个 `.py`），其中治理所必
 | **W3** | **"预算耗尽"有两套互不兼容的信号**：`scope.check_budget()` 抛 `BudgetExhausted`（`scope.py:359`）→ 终态 `reason="budget"`；而 `llm_fallback.BudgetGuard.check` 抛 `PyHError("BUDGET-EXHAUSTED")`（:392）→ 落 `agent_loop.py:205` 的 PyHError 分支 → 终态 `reason="error"`。同一语义、两种码、两种终态 | `scope.py:359`、`llm_fallback.py:392`、`agent_loop.py:201,205` | **P1** |
 | **W4** | **F026 轮内连败计数在主循环路径上完全不生效**：`reset_turn_failures`/`mark_turn_failure` 只在批量入口 `execute_tool_calls()`（`tools_executor.py:364`）被调用，而 `agent_loop.run_turn` 走的是**逐个** `run_step → execute`（`agent_loop.py:251`） | `agent_loop.py:251`、`tools_executor.py:364` | **P1** |
 | **W5** | **关闭不可重入**：`session.append` 在**第 3 步先置** `self._closed = True`（:281），之后才在第 6 步校验、第 9 步落盘。校验失败（EVT-100/102）或落盘失败（PERS-202）后 `_closed` 永久为真；`agent.close` 回滚了 `self.state` 却**不回滚 `session._closed`**，重试直接 EVT-104 | `session.py:281,298,311`、`agent.py:307-314` | **P1** |
+
+#### 0.2.1 W1~W5 修复状态（**2026-09-17 追加**，非原审计内容）
+
+> 本节为该审计完成**之后**的修复进度，便于外部读者区分「当时的问题」与「现在的状态」。
+
+| 问题 | 修复状态 | 依据 |
+|---|---|---|
+| **W1** 装配层绕 `from_config` → g1 `g-schema` 恒 allow（P0） | **已修** | S1-01：`engine.py` 改用 `GuardChain.from_config` 并注入 `validator=registry.validate_args`；`cfg.security.guards.disabled` 生效 |
+| **W2** `agent.py` 调不存在的 `loop.resume()`（被 `FakeLoop` 替身掩盖） | **已修** | S1-02：删除不可达分支与 `paused` 死态；`AgentLoop` 收敛为 `idle`/`running` 两态（ADR-014） |
+| **W3** 预算两套互不兼容信号（`BudgetExhausted`→`budget` vs `PyHError("BUDGET-EXHAUSTED")`→`error`） | **未做** | 两套信号在实测中仍并存；S1 范围裁定将其分流至独立阶段（登记为 S1 残留 R-9） |
+| **W4** F026 轮内连败计数在主循环路径失效 | **已修** | S1-03：连败计数接入 `run_step` 路径，口径与批量入口一致 |
+| **W5** `session.append` 关闭不可重入 | **已修** | S1-04：`_closed` 在 `finished` 校验失败时回滚（已入缓存后 flush 失败仍保持终态 = 刻意边界） |
+
 
 ### 0.3 迁移总览（渐进式，不停机重构）
 

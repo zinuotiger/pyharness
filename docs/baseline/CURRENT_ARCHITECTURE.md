@@ -1,5 +1,12 @@
 # CURRENT_ARCHITECTURE.md — 当前架构（As-Built，S0 基线）
 
+> ⏱ **时点快照（Historical Baseline）** —— 本文固化于 `0cba75d` @ 2026-09-14，描述**当时**的
+> 代码实际形态。**其中部分问题已在此后阶段修复**（例如「g1 `g-schema` 恒 allow（P0）」
+> **已由 S1 修复**）。**本文不代表当前状态。**
+> 现行能力与已知限制见 [LIMITATIONS.md](../../LIMITATIONS.md)。
+>
+> **本次仅追加本提示块**：原有结论、数字与行文**一字未改**（阶段记录不得事后修饰）。
+
 > **基线标识**：`0cba75d` @ 2026-09-14
 > **性质**：**实测描述**——本文描述的是**代码实际形态**，不是 `docs/MAP.md` 声明的设计形态。两者不一致处在 §6 逐条列出。
 > **关联**：[BASELINE_REPORT.md](BASELINE_REPORT.md) · [TEST_BASELINE.md](TEST_BASELINE.md) · [CODE_METRICS.md](CODE_METRICS.md)

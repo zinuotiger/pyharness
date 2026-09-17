@@ -41,8 +41,10 @@ import pytest
 
 import pyharness.cli as cli
 from pyharness.bus import EventBus
+from pyharness.core import commands
 from pyharness.core.session import SessionLog
 from pyharness.errors import PyHError
+from pyharness.events.vocab import TRANSIENT_TYPES
 
 SID = "s-cli-0001"          # 会话 id(Envelope session_id min_length=8)
 SID2 = "s-cli-0002"
@@ -193,9 +195,13 @@ def _sh(ctx, *, headless=True, flags=None, channel=None) -> cli.ShellCtx:
                         flags=dict(flags or {}))
 
 
-async def _new_inmem_session(sid: str = SID) -> SessionLog:
-    """真实 SessionLog 纯内存(session.created 首事件引导,EVT-106 序)。"""
-    log_ = SessionLog(sid=sid)
+async def _new_inmem_session(sid: str = SID, bus=None) -> SessionLog:
+    """真实 SessionLog 纯内存(session.created 首事件引导,EVT-106 序)。
+
+    bus 非空时 append → _dispatch → ``bus.emit(type, Envelope)``,与生产装配
+    (cli._attach_log_persistence/engine)同款:总线上的对象是信封,不是裸载荷。
+    """
+    log_ = SessionLog(sid=sid, bus=bus)
     await log_.append("session.created", {"title": "", "model": MODEL},
                       actor="system")
     return log_
@@ -709,31 +715,53 @@ class TestReadUserInput:
 
 # ============================================================== 事件渲染
 class TestRenderEvents:
-    """事件流渲染:text 打字机+卡片;json 逐事件一行 JSONL(stdout 纯净);终态收尾。"""
+    """事件流渲染:text 打字机+卡片;json 逐事件一行 JSONL(stdout 纯净);终态收尾。
+
+    事件经**真实 SessionLog** 投递 → 总线上是 Envelope(与生产 _dispatch 同形)。
+    此前替身用裸 dict 直喂总线,形状与生产不一致,掩盖了渲染面按信封字段取值的
+    缺陷(工具名/结果/终态理由退化为 ?/{} /None)。瞬时类型(llm.chunk)不经信封,
+    按生产(core/llm.py:364)仍走裸 dict。
+    """
+
+    _ACTOR = {"llm.chunk": "llm", "agent.message": "agent", "tool.call": "tool",
+              "tool.result": "tool", "guard.rejected": "tool",
+              "session.finished": "system"}
 
     async def _feed(self, sh, events):
         task = asyncio.create_task(cli._render_events(sh, "t-1"))
         await asyncio.sleep(0)                          # 订阅就位
+        log_ = await _new_inmem_session(bus=sh.ctx.bus)
         for type_, payload in events:
-            await asyncio.wait_for(asyncio.create_task(
-                sh.ctx.bus.emit(type_, payload)), timeout=5)
-        await asyncio.wait_for(task, timeout=5)         # session.finished 收尾
+            if type_ in TRANSIENT_TYPES:                # 瞬时:仅总线、裸 dict
+                await asyncio.wait_for(asyncio.create_task(
+                    sh.ctx.bus.emit(type_, payload)), timeout=5)
+            else:                                       # 落盘类:信封上总线
+                await asyncio.wait_for(asyncio.create_task(
+                    log_.append(type_, payload,
+                                actor=self._ACTOR.get(type_, "system"))),
+                    timeout=5)
+        await asyncio.wait_for(task, timeout=5)         # 终态事件收尾
 
     async def test_json_event_stream(self, capsys):
-        """--json:stdout 每事件一行 JSONL(type/payload 机器可读;终态事件结束)。"""
+        """--json:stdout 每事件一行 JSONL;payload = **内层事件载荷**(非信封)。"""
         sh = _sh(_ctx(), headless=True, flags={"json": True})
         await self._feed(sh, [
             ("llm.chunk", {"delta": "你好"}),
             ("agent.message", {"content": "你好,我是助手"}),
-            ("tool.call", {"tool": "fs.delete_file", "args": {"path": "/x"}}),
+            ("tool.call", {"name": "fs.write_file", "args": {"path": "/x"},
+                           "raw_args": {"path": "/x"}, "call_id": "c-1"}),
             ("session.finished", {"reason": "user_command_exit"}),
         ])
         lines = [json.loads(s) for s in
                  capsys.readouterr().out.strip().splitlines()]
-        assert [ln["type"] for ln in lines] == ["llm.chunk", "agent.message",
-                                                "tool.call", "session.finished"]
-        assert lines[0]["payload"]["delta"] == "你好"
-        assert lines[2]["payload"]["tool"] == "fs.delete_file"
+        assert [ln["type"] for ln in lines] == ["session.created", "llm.chunk",
+                                                "agent.message", "tool.call",
+                                                "session.finished"]
+        assert lines[1]["payload"]["delta"] == "你好"
+        # canonical 形状:工具名在 payload 顶层,信封字段(seq/ts/actor)不混入
+        assert lines[3]["payload"]["name"] == "fs.write_file"
+        assert "seq" not in lines[3]["payload"]
+        assert "actor" not in lines[3]["payload"]
 
     async def test_text_mode_chunk_cards(self, capsys):
         """text 模式:llm.chunk 增量打字机(无换行)+ 卡片换行;guard 拒绝成卡片。"""
@@ -741,8 +769,8 @@ class TestRenderEvents:
         await self._feed(sh, [
             ("llm.chunk", {"delta": "流式"}),
             ("llm.chunk", {"delta": "增量"}),
-            ("guard.rejected", {"tool": "fs.delete_file", "risk": "critical",
-                                "why": "GRD-401 直拒"}),
+            ("guard.rejected", {"tool": "fs.delete_file", "guard_id": "g-danger",
+                                "reason": "GRD-401 critical 直拒"}),
             ("session.finished", {"reason": "done"}),
         ])
         out = capsys.readouterr().out
@@ -750,48 +778,85 @@ class TestRenderEvents:
         assert "[拒绝]" in out and "critical" in out
 
     async def test_text_mode_tool_card_and_agent(self, capsys):
+        """text 模式卡片读真实载荷:工具名/参数、结果摘要、终态理由均不退化。"""
         sh = _sh(_ctx(), headless=False, flags={"json": False})
         await self._feed(sh, [
-            ("tool.call", {"tool": "fs.write_file", "args_summary": "{path: a}"}),
-            ("agent.message", {"content": "已写入 a"}),
+            ("tool.call", {"name": "fs.write_file", "args": {"path": "a.txt"},
+                           "raw_args": {"path": "a.txt"}, "call_id": "c-1"}),
+            ("tool.result", {"name": "fs.write_file", "call_id": "c-1",
+                             "ok": True, "summary": '{"bytes":13}',
+                             "truncated": False}),
+            ("agent.message", {"content": "已写入 a.txt"}),
             ("session.finished", {"reason": "done"}),
         ])
         out = capsys.readouterr().out
-        assert "[工具]" in out and "fs.write_file" in out
-        assert "已写入 a" in out
+        assert "fs.write_file" in out and "a.txt" in out
+        assert '{"bytes":13}' in out                    # 结果摘要非 None
+        assert "已写入 a.txt" in out
+        assert "[工具] ? {}" not in out and "[结果] None" not in out
+
+    async def test_text_mode_task_completed_reason(self, capsys):
+        """task.completed 卡片显示真实 task_id 与完成理由(strict D1 验收面)。"""
+        sh = _sh(_ctx(), headless=False, flags={"json": False})
+        await self._feed(sh, [
+            ("task.completed", {"task_id": "t-1", "reason": "ok"}),
+        ])
+        out = capsys.readouterr().out
+        assert "[任务完成] t-1 ok" in out
+        assert "[任务完成] None" not in out
+
+
+async def _approval_envelope(*, type_: str = "approval.requested", payload=None,
+                             bus=None, sid: str = SID):
+    """真实 SessionLog 产生的审批事件信封(总线形状 = 生产 _dispatch 同款)。
+
+    approval.requested 按 ApprovalRequestedPayload 四字段构造——**不含**
+    approval_id:canonical identity 只由 Envelope.seq 承载(D1b)。
+    """
+    log_ = await _new_inmem_session(sid=sid, bus=bus)
+    if payload is None:
+        payload = ({"tool": "exec.shell_run", "args_summary": "command=echo hi",
+                    "ttl_ms": 120000, "risk": "high"}
+                   if type_ == "approval.requested"
+                   else {"approval_id": 2, "by": "system", "ttl_ms": 120000})
+    return await log_.append(type_, payload, actor="tool", sync=True)
 
 
 class TestPromptApproval:
     """审批交互(F015):headless 不提示(裁决侧 APR-501 自动拒,勿悬挂);
-    tty 下 y 批准 / 其余默认拒绝 → approve/deny 入日志。"""
+    tty 下 y 批准 / 其余默认拒绝 → approve/deny 入日志。
 
-    def _request(self):
-        return {"approval_id": 7, "tool": "fs.delete_file",
-                "args_summary": "{path: secret.txt}", "risk": "high",
-                "ttl_ms": 120000}
+    D1b:事件一律用**真实 SessionLog 产生的 Envelope**(不再手写伪造 approval_id);
+    身份断言绑定 env.seq,即生产真实分配的请求事件 seq。
+    """
 
     async def test_headless_no_prompt(self, capsys):
+        env = await _approval_envelope()
         appr = FakeApproval()
         sh = _sh(_ctx(approval=appr), headless=True, channel=None)
-        await cli.prompt_approval(sh, "approval.requested", self._request())
+        await cli.prompt_approval(sh, "approval.requested", env)
         assert appr.granted == [] and appr.denied == []
         assert "[审批]" not in capsys.readouterr().err
 
     async def test_approve_y(self, monkeypatch, capsys):
+        """Scenario 1(approve):identity 取自 Envelope.seq,非载荷字段。"""
         monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+        env = await _approval_envelope()
         appr = FakeApproval()
         sh = _sh(_ctx(approval=appr), headless=False, channel="cli")
-        await cli.prompt_approval(sh, "approval.requested", self._request())
-        assert appr.granted == [(7, "cli")]
+        await cli.prompt_approval(sh, "approval.requested", env)
+        assert appr.granted == [(env.seq, "cli")]        # = 真实请求事件 seq
         assert appr.denied == []
         assert "risk=high" in capsys.readouterr().err    # 摘要/风险级提示
 
     async def test_default_deny(self, monkeypatch):
+        """Scenario 1(deny):空答复 → deny(env.seq)。"""
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        env = await _approval_envelope()
         appr = FakeApproval()
         sh = _sh(_ctx(approval=appr), headless=False, channel="cli")
-        await cli.prompt_approval(sh, "approval.requested", self._request())
-        assert appr.denied == [(7, "cli")]
+        await cli.prompt_approval(sh, "approval.requested", env)
+        assert appr.denied == [(env.seq, "cli")]
         assert appr.granted == []
 
     async def test_input_abort_denies(self, monkeypatch):
@@ -799,10 +864,189 @@ class TestPromptApproval:
             raise KeyboardInterrupt
 
         monkeypatch.setattr("builtins.input", abort)
+        env = await _approval_envelope()
         appr = FakeApproval()
         sh = _sh(_ctx(approval=appr), headless=False, channel="cli")
-        await cli.prompt_approval(sh, "approval.requested", self._request())
-        assert appr.denied == [(7, "cli")]               # 用户中止 = 拒绝(等价 deny)
+        await cli.prompt_approval(sh, "approval.requested", env)
+        assert appr.denied == [(env.seq, "cli")]         # 用户中止 = 拒绝(等价 deny)
+
+    @pytest.mark.parametrize("type_", ["approval.granted", "approval.denied",
+                                       "approval.timeout"])
+    async def test_outcome_event_never_prompts(self, monkeypatch, capsys, type_):
+        """Scenario 2/3/4:结果事件不得触发 input/approve/deny,不得抛 APR-503。
+
+        结果载荷**含** approval_id,但那是审批结果、不是人类动作请求;旧实现按
+        ``startswith("approval.")`` 通配分发,会对结果事件再次提问,且用户作答后
+        裁决必抛 APR-503(未知/已消费 id)。
+        """
+        prompted = []
+
+        def fake_input(prompt=""):
+            prompted.append(prompt)
+            return "y"                                   # 即使作答也不得被采纳
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        env = await _approval_envelope(type_=type_)
+        appr = FakeApproval()
+        sh = _sh(_ctx(approval=appr), headless=False, channel="cli")
+        await cli.prompt_approval(sh, type_, env)        # 静默返回,不抛
+        assert prompted == []
+        assert appr.granted == [] and appr.denied == []
+        assert "[审批]" not in capsys.readouterr().err
+
+
+class TestApprovalLiveChain:
+    """组件级活链(D1b):SessionLog → Envelope → EventBus → _render_events →
+    prompt_approval → **真实 ApprovalProvider**.approve/deny。
+
+    证明三者一致:总线投递形状(Envelope)、canonical identity(Envelope.seq)、
+    provider pending state(_pending 以同一 seq 为键)。执行侧入口用真实的
+    ``ApprovalProvider.request()``,不用替身。
+    """
+
+    async def _run(self, monkeypatch, answer):
+        from pyharness.core.approval import ApprovalProvider
+
+        bus = EventBus()
+        log_ = await _new_inmem_session(bus=bus)
+        prov = ApprovalProvider(session=log_, bus=bus, channel="cli")
+        ctx = _ctx(bus=bus, session=log_, approval=prov, channel="cli")
+        sh = _sh(ctx, headless=False, channel="cli")
+        monkeypatch.setattr("builtins.input", lambda prompt="": answer)
+
+        call = SimpleNamespace(name="exec.shell_run", args={"command": "echo hi"},
+                               raw_args={"command": "echo hi"}, call_id="c-1",
+                               parent_seq=None)
+        # 渲染器必须先订阅(否则 approval.requested 在订阅前上总线即丢失)
+        render = asyncio.create_task(cli._render_events(sh, "t-1"))
+        await asyncio.sleep(0)                           # 订阅就位
+        # 执行侧真实入口:request() 落 approval.requested 后阻塞等裁决
+        req = asyncio.create_task(
+            prov.request(call, "command=echo hi", ctx, binding="b-1"))
+        verdict = await asyncio.wait_for(req, timeout=5)  # 经总线提示后被裁决
+        await log_.append("session.finished", {"reason": "done"}, actor="system")
+        await asyncio.wait_for(render, timeout=5)
+        return verdict, prov, list(log_.events_after())
+
+    async def test_approve_through_bus(self, monkeypatch, capsys):
+        verdict, prov, events = await self._run(monkeypatch, "y")
+        assert verdict == "granted"
+        req_seq = [e.seq for e in events if e.type == "approval.requested"][0]
+        granted = [e for e in events if e.type == "approval.granted"][0]
+        assert granted.payload["approval_id"] == req_seq   # request/response 同 identity
+        assert req_seq not in prov._pending                # 结算后 pending 已清理
+        assert "[审批]" in capsys.readouterr().err
+
+    async def test_deny_through_bus(self, monkeypatch):
+        verdict, prov, events = await self._run(monkeypatch, "n")
+        assert verdict == "denied"
+        req_seq = [e.seq for e in events if e.type == "approval.requested"][0]
+        denied = [e for e in events if e.type == "approval.denied"][0]
+        assert denied.payload["approval_id"] == req_seq
+        assert req_seq not in prov._pending
+
+
+# ================================================== D1d-A 退出生命周期(生产装配)
+def _tmp_cfg(tmp_path) -> Path:
+    """存储域全部指向 tmp_path,避免测试污染 ~/.pyharness。"""
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        "storage:\n"
+        f"  sessions_dir: {tmp_path / 'sessions'}\n"
+        f"  workspaces_dir: {tmp_path / 'ws'}\n"
+        f"  spill_dir: {tmp_path / 'spill'}\n",
+        encoding="utf-8")
+    return cfg
+
+
+class TestExitLifecycleRealWiring:
+    """D1d-A 回归:**不注入 FakeAgent** 的真实装配路径。
+
+    现有 _mk_sh 默认注入 FakeAgent,正是原始 bug 未被发现的原因——CLI 活路径
+    从不装配 ctx.agent,而 /exit 曾以它充当退出闸门。
+    """
+
+    async def test_exit_sets_shell_flag_without_ctx_agent(self, tmp_path, monkeypatch):
+        """INV-D1d-01:ctx.agent 缺失不得阻止 shell.request_exit(0)。"""
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=True))   # tty → channel="cli"
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-unused")  # 仅过装配闸,不出网
+        r = cli.parse_args(["chat", "--config", str(_tmp_cfg(tmp_path))])
+        sh = await cli.bootstrap_shell(r)
+        await cli._attach_engine(sh)
+
+        assert sh.ctx.agent is None            # 生产事实:CLI 从不装配 ctx.agent
+        assert sh.ctx.channel == "cli"
+        assert sh.ctx.shell.exit_code is None
+
+        cont = await commands.handle_slash("/exit", sh.ctx)
+
+        assert cont is True
+        assert sh.ctx.shell.exit_code == 0     # ← 修复前恒为 None(退出从不发生)
+        assert cli._shell_exit_code(sh) == 0   # interactive_loop 的退出判据
+        assert "user.command" in [e.type for e in sh.ctx.session.events_after(0)]
+
+
+class TestExitFinalFlushPersistence:
+    """INV-01 回归(D1d-A):/exit → loop 返回 → cli_main finally → final flush →
+    已 append 的事件全部进入 JSONL。"""
+
+    async def test_exit_persists_all_emitted_events(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=True))
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-unused")
+        r = cli.parse_args(["chat", "--config", str(_tmp_cfg(tmp_path))])
+
+        holder: dict = {}
+        orig_loop = cli.interactive_loop
+
+        async def loop_with_round(sh, **kw):
+            """先造一轮(含非 SYNC 尾部事件),再走真实 /exit 退出。"""
+            log_ = sh.ctx.session
+            holder["log"] = log_
+            await log_.append("user.message", {"content": "hi"}, actor="user",
+                              sync=True)
+            await log_.append("agent.message", {"content": "ok"}, actor="agent")
+            seg = await log_.append("segment.start", {"task_id": "t-1"},
+                                    actor="system")
+            await log_.append("task.completed",
+                              {"task_id": "t-1", "reason": "ok"}, actor="system")
+            await log_.append("segment.end",
+                              {"task_id": "t-1", "start_seq": seg.seq},
+                              actor="system")
+            rc = await orig_loop(sh, **kw)
+            holder["flag"] = getattr(sh.ctx.shell, "exit_code", None)
+            return rc
+
+        class _OnceReader:
+            """只允许读一次:第二次读 = loop 未被 /exit 旗标终止(EOF 兜底)。"""
+
+            def __init__(self, value):
+                self._v, self.n = value, 0
+
+            async def __call__(self, sh, *, once=False):
+                self.n += 1
+                assert self.n == 1, "loop 未由 /exit 退出旗标终止(读了第二次)"
+                return self._v
+
+        monkeypatch.setattr(cli, "interactive_loop", loop_with_round)
+        monkeypatch.setattr(cli, "read_user_input", _OnceReader("/exit"))
+
+        assert await cli.cli_main(r) == 0      # loop 返回 → finally → _flush_session
+        assert holder["flag"] == 0             # 由退出旗标终止(非 EOF 兜底)
+
+        log_ = holder["log"]
+        emitted = [e.seq for e in log_.events_after(0)]
+        files = list((tmp_path / "sessions").glob("*.jsonl"))
+        assert len(files) == 1
+        rows = [json.loads(x) for x in
+                files[0].read_text(encoding="utf-8").splitlines() if x.strip()]
+        persisted = [x["seq"] for x in rows]
+        types_ = [x["type"] for x in rows]
+
+        for t in ("user.message", "agent.message", "task.completed",
+                  "segment.end", "user.command"):
+            assert t in types_
+        assert max(persisted) == max(emitted)                # last persisted == emitted
+        assert sorted(set(emitted) - set(persisted)) == []   # missing == []
 
 
 # ============================================================== 离线子命令
@@ -889,6 +1133,59 @@ class TestOffline:
             ["stats", "--config", cfg])) == 0
         out = capsys.readouterr().out
         assert "会话数: 1" in out and "事件总数: 2" in out and "已终态会话: 1" in out
+
+    # ------------------------------------------------------ RT-02 扫描容错
+    def _two_sessions(self, root):
+        """建 1 个正常会话 + 1 个不可读会话,返回 (sessions_dir, bad_path)。"""
+        sessions = root / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "s-ok0000000a.jsonl").write_text(
+            '{"session_id": "s-ok0000000a", "seq": 1, "ts": "t",'
+            ' "type": "session.created", "actor": "system",'
+            ' "payload": {"title": "", "model": "m"}}\n'
+            '{"session_id": "s-ok0000000a", "seq": 2, "ts": "t",'
+            ' "type": "llm.usage", "actor": "llm",'
+            ' "payload": {"cost_est": 1.5}}\n',
+            encoding="utf-8")
+        bad = sessions / "s-bad000000b.jsonl"
+        bad.write_text("x\n", encoding="utf-8")
+        return sessions, bad
+
+    @staticmethod
+    def _deny_open(monkeypatch, bad):
+        """让指定路径的 open 抛 PermissionError(模拟被占用/权限不足)。"""
+        real_open = open
+
+        def _deny(path, *a, **kw):
+            if Path(path) == bad:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, *a, **kw)
+
+        monkeypatch.setattr("builtins.open", _deny)
+
+    def test_scan_usage_skips_unreadable_file(self, tmp_path, monkeypatch):
+        """RT-02:单文件不可读 → 跳过并告警;可读者仍被聚合,不抛出。"""
+        sessions, bad = self._two_sessions(tmp_path)
+        self._deny_open(monkeypatch, bad)
+
+        out = cli._scan_usage(sessions)
+
+        assert out["sessions"] == 2      # 扫描面含被跳过者(语义保持)
+        assert out["events"] == 2        # 只聚合可读者
+        assert out["cost_est"] == 1.5
+
+    async def test_budget_and_stats_survive_unreadable_session(
+            self, tmp_env, monkeypatch, capsys):
+        """RT-02:命令级——bad file 存在时 budget/stats 仍 rc=0 并给出报表。"""
+        _sessions, bad = self._two_sessions(tmp_env)
+        self._deny_open(monkeypatch, bad)
+        cfg = str(tmp_env / "no.yaml")
+
+        assert await cli.cli_main(cli.parse_args(["budget", "--config", cfg])) == 0
+        assert "实测估算" in capsys.readouterr().out
+
+        assert await cli.cli_main(cli.parse_args(["stats", "--config", cfg])) == 0
+        assert "会话数: 2" in capsys.readouterr().out
 
 
 # ============================================================== repair 桥

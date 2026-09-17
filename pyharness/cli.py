@@ -179,15 +179,26 @@ class StreamRenderer:
 
 
 def _normalize_payload(payload: Any) -> dict:
-    """信封/模型/裸 dict 归一化(引擎装配面可能直通 Envelope,鸭子类型兼容)。"""
+    """归一化到**事件 payload**(Envelope/模型/裸 dict 三形态,鸭子类型兼容)。
+
+    总线投递的 canonical 形状是 Envelope(SessionLog._dispatch →
+    ``bus.emit(type, env)``),渲染面只消费其内层 ``payload``;故 dump 出信封形状
+    (含 session_id/seq/payload 三键)时取内层——否则渲染面按信封字段取值会全部落空
+    (工具名/结果/终态理由退化为 ``?``/``{}``/``None``)。瞬时类型(llm.chunk)不经
+    信封,仍走裸 dict。
+    """
     if isinstance(payload, dict):
         return payload
     dump = getattr(payload, "model_dump", None)
     if callable(dump):
         try:
-            return dump(mode="json")
+            data = dump(mode="json")
         except TypeError:                              # 老版 pydantic 无 mode 参
-            return dump()
+            data = dump()
+        inner = data.get("payload") if isinstance(data, dict) else None
+        if isinstance(inner, dict) and "session_id" in data and "seq" in data:
+            return inner                              # Envelope → 内层 payload
+        return data
     return {"raw": str(payload)}
 
 
@@ -218,7 +229,8 @@ def _text_card(type_: str, payload: dict) -> Optional[str]:
     if type_ == "session.finished":
         return f"[会话结束] {payload.get('reason', '')}"
     if type_ == "task.completed":
-        return f"[任务完成] {payload.get('task_id', '')}"
+        return (f"[任务完成] {payload.get('task_id', '')} "
+                f"{payload.get('reason', '')}").strip()
     if type_ == "task.failed":
         return (f"[任务失败] {payload.get('task_id', '')} "
                 f"{payload.get('error', '')} {payload.get('reason', '')}".strip())
@@ -1436,16 +1448,24 @@ async def _render_events(sh: ShellCtx, task_id: str) -> None:
 
 
 async def prompt_approval(sh: ShellCtx, type_: str, payload: Any) -> None:
-    """审批交互(F015 人类裁决):approval.requested 到达且通道非 None → 打印工具/
+    """审批交互(F015 人类裁决):**仅** approval.requested 且通道非 None → 打印工具/
     参数摘要与风险级,键盘 [y/N] 裁决 → approve/deny;headless(channel=None)不提示
-    ——裁决侧 APR-501 自动拒(零等待,勿悬挂)。"""
+    ——裁决侧 APR-501 自动拒(零等待,勿悬挂)。
+
+    身份契约(D1b):approval_id = 该 approval.requested 事件的 **Envelope.seq**
+    (events/payload.py:189 载荷契约 / approval.py:292 生产赋值 / acp.py cmd_approve
+    入口校验 三处同源;ApprovalRequestedPayload 四字段不含 approval_id)。结果事件
+    (granted/denied/timeout)载荷虽含 approval_id,但不是人类动作请求 → 一律不提问。
+    """
+    if type_ != "approval.requested":
+        return                                      # 结果事件:不提问(防误裁决)
     if sh.headless or sh.ctx.channel is None:
         return                                      # 无通道即拒:裁决侧已处理
-    payload = _normalize_payload(payload)
+    aid = getattr(payload, "seq", None)             # canonical identity(信封 seq)
+    if not isinstance(aid, int):
+        return                                      # 非信封来源:fail-safe 不提问
+    payload = _normalize_payload(payload)           # 展示面:内层载荷
     approval = getattr(sh.ctx, "approval", None)
-    aid = payload.get("approval_id") or payload.get("id")
-    if aid is None:
-        return
     ttl = payload.get("ttl_ms", "")
     risk = payload.get("risk", "?")
     tool = payload.get("tool", type_)
@@ -1558,7 +1578,12 @@ def _config_cmd(positional: list[str], flags: dict) -> int:
 
 
 def _scan_usage(sessions_dir: Path) -> dict:
-    """会话日志只读扫描(离线派生):逐文件数事件、尾部终态与 llm.usage 成本聚合。"""
+    """会话日志只读扫描(离线派生):逐文件数事件、尾部终态与 llm.usage 成本聚合。
+
+    单文件不可读(被占用/权限)只跳过并告警,**不中止整条离线命令**——与
+    ``_scan_unhealthy`` 同款容错(RT-02:此前一个坏文件使 budget/stats 整体
+    以 CYC-999 退出)。``sessions`` 仍记扫描面(含被跳过者),聚合值只含可读者。
+    """
     files = sorted(sessions_dir.glob("*.jsonl")) if sessions_dir.is_dir() else []
     total_events = 0
     finished = 0
@@ -1566,19 +1591,23 @@ def _scan_usage(sessions_dir: Path) -> dict:
     for f in files:
         tail_type = ""
         n = 0
-        with open(f, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                n += 1
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue                          # 坏行不计(repair 域)
-                tail_type = ev.get("type", "")
-                if tail_type == "llm.usage":
-                    cost += float((ev.get("payload") or {}).get("cost_est") or 0.0)
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    n += 1
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue                  # 坏行不计(repair 域)
+                    tail_type = ev.get("type", "")
+                    if tail_type == "llm.usage":
+                        cost += float((ev.get("payload") or {}).get("cost_est") or 0.0)
+        except OSError as e:                      # 单文件不可读:跳过并告警,不中止
+            log.warning("budget 扫描跳过不可读文件 file=%s why=%s", f, e)
+            continue
         total_events += n
         if tail_type == "session.finished":
             finished += 1

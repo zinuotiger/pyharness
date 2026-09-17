@@ -218,12 +218,17 @@ async def cmd_new(args: str, ctx: Any) -> str:
 async def cmd_exit(args: str, ctx: Any) -> str:
     """/exit:请求外壳退出(F064,Ctrl-D 等价;别名 /quit)——置退出标志 + 结束会话。
 
-    会话结束委托 ctx.agent(finished,reason=user_command_exit);退出码经 ctx.shell.
-    request_exit(0) 表达(回显后外壳即退);danger=high,headless 由前置 _gated 已拒。
+    会话结束委托 ctx.agent(finished,reason=user_command_exit;**best-effort**——
+    ctx.agent 缺失不阻断退出);退出码经 ctx.shell.request_exit(0) 表达(回显后外壳
+    即退);danger=high,headless 由前置 _gated 已拒。
+
+    职责边界(D1d-A):会话终态留痕是**尽力而为的收尾**,外壳退出归 ctx.shell——
+    二者不得互为前置。此前以 ``ctx.agent is None`` 充当退出闸门,使 CLI 活路径
+    (装配从不注入 ctx.agent)的 /exit 静默失效:interactive_loop 永不返回 →
+    cli_main finally 的 _flush_session 不执行 → 尾部事件不入 JSONL(INV-01 真源)。
     """
-    if ctx.agent is None:  # 无生命周期通道
-        return "当前外壳不支持 /exit"
-    await ctx.agent.finish_session(reason="user_command_exit")  # 终态留痕
+    if ctx.agent is not None:              # 尽力而为:会话终态留痕(缺失即跳过)
+        await ctx.agent.finish_session(reason="user_command_exit")
     shell = getattr(ctx, "shell", None)
     if shell is None or not callable(getattr(shell, "request_exit", None)):
         return "当前外壳不支持 /exit"  # 装配缺失:无退出通道,不静默(见偏离 5)

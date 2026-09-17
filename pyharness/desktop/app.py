@@ -32,8 +32,12 @@ from pyharness.events import EVENT_TYPES, Envelope
 from pyharness.events.vocab import TRANSIENT_TYPES, validate_payload
 
 # 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)
+# 字符集必须与 SessionLog 的 sid 合法面一致(sessions.validate_session_id =
+# `s-[A-Za-z0-9._-]{6,64}`)。**原为 `[0-9a-zA-Z]+`,不含 `-`/`.`** ⇒ fork 会话
+# (`s-fork-<hex>`,cli.py 生成)只匹配到 `s-fork` 前缀 → 查不到租户 → 静默回落
+# 客户端头。故此处放宽为 `[0-9A-Za-z._-]+`(`-` 置末为字面量)。
 _SESSION_ID_IN_PATH = re.compile(
-    r"/(?:sessions|budget|approvals|asks)/(s-[0-9a-zA-Z]+)")
+    r"/(?:sessions|budget|approvals|asks)/(s-[0-9A-Za-z._-]+)")
 
 from .constants import (
     BRIDGE_TIMEOUT_S,
@@ -125,8 +129,12 @@ class DesktopApp:
             request.headers.get("x-pyharness-tenant")
             or request.query_params.get("tenant") or "default")
         # 服务端派生(A3):路径含会话 id 时,以"该会话注册的租户"为准,不信客户端
-        # 自报头——阻断用伪造 X-PyHarness-Tenant 访问他租户会话。会话未注册(本进程
-        # 未见过的磁盘会话)→ 回落客户端头(信息不足,无法派生)。
+        # 自报头。**派生的**两个**必要条件**:① 路径匹配 _SESSION_ID_IN_PATH;
+        # ② 该会话已在本进程登记(register_session_tenant 为**进程内记忆,不落盘**)。
+        # 任一不满足 → **回落客户端头**。回落面 = 重启后尚未登记的磁盘会话、以及
+        # 不含会话 id 的路由(skills/plugins/settings/tenant/attachments/preset)。
+        # 这是**已知残余**(见 RT-FIX-STAGE1-REPORT §残余 R-1),**不得据此断言
+        # "已阻断全部伪造头"**;闭合需把租户随会话落盘(另立 finding)。
         tenant = client_tenant
         m = _SESSION_ID_IN_PATH.search(request.url.path)
         if m:

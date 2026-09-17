@@ -103,6 +103,7 @@ class EngineSpine:
     _mcp_clients: list[Any] = field(default_factory=list)
     _orchestration_ready: bool = False
     _schedule_started: bool = False
+    _policy_announced: bool = False        # 装配期策略留痕幂等闸(F-01:每 spine 恰一次)
 
     async def close(self) -> None:
         """关闭会话拥有的外部资源(MCP 子进程/调度泵/子任务/派生索引)。"""
@@ -782,6 +783,19 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
             except Exception as e:             # noqa: BLE001 预载失败不阻断
                 log.debug("plugin lazy preload failed: %s", type(e).__name__)
             spine._plugins_ready = True
+        # 装配期策略留痕(F-01):**必须在 session.created 之后**发射——装配函数
+        # (_build_governance/activate_orchestration)运行时 seq=0,直接 append 会被
+        # EVT-106 拒("事件须在 session.created 之后")并让整个装配抛出。本处是
+        # 生产唯一驱动点(chat/run 均经 task_queue → 本 seam),此时会话已开启。
+        # 幂等闸保证每 spine 恰一条;发射失败不阻断任务(与上方插件预载同款)。
+        if not getattr(spine, "_policy_announced", False):
+            _pol = getattr(getattr(spine, "governance", None), "policy", None)
+            if _pol is not None:
+                try:
+                    await _pol.emit_assembled(reason="assembly")
+                except Exception as e:         # noqa: BLE001 治理留痕失败不阻断任务
+                    log.warning("policy.updated 装配留痕失败: %s", type(e).__name__)
+            spine._policy_announced = True
         mark = int(getattr(task, "enqueued_seq", 0) or 0)
         intent = str(getattr(task, "intent", "") or "").strip()
         env = _owned_task_message(log_, task)   # 严格归属窗口(P1-1)

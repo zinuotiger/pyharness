@@ -192,7 +192,7 @@ class ApprovalProvider:
     channel/headless = 装配上下文缺省通道(外壳可在 ctx 上注入显式 channel/headless,
     request 时优先)。全会话共享同对象时按请求记录路由会话(见偏离 6)。
 
-    状态:_pending(approval_id→lead)、_merge(指纹→批,60s 窗口)、_trust(指纹→
+    状态:_pending(approval_id→lead)、_merge((sid,指纹)→批,60s 窗口)、_trust(指纹→
     信任记录)、_ttl_ms(默认 120_000)、_merge_window_ms(60_000)、_enabled(信任
     名单开关,默认 False,仅交互可开)、_suspended(队列挂起水位,重复挂起合并)。
     """
@@ -206,7 +206,7 @@ class ApprovalProvider:
         self._channel: Optional[str] = channel  # 缺省通道(交互 cli/web/acp;None=无)
         self._headless: bool = bool(headless)   # 缺省 headless 标志(装配上下文)
         self._pending: dict[int, ApprovalRequest] = {}
-        self._merge: dict[str, list[ApprovalRequest]] = {}
+        self._merge: dict[tuple[str, str], list[ApprovalRequest]] = {}
         self._trust: dict[str, TrustEntry] = {}
         self._trust_max: int = int(trust_max or DEFAULT_TRUST_MAX)
         self._enabled: bool = False             # 信任名单默认关(SECURITY §5.4)
@@ -268,8 +268,11 @@ class ApprovalProvider:
                 if cid:
                     self._grant_slots[cid] = binding
             return "granted"                     # executor 仍重入 guard 链
-        # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件
-        batch = self._merge.get(fp)
+        # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件。
+        # **键含 sid**(F-28):provider 按 spine 共享,子会话与父会话的指纹可相同,
+        # 若只按指纹合并,子请求会挂进父批并被父的裁决唤醒(跨会话授权污染)。
+        # 与 _trust 的 `_trust_hit(fp, sid, ch)` 口径对齐——信任名单本就按会话判。
+        batch = self._merge.get((sid, fp))
         if (batch and not batch[0].is_terminal
                 and time.monotonic() - batch[0].batch_mono
                 < self._merge_window_ms / 1000.0):
@@ -291,8 +294,20 @@ class ApprovalProvider:
                                sess=sess, binding=binding)
         req.approval_id = env.seq                # approval_id=请求事件 seq
         req.batch_mono = time.monotonic()
+        # F-28 一级保护:approval_id 以**事件 seq** 为键,而 provider 跨会话共享、
+        # 子会话 seq 自 1 重数 ⇒ 父子可能同键。**禁止跨会话覆盖**(覆盖会让 A 的
+        # 裁决去解决 B 的请求)。同会话重入仍按原语义放行。
+        # 已知副作用:此守卫位于 approval.requested 之后,拒绝时该事件已落盘而
+        # 无裁决留痕(工具侧会以 APR-503 记 tool.error 形成可追溯的失败记录)。
+        # 结构性修法(复合键 (sid, approval_id))见 F1-X5/X6,本阶段不做。
+        _prior = self._pending.get(env.seq)
+        if _prior is not None and getattr(_prior, "session_id", "") != sid:
+            raise_code("APR-503", approval_id=env.seq,
+                       why="approval_id 跨会话碰撞:同 seq 已被另一会话占用",
+                       advice="禁止跨会话覆盖 pending(fail-closed);"
+                              "复合键设计见 F1-X5/X6")
         self._pending[env.seq] = req
-        self._merge[fp] = req.batch
+        self._merge[(sid, fp)] = req.batch
         self._start_ttl(req)                     # TTL 定时器:到点无人 → timeout
         try:
             if not self._suspended:              # 首请挂起(F043;重复挂起合并)

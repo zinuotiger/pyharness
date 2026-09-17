@@ -540,3 +540,111 @@ async def test_approval_id_equals_requested_seq_and_request_dedupe_key():
     assert await asyncio.wait_for(task, 5) == "denied"
     assert prov.pending_count() == 0
     await _settle_tasks()
+
+
+# ============================= RT-FIX-STAGE1 · F-28(审批条目跨会话归属)
+# 缺陷:provider 按 spine **共享**,而 ① `_pending` 以**事件 seq** 为键(子会话 seq
+# 自 1 重数 ⇒ 与父会话同键空间,后到者**静默覆盖**先到者);② `_merge` 只按**工具+
+# 参数指纹**合并(子会话同指纹请求会**并入父批**,被父的裁决唤醒 ⇒ 跨会话授权污染)。
+# `ApprovalRequest` 本就带 `session_id`,信息已在,只是键忽略了它。
+
+async def _two_session_stack():
+    """一个 provider 服务两个会话(父/子同构:各自 EventBus + FakeStore + SessionLog)。"""
+    prov, logA, storeA, _busA = _make_stack("s-approval-a1")
+    await _boot(logA)
+    busB = EventBus()
+    storeB = FakeStore("s-approval-b1")
+    for t in EVENT_TYPES:
+        busB.subscribe(t, storeB.record, owner="persistence")
+    logB = SessionLog(sid="s-approval-b1", persistence=storeB, bus=busB)
+    await _boot(logB)
+    # 让 B 的 seq 与 A 错开:两个全新会话的下一次 append 都是 seq=2,F-28 的跨会话
+    # seq 碰撞守卫会因此 fail-closed(APR-503)。本用例考的是"指纹批是否跨会话合并",
+    # 故先给 B 一条填充事件,使其 approval.requested 落在不同 seq。
+    await logB.append("user.message", {"content": "filler"}, actor="user")
+    return prov, logA, storeA, logB, storeB
+
+
+async def test_cross_session_same_fingerprint_not_merged():
+    """跨会话同指纹:各自开批,**不得**并入同一批(修复前 B 挂进 A 的批)。"""
+    prov, logA, storeA, logB, storeB = await _two_session_stack()
+    t1 = asyncio.create_task(
+        prov.request(_call(), SUMMARY, _ctx(logA, sid="s-approval-a1")))
+    await _wait_pending(prov, 1)
+
+    t2 = asyncio.create_task(
+        prov.request(_call(call_id="call_2"), SUMMARY, _ctx(logB, sid="s-approval-b1")))
+    try:
+        await _wait_pending(prov, 2)
+        assert prov.pending_count() == 2, "跨会话同指纹必须各自成批"
+        assert len(_by_type(storeB, "approval.requested")) == 1, \
+            "子会话应自有请求事件(修复前被并入父批、不新增事件)"
+        assert len(_by_type(storeA, "approval.requested")) == 1
+        # 批隔离:两条 lead 的 session_id 不同、批次对象也不同
+        a_req = _by_type(storeA, "approval.requested")[0].seq
+        b_req = _by_type(storeB, "approval.requested")[0].seq
+        assert prov._pending[a_req].session_id == "s-approval-a1"
+        assert prov._pending[b_req].session_id == "s-approval-b1"
+        assert prov._pending[a_req].batch is not prov._pending[b_req].batch
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        await asyncio.gather(t1, t2, return_exceptions=True)
+        await _settle_tasks()
+
+
+async def test_same_session_same_fingerprint_still_merged():
+    """回归守卫:同会话同指纹**仍合并**(F-28 的键改动不得破坏 R13 防轰炸语义)。"""
+    prov, log, store, _ = _make_stack()
+    await _boot(log)
+    t1 = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
+    await _wait_pending(prov, 1)
+    t2 = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
+    await asyncio.sleep(0.05)
+    try:
+        assert prov.pending_count() == 1, "同会话同指纹应合并为一批"
+        assert len(_by_type(store, "approval.requested")) == 1
+    finally:
+        for t in (t1, t2):
+            t.cancel()
+        await asyncio.gather(t1, t2, return_exceptions=True)
+        await _settle_tasks()
+
+
+async def test_cross_session_pending_seq_collision_refused():
+    """同 seq 已被**另一会话**占用 ⇒ fail-closed 拒绝覆盖(APR-503),原条目不变。"""
+    prov, log, _store, _ = _make_stack()
+    await _boot(log)                                  # seq=1
+    nxt = int(log.stats().get("seq", 0)) + 1          # 下一次 append 将占用的 seq
+    foreign = types.SimpleNamespace(session_id="s-other-tenant",
+                                    approval_id=nxt, is_terminal=False)
+    prov._pending[nxt] = foreign
+    try:
+        with pytest.raises(PyHError) as ei:
+            await prov.request(_call(), SUMMARY, _ctx(log))
+        assert ei.value.code == "APR-503", ei.value.code
+        assert prov._pending[nxt] is foreign, "原请求条目不得被覆盖"
+    finally:
+        prov._pending.pop(nxt, None)
+
+
+async def test_same_session_pending_slot_not_treated_as_collision():
+    """守卫只拦**异会话**:同会话占用同槽位仍按原语义放行(不误报碰撞)。"""
+    prov, log, _store, _ = _make_stack()
+    await _boot(log)
+    nxt = int(log.stats().get("seq", 0)) + 1
+    same = types.SimpleNamespace(session_id=SID, approval_id=nxt,
+                                 is_terminal=False)
+    prov._pending[nxt] = same
+    t = asyncio.create_task(prov.request(_call(), SUMMARY, _ctx(log)))
+    try:
+        # 注意:不能用 pending_count 等登记——预置条目已使计数为 1。改以"任务未上抛"
+        # 为准:异会话会在此处 APR-503 上抛,同会话则继续 await 裁决。
+        await asyncio.sleep(0.05)
+        assert not t.done() or t.exception() is None, \
+            f"同会话不得被判为碰撞上抛:{t.exception()}"
+        assert prov._pending.get(nxt) is not same, "同会话:新请求应正常登记"
+    finally:
+        t.cancel()
+        await asyncio.gather(t, return_exceptions=True)
+        await _settle_tasks()

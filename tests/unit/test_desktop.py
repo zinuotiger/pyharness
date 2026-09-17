@@ -1224,3 +1224,85 @@ async def test_run_desktop_cli_bridge_returns_0(monkeypatch):
 async def _null_async(app, port, timeout=15):
     """wait_listening_async 替身(直接通过)。"""
     return None
+
+
+# =============================== RT-FIX-STAGE1 · F-19(租户派生:会话 id 匹配面)
+# 缺陷:_SESSION_ID_IN_PATH 的字符类为 `[0-9a-zA-Z]+`,**不含 `-`/`.`** —— 而
+# sessions.validate_session_id 允许 `s-[A-Za-z0-9._-]{6,64}`,且 cli.py 生成的
+# fork 会话 id 恰为 `s-fork-<hex>`。后果:`s-fork-abc123` 只捕获到 `s-fork`
+# → tenant_for_session 查不到 → 中间件**静默回落客户端自报头**
+# (`x-pyharness-tenant`)⇒ 本机可伪造租户读取他租户会话。
+
+def test_session_id_in_path_captures_fork_shaped_ids_fully():
+    """fork 形状 id 必须被**完整**捕获,不得截断到 `s-fork` 前缀。"""
+    m = desktop_app._SESSION_ID_IN_PATH.search("/api/sessions/s-fork-1a2b3c4d/messages")
+    assert m is not None, "fork 形状 id 应匹配"
+    assert m.group(1) == "s-fork-1a2b3c4d", f"捕获被截断:{m.group(1)!r}"
+
+
+@pytest.mark.parametrize("sid", ["s-abc.def-123", "s-a_b-c-987654",
+                                 "s-0000000001", "s-fork-1a2b3c4d"])
+def test_session_id_in_path_accepts_full_legal_charset(sid):
+    """字符集须与 validate_session_id(s-[A-Za-z0-9._-]{6,64})一致。"""
+    m = desktop_app._SESSION_ID_IN_PATH.search(f"/api/sessions/{sid}/timeline")
+    assert m is not None and m.group(1) == sid, f"{sid} 未被完整捕获"
+
+
+def test_session_id_in_path_ignores_non_session_segments():
+    """非会话路径不得误匹配(技能名/非法 id)。"""
+    assert desktop_app._SESSION_ID_IN_PATH.search("/api/skills/hello") is None
+    assert desktop_app._SESSION_ID_IN_PATH.search("/api/sessions/not-a-sid") is None
+
+
+@pytest.mark.asyncio
+async def test_tenant_middleware_derives_registered_fork_session_tenant(tmp_path):
+    """行为面:已登记的 fork 会话 ⇒ **派生租户压过伪造的客户端头**。
+
+    修复前 RED:`s-fork-1a2b3c4d` 被截断成 `s-fork`,派生为空 ⇒ 采用伪造头 "evil"。
+    """
+    from pyharness.core import tenant_settings as ts
+
+    app = d.DesktopApp(SimpleNamespace(
+        session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
+    sid = "s-fork-1a2b3c4d"
+    ts.register_session_tenant(sid, "acme")
+    seen = {}
+
+    async def _call_next(request):
+        seen["tenant"] = app.current_tenant()
+        return "ok"
+
+    req = SimpleNamespace(
+        url=SimpleNamespace(path=f"/api/sessions/{sid}/messages"),
+        headers={"x-pyharness-tenant": "evil"},
+        query_params={})
+    try:
+        assert await app._tenant_middleware(req, _call_next) == "ok"
+        assert seen["tenant"] == "acme", \
+            f"派生租户应压过伪造头,实得 {seen['tenant']!r}(修复前为 'evil')"
+    finally:
+        ts.unregister_session_tenant(sid)
+
+
+@pytest.mark.asyncio
+async def test_tenant_middleware_documents_unregistered_fallback(tmp_path):
+    """**已知残余 R-1(钉住当前行为,非缺陷修复)**:会话未在本进程登记
+    (register_session_tenant 为进程内记忆、不落盘)⇒ 派生为空 ⇒ 回落客户端头。
+
+    本用例的作用是把该回落**显式化**:若将来改为 fail-closed(拒绝),此用例
+    会 RED,从而强制走一次有意的设计变更,而不是静默漂移。
+    """
+    app = d.DesktopApp(SimpleNamespace(
+        session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
+    seen = {}
+
+    async def _call_next(request):
+        seen["tenant"] = app.current_tenant()
+        return "ok"
+
+    req = SimpleNamespace(
+        url=SimpleNamespace(path="/api/sessions/s-never-registered/messages"),
+        headers={"x-pyharness-tenant": "evil"},
+        query_params={})
+    assert await app._tenant_middleware(req, _call_next) == "ok"
+    assert seen["tenant"] == "evil", "当前语义:未登记会话回落客户端头(R-1)"

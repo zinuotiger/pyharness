@@ -166,3 +166,76 @@ async def test_engine_full_chain_offline(tmp_path):
                 ctx.scope.release()
             except Exception:                      # noqa: BLE001 收尾尽力
                 pass
+
+
+# ============================ RT-FIX-STAGE1 · F-01(policy.updated 装配留痕)
+# 缺陷:`policy.updated` 的唯一生产发射器 `PolicyEngine.emit_assembled` **零调用**
+# ⇒ 词表已注册(77)、`SYNC_TYPES` 已含(14)、单测直调 `emit_updated` 也通过,
+# 唯独装配层这一跳从未接上 —— 该事件在生产**永不出现**(ADR-020/Q3 承诺落空)。
+#
+# **挂点为何不在装配函数**:`_build_governance`/`activate_orchestration` 运行时
+# `seq=0`(session.created 由调用方在装配**之后**落),此时 append 会被 EVT-106
+# 拒("事件须在 session.created 之后")**并让整个装配抛出** —— 已实测。
+# 故落在 `make_runner.run_for_task`:chat/run 的唯一生产驱动点(task_queue seam)。
+
+@pytest.mark.asyncio
+async def test_policy_updated_announced_once_at_first_run(tmp_path):
+    import pathlib
+
+    from pyharness.core.task_queue import Task
+    from pyharness.errors import PyHError
+
+    cfg = _cfg(tmp_path)
+    saved = dict(llm_mod.adapters)
+    llm_mod.adapters.clear()
+    llm_mod.adapters[cfg.llm.model] = FakeAdapter(cfg.llm.model)
+    ctx = None
+    try:
+        ctx = await assemble_real_engine(
+            cfg, sid="s-eng-policy-01",
+            sessions_dir=pathlib.Path(tmp_path) / "sessions")
+        await ctx.session.append("session.created",
+                                 {"title": "", "model": cfg.llm.model},
+                                 actor="system", sync=True)
+
+        # ① 装配期**不得**发射(否则 EVT-106;装配在 created 之前)
+        assert "policy.updated" not in [e.type for e in ctx.session.events_after(0)], \
+            "装配期不得发射(seq=0,EVT-106)"
+        assert ctx.engine_spine._policy_announced is False
+
+        intent = "帮我建个目标并记个待办,然后总结"
+        await ctx.session.append("user.message", {"content": intent},
+                                 actor="user", sync=True)
+        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        tid = await q.submit(intent)
+        res = await asyncio.wait_for(q.wait_for(tid), timeout=8.0)
+        assert res.ok, f"全链 run 应成功,实际 code={getattr(res, 'code', res)}"
+
+        evs = list(ctx.session.events_after(0))
+        pol = [e for e in evs if e.type == "policy.updated"]
+        assert len(pol) == 1, f"装配留痕应恰一条,实际 {[e.type for e in evs]}"
+        assert pol[0].payload.get("op") == "add", \
+            f"装配留痕 op 应为 add:{pol[0].payload}"
+        created_seq = next(e.seq for e in evs if e.type == "session.created")
+        assert pol[0].seq > created_seq, "必须在 session.created 之后(EVT-106 面)"
+        assert ctx.engine_spine._policy_announced is True
+
+        # ② 幂等:再次进入 runner(此任务无配套 user.message → CYC-999,但发生在
+        #    发射块**之后**)⇒ 不得重复发射
+        with pytest.raises(PyHError):
+            await ctx.task_runner.run_for_task(
+                Task(id="t-again", intent="", enqueued_seq=0))
+        assert len([e for e in ctx.session.events_after(0)
+                    if e.type == "policy.updated"]) == 1, "每 spine 恰一条(幂等闸)"
+    finally:
+        llm_mod.adapters.clear()
+        llm_mod.adapters.update(saved)
+        if ctx is not None:
+            try:
+                await ctx.engine_spine.close()
+            except Exception:                          # noqa: BLE001 收尾尽力
+                pass
+            try:
+                ctx.scope.release()
+            except Exception:                          # noqa: BLE001 收尾尽力
+                pass

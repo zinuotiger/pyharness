@@ -29,10 +29,14 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
 
     Parent-session jobs reuse the parent goal/todo managers.  Child sessions get
     their own managers so their event projections cannot mix with the parent.
-    Guard/approval remain the parent engine instances; approval is deliberately
-    routed through the owning session's UI/bridge, as required by jobs/subagent
-    security rules.  depth = 本会话所处递归层级(主=0,子=spec.depth):经
+    Guard/approval/governance remain the parent engine instances; approval is
+    deliberately routed through the owning session's UI/bridge, as required by
+    jobs/subagent security rules.  depth = 本会话所处递归层级(主=0,子=spec.depth):经
     ctx.subagent_depth 供 subagent.spawn 计算 d+1,使递归链硬上限 ≤3 生效。
+
+    governance 与 session/scope/guard/approval 同为必接线。
+    tools_executor._require_wiring 在工具执行前要求其存在;
+    缺失会 fail-closed(CYC-999)。
     """
     if session is getattr(spine, "session", None):
         goals = getattr(spine, "goals", None)
@@ -59,6 +63,7 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
         bus=getattr(spine, "bus", None),
         registry=getattr(spine, "registry", None),
         guard=getattr(spine, "guard", None),
+        governance=getattr(spine, "governance", None),
         approval=getattr(spine, "approval", None),
         counters=getattr(spine, "counters", None),
         storage=getattr(spine, "storage", None),

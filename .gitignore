@@ -24,3 +24,7 @@ pytest_final.txt
 
 # S0/S1 临时证据产物(含本机路径与 junit XML,勿入库:仓库是 PUBLIC)
 tmp/
+
+# portfolio 作品集资产(归属 zinuotiger/portfolio,非 PyHarness 仓库;勿入库)
+docs/governance.html
+docs/RUNTIME_GOVERNANCE_METHODOLOGY_v0.1.md

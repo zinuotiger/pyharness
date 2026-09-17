@@ -19,9 +19,9 @@
 
 | 项 | 值 |
 |---|---|
-| 触发来源 | `FUNCTIONAL_RUNTIME_AUDIT_v1.md` **F-27**（P1）· `RT-FIX-PLAN-v1.md` **P-2** 裁定 |
+| 触发来源 | 跨会话审计归属问题 **F-27**（P1）· 裁定 **P-2**（**内部审计编号**，该报告不随仓库发布） |
 | 前置 | RT-GOV-01（`_runtime_ctx` 缺 `governance`）已修 —— 该修复使子 Agent 工具调用**首次可达**，F-27 随之暴露 |
-| 实施计划 | `F27_IMPLEMENT_PLAN.md`（C1 docs + C2 fix+tests 两段式） |
+| 实施计划 | 两段式：C1 docs + C2 fix+tests —— 落点 `7a4050a`（本 ADR）· `ebbb444`（实现） |
 | 不改动 | INV-04 / INV-05 的 canonical 文本；`docs/INVARIANT_REGISTRY.md`；`AuditSystem` 架构；任何 cross-session reconcile / lineage resolver |
 
 ### 裁定记录（2026-09-16）
@@ -298,7 +298,7 @@ AuditSystem(session=<子会话>).reconcile()   →   ['NO-GUARD-EVENT:call_id=c1
 **中高**。缓解：① 严格加性（默认 `None`）；② **先跑 T-2**（主路径逐项对照）作为"零回归"的**先行判据**，再做子路径；③ 全量回归 + `tests/invariants` 定向。
 
 **前置**：无（RT-GOV-01 已使子路径可达）。
-**后继**：F-28 第二级（复合键）与本 ADR 同属"跨会话归属"议题，**建议合并一次设计评审**（见 `RT-FIX-PLAN-v1.md` §3）。
+**后继**：F-28 第二级（复合键）与本 ADR 同属"跨会话归属"议题，**建议合并一次设计评审**；现行状态与残余见 [LIMITATIONS.md](../../LIMITATIONS.md) **L-3**。
 
 ---
 

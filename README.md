@@ -1,7 +1,7 @@
 # PyHarness — DeepSeek Harness 的 Python 全功能复刻
 
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
-> 状态: 核心主链与用户入口接地完成 — 1,723 collected / 1,721 passed / 2 skipped(快照 2026-09-17;全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
+> 状态: 核心主链与用户入口接地完成 — 1,751 collected / 1,749 passed / 2 skipped(快照 2026-09-17;全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
 
 ## 从这里开始(Current State)
 

@@ -133,8 +133,8 @@ class DesktopApp:
         # ② 该会话已在本进程登记(register_session_tenant 为**进程内记忆,不落盘**)。
         # 任一不满足 → **回落客户端头**。回落面 = 重启后尚未登记的磁盘会话、以及
         # 不含会话 id 的路由(skills/plugins/settings/tenant/attachments/preset)。
-        # 这是**已知残余**(见 RT-FIX-STAGE1-REPORT §残余 R-1),**不得据此断言
-        # "已阻断全部伪造头"**;闭合需把租户随会话落盘(另立 finding)。
+        # 这是**已知残余**(见 LIMITATIONS.md L-1),**不得据此断言
+        # "已阻断全部伪造头"**;闭合需把租户随会话落盘(session identity persistence)。
         tenant = client_tenant
         m = _SESSION_ID_IN_PATH.search(request.url.path)
         if m:

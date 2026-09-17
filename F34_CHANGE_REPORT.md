@@ -173,9 +173,11 @@ assistant tool_calls ids = {'fv1'} · 配对 tool 消息 ids = 无 · **悬空**
 | **F-34 授权面** | 10 已跟踪 + 2 新建 | 逐文件扫描 `ADR-022`/`F-34` 标记 | **全部 > 0** ✓ |
 | **非本轮（F1 / RT-GOV-01 / Stage 1）** | 11 已跟踪 | 同上，**必须 = 0** | **全部 = 0** ✓ |
 
-⇒ **不存在未授权文件修改**。工作树中另有 **15 个未跟踪文件**（F1×4 / F27×3 / F34_CHANGE_REPORT / 审计与规划报告×3 / RT-GOV-01_REPORT / `docs/RUNTIME_GOVERNANCE_METHODOLOGY_v0.1.md` / `docs/governance.html` / `docs/decisions/ADR-022`），其中仅 `ADR-022` 与 `F34_CHANGE_REPORT` 属本轮。
+⇒ **不存在未授权文件修改**。工作树中另有 **13 个未跟踪文件**（F1×4 / F27×3 / 审计与规划报告×3 / RT-GOV-01_REPORT / `docs/RUNTIME_GOVERNANCE_METHODOLOGY_v0.1.md` / `docs/governance.html`）。（`ADR-022` 与 `F34_CHANGE_REPORT` 已于后续提交入库，不再计入未跟踪清单。）
 
 > ⚠️ **`docs/governance.html` 与 `docs/RUNTIME_GOVERNANCE_METHODOLOGY_v0.1.md` 未被 `.gitignore` 覆盖**，且**归属 portfolio 仓库、非 PyHarness 资产** ⇒ 提交时**显式列文件**，**禁 `git add -A`**。
+
+> **后记（2026-09-17）**：上述两项已由 `.gitignore` 覆盖；工作树未跟踪文件随之降为 11（其中 2 项转为 ignored）。
 
 ---
 

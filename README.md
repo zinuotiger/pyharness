@@ -3,6 +3,15 @@
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
 > 状态: 核心主链与用户入口接地完成 — 1,751 collected / 1,749 passed / 2 skipped(快照 2026-09-17;全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
 
+## 从 Agent Demo 到 Governed Agent Runtime（从智能体演示到治理型智能体运行时）
+
+> 多数 Agent 仓库停在「能跑通一次对话」。本项目把**运行时治理**当成一等公民：工具执行经
+> `authorize()` **唯一授权入口**（关 2，全库仅 2 处调用），guard **g1–g7 单调拒绝**
+> （可拒绝、不可放行），每次授权留下 `decision.issued` **决策留痕**；**放行或拒绝**时另发
+> `receipt.emitted` **可校验凭证**（带 `prev_hash` 链，可独立校验）。5 条架构不变量（INV-01~05）
+> 被转成**可执行断言**，并以 mutation 反证测试自身的鉴别力。
+> 治理边界、残余风险与未实现项**如实公开**：[LIMITATIONS.md](LIMITATIONS.md)。
+
 ## 从这里开始(Current State)
 
 > ⚠️ **当前能力与已知限制见 [LIMITATIONS.md](LIMITATIONS.md) —— 建议先读它。**
@@ -132,7 +141,7 @@
 | 优化 | FLC.md | 6KB |
 | 沉淀 | KEY-FINDINGS.md / IMPACT-MATRIX.md | 17KB / 4KB |
 | 编码规格 | specs/(33 份,313 函数)→ [索引](docs/specs/README.md) | 596KB |
-| 文档站 | docs_html/(56 页可视化) | 双击 index.html |
+| 文档站 | [交互式架构图](https://zinuotiger.github.io/pyharness/architecture.html) | 在线查看(一页看全) |
 
 ## 技术栈
 Python 3.11 · pydantic · JSONL 事件溯源 · DeepSeek + qwen-max 降级 · pytest · asyncio · SQLite FTS(查询) · **pywebview 桌面壳 + FastAPI(外壳)**

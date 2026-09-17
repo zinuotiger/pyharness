@@ -8,7 +8,7 @@
 | 目的 | 读什么 |
 |------|--------|
 | 先懂全局 | MAP.md(架构总览图)→ PRD-Core.md §1-2 |
-| 了解设计决策 | ADD.md(12 条 ADR,每条含"违反后果") |
+| 了解设计决策 | ADD.md(ADR 索引与正文,每条含"违反后果") |
 | 写核心代码 | DIS-CORE.md(脊柱 8 模块伪代码)+ specs/(编码规格) |
 | 写能力代码 | DIS-SEAM.md(seam 三件套+插件总线)+ specs/ |
 | 事件格式 | EVENT-SCHEMA.md(信封/词表/JSONL) |

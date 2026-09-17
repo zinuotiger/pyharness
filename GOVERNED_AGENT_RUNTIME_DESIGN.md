@@ -4,7 +4,7 @@
 > 日期：2026-09-14 ｜ 基线：`main` @ `0cba75d`
 > 性质：**设计提案（Design Proposal）**——只定义目标架构、迁移映射与接口契约，**不含任何实现，不修改任何代码**。
 > 输入依据：[REFACTOR_PLAN.md](REFACTOR_PLAN.md)（2026-09-14 架构审计）
-> 遵循纪律：`.ai-coding/PROTOCOL.md` v0.3（FROZEN/OBSERVE）、INV-01~09、`docs/ADD.md` 12 条 ADR
+> 遵循纪律：`.ai-coding/PROTOCOL.md` v0.3（FROZEN/OBSERVE）、INV-01~09、`docs/ADD.md` 的 ADR 注册表
 
 ---
 

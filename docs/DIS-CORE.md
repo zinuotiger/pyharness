@@ -2,7 +2,7 @@
 
 > **定位**:核心脊柱 8 模块的**伪代码级实现规格**——把 PRD-Core.md §2.2/§3/§5(阶段0-1)已定的职责、事件协议、边界与验收骨架,展开为每模块的**数据结构字段级+核心函数级+状态机+错误路径+GWT 测试**落地口径。只回答"怎么做",不引入新需求。
 >
-> **权威声明**:PRD-Core.md 是唯一权威——凡功能编号(F0xx)、事件词汇、错误码域、模块职责/依赖与本文冲突,**一律以 PRD-Core.md 为准**;TECH-ANCHOR 六原则次之;ADD.md 12 条 ADR 为"为什么";MAP.md 为视图。本文对 PRD 留白处的细化均标"**DIS 细化**",落地前在 EVENT-SCHEMA.md/ERR.md 注册对齐。
+> **权威声明**:PRD-Core.md 是唯一权威——凡功能编号(F0xx)、事件词汇、错误码域、模块职责/依赖与本文冲突,**一律以 PRD-Core.md 为准**;TECH-ANCHOR 六原则次之;ADD.md 的 ADR 索引(见其 §2)为"为什么";MAP.md 为视图。本文对 PRD 留白处的细化均标"**DIS 细化**",落地前在 EVENT-SCHEMA.md/ERR.md 注册对齐。
 >
 > **读者**:实现阶段1(F007-F026)的工程师;先读 PRD §2.2/§3/§5.2,再读对应模块章,再写 `specs/core/*.py` 与 `tests/acceptance/test_f0xx_*.py`。
 
@@ -394,11 +394,31 @@ def derive_history(self, max_tokens):
             c = ev.payload.get("content") or ""
             if c: msgs.append({"role": "assistant", "content": c})
             else: pending = ev.seq            # 空 content=工具调用轮,等配对
-        elif t == "tool.result" and pending is not None:
-            msgs.append({"role": "tool", "content": ev.payload["summary"],
-                         "name": ev.payload["name"]}); pending = None
-        # guard.rejected 只留审计流不进 LLM 上下文;llm.chunk 不入日志(F027)
-    return truncate_head(msgs, max_tokens)     # 超窗头部截断
+        elif t in ("tool.result", "tool.error") and pending is not None:
+            # 失败也须配对(assistant.tool_calls 后悬空 → 端点 400):tool.error 分支
+            # 为**实现期补齐**,原伪码仅列 tool.result —— 本次一并对齐(文档漂移修复)
+            msgs.append({"role": "tool", "tool_call_id": ev.payload["call_id"],
+                         "content": ..., "name": ev.payload["name"]}); pending = None
+        # ── 拒绝反馈契约(ADR-022)────────────────────────────────────────
+        # 被拒绝的调用同样**必须**配对,否则悬空 → 端点 400。拒绝事件**不以其
+        # 原形**进上下文,只在派生层投影为配对 tool 消息(脱敏:工具名+规则引用):
+        elif t == "guard.rejected" and pending is not None:
+            msgs.append({"role": "tool",
+                         "tool_call_id": ev.trace["call_id"],   # ← 直接可得
+                         "name": ev.payload["tool"],
+                         "content": reject_note(ev.payload)}); pending = None
+        elif t in ("approval.denied", "approval.timeout"):
+            req = find_by_seq(ev.payload["approval_id"])   # 反查 approval.requested
+            if req is not None and pending is not None:    # 查不到 ⇒ fail-safe 跳过
+                msgs.append({"role": "tool",
+                             "tool_call_id": req.trace["call_id"],
+                             "name": req.payload["tool"],
+                             "content": reject_note(ev.payload)}); pending = None
+        # 其余(guard.evaluated/decision.issued/receipt.emitted/E 组)只留审计流;
+        # llm.chunk 不入日志(F027)
+    return truncate_head(drop_unpaired_tool_calls(msgs), max_tokens)
+    # ^ ADR-022 终局兜底:仍无配对的 assistant.tool_calls 剔除(旧日志/反查失败时
+    #   的最后一道防线),保证投影恒为 provider 合法形态
 ```
 
 **参数表**:max_tokens=窗口余量(scope.window_tokens 联动)。**异常表**:无(纯派生;坏行已由 persistence.replay 隔离)。**设计理由**:LLM 看到的=日志投影,"内存说 A 日志说 B"结构上不可能(INV-01);修正/压缩/拒绝各归其位,历史可审计可重演。

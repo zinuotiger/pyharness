@@ -301,7 +301,10 @@ def derive_history(events, max_tokens: int) -> list[dict]:
         elif ev.type == "tool.result" and pending is not None:
             msgs.append({"role": "tool", "content": ev.payload["summary"],
                          "name": ev.payload["name"]}); pending = None
-        # guard.rejected 只留审计流,不进 LLM 上下文(§6);compacted 事件 → 插入摘要文本
+        # 拒绝反馈契约(ADR-022):guard.rejected / approval.denied / approval.timeout
+        # **不以原形**进入 LLM 上下文,但经**派生层**生成**配对 tool 消息**
+        # (role="tool", tool_call_id 取自事件 trace / 经 approval_id 反查 requested),
+        # 使 assistant.tool_calls 恒有配对(悬空 → 端点 400);compacted 事件 → 插入摘要文本
     return truncate_head(msgs, max_tokens)
 ```
 

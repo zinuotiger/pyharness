@@ -59,6 +59,22 @@ def _estimate_tokens(content: str) -> int:
     return cjk + words + 4  # +4: role/content 等结构开销(启发式常量)
 
 
+# ---------------------------------------------------- 拒绝反馈文本(ADR-022 D-6)
+# 拒绝类事件投影为配对 tool 消息时的 content。**脱敏**:只含工具名与规则/策略引用,
+# **不含参数原文与凭据**(SECURITY §6.4 既有纪律)。
+_APPROVAL_REJECT_NOTES: dict = {
+    "approval.denied": "调用被拒绝:人工审批未通过",
+    "approval.timeout": "调用被拒绝:人工审批超时",
+}
+
+
+def _guard_reject_note(payload: dict) -> str:
+    """guard 链拒绝的反馈文本(工具名 + guard_id/policy_ref,脱敏)。"""
+    tool = str(payload.get("tool") or "工具")
+    ref = str(payload.get("guard_id") or payload.get("policy_ref") or "")
+    return f"{tool} 调用被拒绝:{ref}" if ref else f"{tool} 调用被拒绝"
+
+
 # ------------------------------------------------------------------ SessionLog
 class SessionLog:
     """会话事件日志门面(F009):append-only 唯一写入口 + 派生视图工厂。
@@ -178,6 +194,8 @@ class SessionLog:
         msgs: list[dict] = []
         sources: list[Optional[int]] = []     # 与 msgs 平行的源 seq(修正定位用)
         pending: Optional[int] = None         # 待配对 tool 的 response seq
+        paired: set[str] = set()              # 已产出 tool 消息的 call_id(ADR-022 终局兜底用)
+        req_index: dict = {}                  # approval.requested: seq → (call_id, tool)
         for ev in self._cache:                # seq 升序遍历
             t = ev.type
             p = ev.payload
@@ -213,23 +231,82 @@ class SessionLog:
                     msgs.append(am)
                     sources.append(ev.seq)
             elif t == "tool.result":
+                cid = p.get("call_id") or ""
                 msgs.append({"role": "tool",
-                             "tool_call_id": p.get("call_id") or "",
+                             "tool_call_id": cid,
                              "content": p.get("summary") or "",
                              "name": p.get("name")})
                 sources.append(ev.seq)
+                paired.add(cid)
             elif t == "tool.error":
                 # 失败也须配对 tool 消息(assistant.tool_calls 后悬空 → 端点 400,
                 # 实测 LLM-304 刷屏);content = 错误摘要回喂,LLM 可据此改口
+                cid = p.get("call_id") or ""
                 msgs.append({"role": "tool",
-                             "tool_call_id": p.get("call_id") or "",
+                             "tool_call_id": cid,
                              "content": (str(p.get("code") or "")
                                          + " " + str(p.get("message") or ""))[:500],
                              "name": p.get("name")})
                 sources.append(ev.seq)
-            # guard.*/agent.message/其余 llm.*/E 组:审计流或派生外,
-            # 不进 LLM 上下文(§4.2 映射表);llm.chunk 为瞬时事件,日志中天然不存在
-        return msgs
+                paired.add(cid)
+            elif t == "approval.requested":
+                # 仅建索引(**不入上下文**):供 denied/timeout 反查 call_id
+                req_index[ev.seq] = (str((ev.trace or {}).get("call_id") or ""),
+                                     str(p.get("tool") or ""))
+            elif t in ("approval.denied", "approval.timeout"):
+                # ADR-022 D-1/D-2:审批拒绝亦须配对,否则同上悬空。
+                # approval.denied 的 trace 不带 call_id ⇒ 经 approval_id 反查
+                # approval.requested(其 trace 载 call_id)。查不到 ⇒ fail-safe 跳过
+                # (D-8:绝不上抛),交由终局兜底剥离。
+                cid, tool = req_index.get(int(p.get("approval_id") or 0), ("", ""))
+                if cid and cid not in paired:
+                    msgs.append({"role": "tool", "tool_call_id": cid,
+                                 "name": tool or None,
+                                 "content": _APPROVAL_REJECT_NOTES[t]})
+                    sources.append(ev.seq)
+                    paired.add(cid)
+            elif t == "guard.rejected":
+                # ADR-022 D-1/D-2:guard 链拒绝(scope-hidden/g-rule/critical)配对。
+                cid = str((ev.trace or {}).get("call_id") or "")
+                if cid and cid not in paired:
+                    msgs.append({"role": "tool", "tool_call_id": cid,
+                                 "name": str(p.get("tool") or "") or None,
+                                 "content": _guard_reject_note(p)})
+                    sources.append(ev.seq)
+                    paired.add(cid)
+            # agent.message/guard.evaluated/decision.issued/receipt.emitted/其余
+            # llm.*/E 组:审计流或派生外,**不进** LLM 上下文(§4.2 映射表,按
+            # ADR-022 修订:拒绝类事实**不以原形**进入,只经上述配对投影进入)。
+            # llm.chunk 为瞬时事件,日志中天然不存在。
+        return self._drop_unpaired_tool_calls(msgs, paired)
+
+    @staticmethod
+    def _drop_unpaired_tool_calls(msgs: list[dict],
+                                  paired: set) -> list[dict]:
+        """ADR-022 终局兜底:仍无配对 tool 消息的 `assistant.tool_calls` 予以剔除。
+
+        为什么必须有:拒绝类事件在**旧日志/异常时序**下可能缺失(如历史遗留会话、
+        反查失败),此时投影仍会悬空 —— 而 OpenAI/DeepSeek 端点对"`assistant.tool_calls`
+        无配对 `tool` 消息"直接 400(session.py 上文两处注释即作者真链实测)。
+        本兜底**只作用于投影**,不动日志(INV-01:真源仍是 append-only 事件流)。
+
+        无配对的 assistant 消息:仍有 content ⇒ 降级为纯文本 assistant;
+        连 content 也没有 ⇒ **整条丢弃**(等价于"该轮未发生"),避免空 assistant 消息。
+        """
+        out: list[dict] = []
+        for m in msgs:
+            calls = m.get("tool_calls")
+            if not calls:
+                out.append(m)
+                continue
+            kept = [c for c in calls if c.get("id") in paired]
+            if len(kept) == len(calls):
+                out.append(m)
+            elif kept:
+                out.append({**m, "tool_calls": kept})
+            elif m.get("content"):
+                out.append({"role": "assistant", "content": m["content"]})
+        return out
 
     @staticmethod
     def _truncate_head(msgs: list[dict], max_tokens: Optional[int]) -> list[dict]:

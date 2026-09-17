@@ -1255,3 +1255,256 @@ async def test_adr021_authorize_wires_calling_session_into_guard(tmp_path):
         "装配期会话不得收到该子调用的守卫事件"
     findings = await AuditSystem(session=child).reconcile()
     assert not [x for x in findings if "NO-GUARD-EVENT" in x], findings
+
+
+# ============================ ADR-022 / F-34 · 拒绝反馈契约(投影层配对)
+# 缺陷:被拒绝的 tool call 在派生给 LLM 的历史中失去配对 —— reducer 只映射
+# tool.result/tool.error,而 guard.*/approval.* 被显式排除;执行器在拒绝时直接
+# 返回 ExecResult 且不写 tool 事件 ⇒ assistant.tool_calls 悬空 ⇒ 端点 400。
+# 修法:在**派生层**把拒绝结果合成为配对的 tool 消息(不新增事件、不改审计)。
+
+def _f34_dangling(msgs) -> set:
+    ids = {c["id"] for m in msgs for c in (m.get("tool_calls") or [])}
+    paired = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
+    return ids - paired
+
+
+def _f34_tool_msgs(msgs) -> list:
+    return [m for m in msgs if m.get("role") == "tool"]
+
+
+async def _f34_log(tmp_path, tag):
+    log, store = _wired_log(f"s-f34{tag}01", tmp_path)
+    await log.append("session.created", {"title": "", "model": "m"},
+                     actor="system")
+    await log.append("user.message", {"content": "go"}, actor="user")
+    return log, store
+
+
+async def _f34_tool_call(log, call_id: str, tool: str, args: dict = None):
+    """一轮工具调用:llm.response(含 tool_calls) + tool.call。"""
+    await log.append("llm.response",
+                     {"model": "m", "finish_reason": "tool_calls",
+                      "content": "",
+                      "tool_calls": [{"id": call_id, "name": tool,
+                                      "arguments": "{}"}]},
+                     actor="llm")
+    await log.append("tool.call",
+                     {"name": tool, "args": dict(args or {}),
+                      "raw_args": dict(args or {}), "call_id": call_id},
+                     actor="tool", trace={"call_id": call_id})
+
+
+async def _f34_close(log):
+    await log.append("llm.response",
+                     {"model": "m", "finish_reason": "stop", "content": "done",
+                      "tool_calls": []}, actor="llm")
+    await log.append("agent.message", {"content": "done"}, actor="agent")
+
+
+async def test_f34_T1_guard_reject_is_paired(tmp_path):
+    """T-1:guard 拒绝 ⇒ 派生历史**无悬空**,且产出配对 tool 消息(脱敏)。"""
+    log, _ = await _f34_log(tmp_path, "a")
+    await _f34_tool_call(log, "c1", "fs.read_file", {"path": "../../secret"})
+    await log.append("guard.evaluated",
+                     {"tool": "fs.read_file", "decision": "deny",
+                      "guard_ids": ["g-fs-path"], "reasons": ["GRD-401"]},
+                     actor="tool", trace={"call_id": "c1"})
+    await log.append("guard.rejected",
+                     {"tool": "fs.read_file", "guard_id": "g-fs-path",
+                      "reason": "GRD-401", "policy_ref": "GRD-401"},
+                     actor="tool", sync=True, trace={"call_id": "c1"})
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set(), f"仍悬空:{_f34_dangling(msgs)}"
+    tm = _f34_tool_msgs(msgs)
+    assert len(tm) == 1 and tm[0]["tool_call_id"] == "c1"
+    assert "g-fs-path" in tm[0]["content"], "拒绝原因应含 guard_id"
+    assert "../../secret" not in tm[0]["content"], "不得含参数原文(SECURITY 6.4)"
+
+
+async def test_f34_T2_approval_denied_is_paired(tmp_path):
+    """T-2:审批 denied ⇒ 经 approval_id 反查 call_id 配对。"""
+    log, _ = await _f34_log(tmp_path, "b")
+    await _f34_tool_call(log, "c2", "exec.shell_run", {"command": "echo hi"})
+    await log.append("guard.evaluated",
+                     {"tool": "exec.shell_run", "decision": "need_approval",
+                      "guard_ids": ["g-danger"], "reasons": ["POL-DGR-1"]},
+                     actor="tool", trace={"call_id": "c2"})
+    req = await log.append("approval.requested",
+                           {"tool": "exec.shell_run",
+                            "args_summary": "command=echo hi",
+                            "ttl_ms": 120000, "risk": "high"},
+                           actor="tool", sync=True,
+                           trace={"channel": "cli", "call_id": "c2"})
+    await log.append("approval.denied",
+                     {"approval_id": req.seq, "by": "cli:t", "ttl_ms": 120000},
+                     actor="user", sync=True, trace={"kind": "approval.verdict"})
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set(), f"仍悬空:{_f34_dangling(msgs)}"
+    tm = _f34_tool_msgs(msgs)
+    assert len(tm) == 1 and tm[0]["tool_call_id"] == "c2"
+    assert "拒绝" in tm[0]["content"]
+
+
+async def test_f34_T3_approval_timeout_is_paired(tmp_path):
+    """T-3:审批 timeout ⇒ 同 T-2 口径。"""
+    log, _ = await _f34_log(tmp_path, "c")
+    await _f34_tool_call(log, "c3", "exec.shell_run", {"command": "echo hi"})
+    req = await log.append("approval.requested",
+                           {"tool": "exec.shell_run",
+                            "args_summary": "command=echo hi",
+                            "ttl_ms": 100, "risk": "high"},
+                           actor="tool", sync=True,
+                           trace={"channel": "cli", "call_id": "c3"})
+    await log.append("approval.timeout",
+                     {"approval_id": req.seq, "by": "system", "ttl_ms": 100},
+                     actor="system", sync=True, trace={"kind": "approval.verdict"})
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set()
+    tm = _f34_tool_msgs(msgs)
+    assert len(tm) == 1 and tm[0]["tool_call_id"] == "c3"
+    assert "超时" in tm[0]["content"]
+
+
+async def test_f34_T4_apr501_is_paired(tmp_path):
+    """T-4:APR-501(headless 无通道)⇒ **无 approval.requested 可反查**,配对来自
+    执行器经**既有** tool.error 通道补发(D-7(a))。"""
+    log, _ = await _f34_log(tmp_path, "d")
+    await _f34_tool_call(log, "c4", "exec.shell_run", {"command": "echo hi"})
+    assert not [e for e in log.events_after(0) if e.type == "approval.requested"]
+    await log.append("tool.error",
+                     {"name": "exec.shell_run", "call_id": "c4",
+                      "code": "APR-501", "message": "审批不可用(APR-501),未执行"},
+                     actor="tool")
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set(), f"仍悬空:{_f34_dangling(msgs)}"
+    tm = _f34_tool_msgs(msgs)
+    assert len(tm) == 1 and tm[0]["tool_call_id"] == "c4"
+    assert "APR-501" in tm[0]["content"]
+
+
+async def test_f34_T5_normal_tool_unchanged(tmp_path):
+    """T-5(对照/零回归锚):正常工具调用 ⇒ 派生历史与修复前**同形**。"""
+    log, _ = await _f34_log(tmp_path, "e")
+    await _f34_tool_call(log, "c5", "util.now", {})
+    await log.append("tool.result",
+                     {"name": "util.now", "call_id": "c5", "ok": True,
+                      "truncated": False, "summary": "12:00"},
+                     actor="tool", trace={"call_id": "c5"})
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set()
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "assistant"]
+    assert msgs[2] == {"role": "tool", "tool_call_id": "c5",
+                       "content": "12:00", "name": "util.now"}
+
+
+async def test_f34_T6_audit_events_unchanged(tmp_path):
+    """T-6(INV-05):拒绝的**事件层**逐项不变 —— 只多了一条**投影**,真源未动。"""
+    log, _ = await _f34_log(tmp_path, "f")
+    await _f34_tool_call(log, "c6", "fs.read_file", {"path": "x"})
+    await log.append("guard.rejected",
+                     {"tool": "fs.read_file", "guard_id": "g-fs-path",
+                      "reason": "GRD-401", "policy_ref": "GRD-401"},
+                     actor="tool", sync=True, trace={"call_id": "c6"})
+    ev = [e for e in log.events_after(0) if e.type == "guard.rejected"]
+    assert len(ev) == 1
+    assert set(ev[0].payload) == {"tool", "guard_id", "reason", "policy_ref"}
+    assert ev[0].actor == "tool"
+
+
+async def test_f34_T7_ownership_per_session(tmp_path):
+    """T-7(ADR-021):拒绝的投影属**该会话**;不得出现在另一会话的历史中。"""
+    a, _ = await _f34_log(tmp_path, "g")
+    b, _ = await _f34_log(tmp_path, "h")
+    await _f34_tool_call(a, "c7", "fs.read_file", {"path": "x"})
+    await a.append("guard.rejected",
+                   {"tool": "fs.read_file", "guard_id": "g-fs-path",
+                    "reason": "GRD-401", "policy_ref": "GRD-401"},
+                   actor="tool", sync=True, trace={"call_id": "c7"})
+    await _f34_close(a)
+    await _f34_close(b)
+
+    assert _f34_tool_msgs(a.derive_messages()), "拒绝投影应在 A 会话"
+    assert _f34_tool_msgs(b.derive_messages()) == [], "B 会话不得出现该投影"
+
+
+async def test_f34_T8_detector_is_not_vacuous(tmp_path):
+    """T-8(**判据自检**):拒绝事件**无法关联**(缺 trace.call_id)时,悬空必须被
+    **兜底剥离**;若此处与 T-1 同形,则 T-1 的配对断言无鉴别力。"""
+    log, _ = await _f34_log(tmp_path, "i")
+    await _f34_tool_call(log, "c8", "fs.read_file", {"path": "x"})
+    await log.append("guard.rejected",                # 故意不带 trace.call_id
+                     {"tool": "fs.read_file", "guard_id": "g-fs-path",
+                      "reason": "GRD-401", "policy_ref": "GRD-401"},
+                     actor="tool", sync=True)
+    await _f34_close(log)
+
+    msgs = log.derive_messages()
+    assert _f34_dangling(msgs) == set(), "兜底必须剥离悬空 tool_call"
+    assert _f34_tool_msgs(msgs) == [], "无可关联 ⇒ 不应凭空造 tool 消息(与 T-1 不同)"
+    assert [m["role"] for m in msgs] == ["user", "assistant"], \
+        "无 content 的 assistant 工具轮应整条丢弃"
+
+
+async def test_f34_T9_reverse_lookup_failsafe(tmp_path):
+    """T-9(D-8):`approval.denied` 反查不到 `approval.requested` ⇒ **不抛错**,
+    降级为剥离(fail-safe:绝不让审计投影冻结会话)。"""
+    log, _ = await _f34_log(tmp_path, "j")
+    await _f34_tool_call(log, "c9", "exec.shell_run", {"command": "echo hi"})
+    await log.append("approval.denied",               # 无对应 requested
+                     {"approval_id": 9999, "by": "cli:t", "ttl_ms": 1},
+                     actor="user", sync=True, trace={"kind": "approval.verdict"})
+    await _f34_close(log)
+
+    msgs = log.derive_messages()                      # 不得抛
+    assert _f34_dangling(msgs) == set()
+    assert _f34_tool_msgs(msgs) == []
+
+
+async def test_f34_T4b_apr501_executor_emits_tool_error(tmp_path):
+    """T-4b(D-7(a) **产出侧**专属):真实执行器在 APR-501 下**必须**发出
+    `tool.error` —— 这才是 T-4 那条配对消息的**实际来源**。
+    T-4 只验证 reducer 对该事件的映射;本条验证事件确实被**产出**。
+
+    没有本条,M-C(撤掉执行器侧路由)无法被任何用例捕获 ⇒ D-7(a) 会退化为
+    "只有注释、没有验证"。
+    """
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.tools_executor import ToolExecutor
+    from pyharness.core.tools_guard import GuardChain
+    from pyharness.core.tools_registry import ToolDefinition, ToolRegistry
+
+    sess, prov = _Sess(), _Prov()
+    reg = ToolRegistry()
+    reg.register_tool(ToolDefinition(name="fs.read_file", description="f34 apr501",
+                                     schema=_READ_SCHEMA_INV04, danger="high",
+                                     owner="builtin"))
+    reg.bind_provider("fs.read_file", prov)
+    chain = GuardChain(session=sess)          # approval_channel=None 视同有通道
+    gov = _inv04_gov(chain)
+    ctx = _inv04_ctx(sess, tmp_path, chain=chain, gov=gov)
+    # headless 无通道:ctx 上的取法优先于 provider 缺省 ⇒ 须显式置位才走 APR-501
+    ctx.channel = None
+    ctx.headless = True
+    ctx.approval = ApprovalProvider(session=sess, channel=None, headless=True)
+    call = _inv04_call(name="fs.read_file", raw={"path": "a.txt"},
+                       call_id="c-apr501")
+
+    r = await ToolExecutor(reg).execute(call, ctx)
+
+    assert r.ok is False, f"APR-501 应拒绝执行:{r}"
+    assert prov.calls == 0, "APR-501 不得进入 Provider"
+    errs = sess.of("tool.error")
+    assert len(errs) == 1, f"应恰一条 tool.error,实际事件={sess.types()}"
+    assert errs[0]["payload"]["code"] == "APR-501"
+    assert errs[0]["payload"]["call_id"] == "c-apr501", "call_id 必须可配对"

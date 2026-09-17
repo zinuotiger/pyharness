@@ -597,6 +597,13 @@ class ToolExecutor:
         except PyHError as e:
             if e.code == "APR-501":                     # headless 无通道:直接拒
                 self._rejected.add(call.call_id)
+                # ADR-022 D-7(a):本路径**不发** approval.requested(零事件零等待),
+                # 故派生层**没有任何事件可供反查 call_id** ⇒ 必须经**既有**
+                # tool.error 通道补配对,否则 assistant.tool_calls 悬空 → 端点 400。
+                # 仅更换**事件出口**(副作用即本调用目的),判定语义与返回类型不变;
+                # 未新增事件类型、未触碰 guard.rejected/approval.denied 的产生逻辑。
+                await self._on_error(ctx, call, "APR-501",
+                                     "审批不可用(APR-501),未执行")
                 return ApprovalRoundResult(decision=prior, approved=False,
                                            executed=False,
                                            message="审批不可用(APR-501),未执行")

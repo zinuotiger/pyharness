@@ -1,7 +1,7 @@
 """pyharness/events/payload.py — 各事件负载模型 (specs/events.py.md 词表清单)
 
 按 EVENT-SCHEMA §3 词汇总表为每个事件实现一个 pydantic 负载模型
-(extra="forbid",拒多余字段——F026 同纪律);77 事件词表(75 payload 模型) + llm.retry
+(extra="forbid",拒多余字段——F026 同纪律);77 事件词表(77 payload 模型) + llm.retry
 落盘注册见 vocab.py 的 _CORE_EVENT_TYPES。
 
 约定:✓=必填字段不带默认值;—=可选字段 Optional/显式默认;载荷内

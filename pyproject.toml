@@ -58,5 +58,5 @@ asyncio_mode = "auto"
 addopts = "-q --cov=pyharness --cov-report=term-missing"
 markers = [
     "e2e: 真实 LLM/网络测试,默认跳过(手动 -m e2e 运行)",
-    "invariant: 全库不变量测试(INV-01~09)",
+    "invariant: 不变量测试(运行时覆盖 INV-01~05,INV-01~09 为编号注册层)",
 ]

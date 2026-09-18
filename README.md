@@ -8,8 +8,10 @@
 > 多数 Agent 仓库停在「能跑通一次对话」。本项目把**运行时治理**当成一等公民：工具执行经
 > `authorize()` **唯一授权入口**（关 2，全库仅 2 处调用），guard **g1–g7 单调拒绝**
 > （可拒绝、不可放行），每次授权留下 `decision.issued` **决策留痕**；**放行或拒绝**时另发
-> `receipt.emitted` **可校验凭证**（带 `prev_hash` 链，可独立校验）。5 条架构不变量（INV-01~05）
-> 被转成**可执行断言**，并以 mutation 反证测试自身的鉴别力。
+> `receipt.emitted` **可校验凭证**（带 `prev_hash` 链）；校验面为**库级 API**
+> （`pyharness.governance.verify_receipt`），**未接 CLI / HTTP / 工具外壳**。5 条架构不变量（INV-01~05）
+> 被转成**可执行断言**，并以 mutation 反证测试自身的鉴别力 —— 此处 INV-01~05 为
+> **运行时事实来源（runtime inventory）**，`docs/INVARIANT_REGISTRY.md` 的 INV-01~09 为编号层 / 历史记录。
 > 治理边界、残余风险与未实现项**如实公开**：[LIMITATIONS.md](LIMITATIONS.md)。
 
 ## 从这里开始(Current State)

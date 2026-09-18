@@ -47,6 +47,23 @@
 
 > **关于 `gap`**：覆盖缺口**不放入 `Status`**，而统一登记在每条 ID 的 **`Coverage Gap`** 字段 —— 因九条 ID **当前全部**存在覆盖缺口，若以 `gap` 作 Status 则失去区分度。`Status` 只表达**编号状态**。
 
+### 0.4 与运行时事实来源的关系（v1.1 口径声明，2026-09-17）
+
+本节**只声明二者的关系**，不改变任何编号、语义或既有条目 —— 用以消除库中同一编号面的三处口径分歧。
+
+1. **本 Registry 的 `INV-01`~`INV-09`** 是**编号与语义的权威层**（Canonical Source of Truth，见 §0）。
+2. **运行时事实来源（runtime inventory）** 是 `tests/invariants/` 的**用例面** —— 当前为 **INV-01~05**（`test_inv_core.py`，40 函数 / 48 用例）。
+3. **本轮不重编号、不迁移**：§2 中 **19 处 `pending authorization`** 的历史文本引用**保持原样**，逐条迁移不属本轮范围。
+
+**实存状态登记**（与 `LIMITATIONS.md` L-7 同源）：
+
+| 目录 | 实存 | §0 要求 |
+|---|---|---|
+| `tests/invariants/` | 5 个用例文件（bus / config / core / events / governance） | ✅ 承载 Canonical ID 标注 |
+| `tests/acceptance/` | **仅空 `__init__.py`** | ⚠️ 要求承载带 Canonical ID 的用例 —— **未满足** |
+| `tests/security/` | **目录不存在** | ⚠️ 要求同上 —— **未满足** |
+| `tests/e2e/` | **仅空 `__init__.py`** | ⚠️ 未满足 |
+
 ---
 
 ## 1. Canonical INV-01 ~ INV-09

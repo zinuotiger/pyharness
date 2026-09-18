@@ -1,12 +1,12 @@
 # CODE-MATRIX — PyHarness 实现状态追踪(面试展示用)
 
 > **初版快照**:2026-09-07 | code-pipeline 全流程走完 | 32 模块全部实现
-> **总览已按当前 RC 更新**:`e561712` @ 2026-09-17 —— 下表**新增「当前」列并保留「原值」列**;其后的阶段章节(阶段 0~6)仍是 2026-09-07 原始记录,**未改动**。
+> **总览数据截至 `e561712`** @ 2026-09-17（**非"当前"** —— 该表**不承诺**随 HEAD 更新）—— 下表为**该 commit 时点**的实测列与「原值」列;其后的阶段章节(阶段 0~6)仍是 2026-09-07 原始记录,**未改动**。
 > 当前能力与已知限制以 [LIMITATIONS.md](LIMITATIONS.md) 为准。
 
 ## 总览
 
-| 指标 | 当前(RC `e561712` @ 2026-09-17) | 原值(2026-09-07) |
+| 指标 | 实测 @ `e561712`(2026-09-17) | 原值(2026-09-07) |
 |------|------|------|
 | 模块 | `pyharness/` **85 个 .py 文件 / 33,586 行** | 32/32 实现(40 个 .py 文件 / 21,528 行) |
 | 测试规模 | `tests/` **72 个 .py 文件 / 30,989 行** | unit 33 文件 + invariants |
@@ -15,9 +15,9 @@
 | 演示 | demo_phase0~6(脚本在位;本次未重测) | demo_phase0~6 全部跑通 |
 | git | 72 次提交(至 `e561712`) | 6 次提交(92a328f → eaeb2b6) |
 
-> 「当前」列数据均为实测:`git rev-list --count HEAD` / `git ls-files … | xargs wc -l` / 全量 `pytest`(默认口径须 `--ignore` 两个缺 PySide6 的用例文件,见 [LIMITATIONS.md](LIMITATIONS.md) L-6)。
+> 「实测」列数据均为该 commit 时点实测:`git rev-list --count HEAD` / `git ls-files … | xargs wc -l` / 全量 `pytest`(默认口径须 `--ignore` 两个缺 PySide6 的用例文件,见 [LIMITATIONS.md](LIMITATIONS.md) L-6)。
 
-## 当前 RC 修复状态(至 `e561712`)
+## 修复状态(截至 `e561712`)
 
 | commit | 范围 | 修复项 |
 |--------|------|--------|
@@ -46,7 +46,7 @@ cli(14 子命令)/ acp(JSON-RPC)/ desktop(pywebview+FastAPI)/ repair(F060)
 > 修实现 bug:PyHError 漏 import、对账口径不一致(永不收敛)、desktop 3 处
 
 ## 关键质量证据
-- INV-01~09 不变量测试全绿(invariants/ 12 项)
+- 不变量**运行时覆盖 INV-01~05**(`tests/invariants/`;"12 项"为 2026-09-07 时点值);**INV-01~09** 为**编号注册层**(`docs/INVARIANT_REGISTRY.md`),其中 **INV-06~09 不在测试覆盖内**
 - 安全核心:tools_guard 80 测试(INV-03 单调拒绝/INV-04 零副作用)
 - 每模块错误码锚定 ERR.md(41 码零表外)
 - 事件词表 64 类型(57 核心 + plan/schedule 扩展)

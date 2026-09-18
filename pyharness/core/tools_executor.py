@@ -52,6 +52,9 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
 5. _reject(scope-hidden 等 executor 侧终局拒)summary 统一 "guard 拒绝:…" 前缀
    (DIS-CORE §7.3.2 的 "scope 拒绝" 弃用):F026 连败计数与审计 grep "guard 拒绝"
    同口径,scope 前置拒绝本就属 GRD-401 守卫族。
+   **当前不在运行路径上**:S3-2-2 把 scope 前置的运行时所有权上提到
+   ``GuardChain._evaluate_full``,executor 不再自算 scope.can_use ⇒ ``self._reject(``
+   调用点为 0 处。本方法保留待独立处置(删除/接线),**不得视为第二条拒绝路径**。
 6. 取消(F025)partial 事件以 ok=False + truncated=True + summary 标注 partial
    表达(ExecResult/ToolResultPayload 均无 partial 字段);EVENT-SCHEMA §3.4.6 注的
    "ok=True,truncated=True" 为另一口径,以 executor spec 职责 4(ok=False,

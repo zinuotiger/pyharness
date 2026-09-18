@@ -19,8 +19,6 @@
 故本方法**不得**向 ``DecisionEngine.decide()`` 传 ``approval_available`` /
 ``approval_verdict``——有测试守卫钉死这一点。
 
-本阶段**不发射** ``decision.issued``(事件注册/载荷/executor 两出口接线属 S3-2-2)。
-
 四字段先以 ``None`` 占位而非省略,是为了**冻结形状**(ADR-018 §目录冻结):
 装配层与测试可稳定断言 ``ctx.governance.decisions is None``("尚未接线"),
 而不是 ``AttributeError``——缺失可见,不静默。
@@ -45,7 +43,7 @@ _FRAMEWORK_BY = "system"
 
 @dataclass
 class GovernanceContext:
-    """治理层上下文(policy + decisions 已接线;receipts/evidence/audit 仍为形状占位)。"""
+    """治理层上下文:五个构件全部已接线(None 仅表示"该环境未装配")。"""
 
     policy: PolicyEngine
     # ---- S5 形状:五个构件全部已接线(None 仅表示"该环境未装配")----

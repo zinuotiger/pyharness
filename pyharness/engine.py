@@ -437,9 +437,8 @@ def _build_governance(cfg: Any, *, session: Any, bus: Any,
     ``chain_factory``(执行面)。两处都把注入参数**烘焙进 guard 闭包**,参数分歧
     ⇒ 治理层持有的规则与实际执行的链判定分歧(静默)。
 
-    治理层只进**装配链**、不进运行链:运行期仍是 ``ctx.guard.evaluate``
-    (tools_executor 关 2b 调用),治理层无执行权(ADR-013 G-4 / INV-G5);
-    运行期向治理层问询(authorize)属 S3。
+    治理层无执行权(ADR-013 G-4 / INV-G5):运行期关 2 经
+    ``ctx.governance.authorize``(S3-2-2 起),executor 不再直呼 ``ctx.guard.evaluate``。
     """
     from pyharness.core.tools_guard import describe_rules
     from pyharness.core.tools_guard import from_config as guard_from_config

@@ -28,6 +28,40 @@ from pyharness.events.vocab import validate_payload
 log = logging.getLogger("pyharness.application.service")
 
 
+def _with_message_origin(log_: Any, msgs: list[dict]) -> list[dict]:
+    """给派生消息附**来源标记**(只供 UI 判断消息来自谁,不参与 LLM 请求)。
+
+    定时任务到点触发时,Scheduler 会以 ``actor="user"`` 写一条 ``user.message``,
+    其 ``origin="schedule:<name>"``(schedule._fire)。``derive_messages`` 只投影
+    role/content,且**同时喂给 agent_loop 的 LLM 请求与 compaction 的 token 估算**,
+    故**不改其输出契约**;改在本层按 1:1 对应关系**复制**并附加键:
+
+      - ``session._fold_history`` 对每条 ``user.message`` 恰产出一条 ``role=user``
+        消息(``user.message_edited`` 是替换内容而非增删),故第 k 条 user 消息 ↔
+        第 k 条 user.message 事件;
+      - 复制字典,避免污染 ``derive_messages`` 的 history 缓存对象。
+
+    普通用户输入同样写 ``origin=None``(键恒在,便于前端统一判断)。
+    """
+    origins = [getattr(e, "origin", None) for e in log_.events_after(0)
+               if getattr(e, "type", "") == "user.message"]
+    out: list[dict] = []
+    k = 0
+    for m in msgs:
+        row = dict(m)
+        if row.get("role") == "user":
+            row["origin"] = origins[k] if k < len(origins) else None
+            k += 1
+        out.append(row)
+    if k != len(origins):                  # 不变式破损:宁可少标记也不错标
+        log.warning("user.message 与派生 user 消息数不一致(events=%d msgs=%d)",
+                    len(origins), k)
+        for row in out:
+            row.pop("origin", None)
+    return out
+
+
+
 def _session_module():
     """Lazy import avoids desktop package <-> app shell import cycles."""
     from pyharness.desktop import sessions
@@ -505,7 +539,7 @@ class ApplicationService:
         stats_fn = getattr(log_, "stats", None)
         to_seq = int((stats_fn().get("seq") or 0)) if callable(stats_fn) else 0
         return {"sid": sid, "after_seq": int(after_seq), "to_seq": to_seq,
-                "messages": msgs}
+                "messages": _with_message_origin(log_, msgs)}
 
     async def session_timeline(self, sid: str, after_seq: int = 0,
                                kinds: str = "") -> dict:

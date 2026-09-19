@@ -152,6 +152,48 @@ def test_validate_registry_url_ssrf():
 
 
 @pytest.mark.asyncio
+async def test_session_messages_marks_schedule_origin(tmp_path):
+    """定时触发的消息带 origin=schedule:<name>,普通输入为 None;非 user 消息不带该键。
+
+    定时触发与用户输入在日志里 actor 都是 user,仅 origin 可区分——UI 靠它显示
+    「⏱ 定时触发」而非「你」。此处同时守住两个边界:
+      · derive_messages 的输出契约不变(LLM/compaction 共用,不得被本层污染)
+      · history 缓存对象不被就地改写
+    """
+    from pyharness import cli
+
+    cfg = cli._load_settings(None)
+    cfg.storage.root = str(tmp_path)
+    cfg.storage.sessions_dir = str(tmp_path / "sessions")
+    cfg.storage.workspaces_dir = str(tmp_path / "workspaces")
+    cfg.storage.spill_dir = str(tmp_path / "spill")
+    cfg.storage.db_path = str(tmp_path / "pyharness.db")
+
+    svc = ApplicationService(cli.assemble_ctx(cfg), channel="cli")
+    sid = await svc.surface_mgr().create()
+    log_ = await svc.require_session(sid)
+    await log_.append("user.message", {"content": "我自己说的"}, actor="user")
+    await log_.append("agent.message", {"content": "好的"}, actor="agent",
+                      sync=False)
+    await log_.append("user.message", {"content": "提醒我开始工作"},
+                      actor="user", origin="schedule:morning")
+
+    raw_before = [dict(m) for m in log_.derive_messages()]
+    out = await svc.session_messages(sid)
+    msgs = out["messages"]
+
+    users = [m for m in msgs if m["role"] == "user"]
+    assert len(users) == 2
+    assert users[0]["origin"] is None                    # 普通输入
+    assert users[1]["origin"] == "schedule:morning"      # 定时触发
+    assert users[1]["content"] == "提醒我开始工作"
+    assert all("origin" not in m for m in msgs if m["role"] != "user")
+
+    # 契约边界:减少器输出与缓存对象均未被本层污染
+    assert log_.derive_messages() == raw_before
+
+
+@pytest.mark.asyncio
 async def test_public_spine_for_injects_task_queue_bug2(tmp_path):
     """BUG-2 回归:public_spine_for 装配的 spine 必须带本会话 task_queue。
 

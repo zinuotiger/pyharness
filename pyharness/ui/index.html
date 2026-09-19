@@ -49,6 +49,9 @@ main { flex:1; display:flex; min-height:0; }
 .msg .bubble { padding:9px 13px; border-radius:10px; white-space:pre-wrap; word-break:break-word; }
 .msg.user { margin-left:auto; }
 .msg.user .bubble { background:var(--user); border:1px solid #b7c9ec; }
+/* 定时触发(origin=schedule:<name>):与"用户自己说的"区分——绿调 + 虚线边 */
+.msg.user.sched .bubble { background:#eef6ee; border:1px dashed #8fbf9a; }
+.msg.user.sched .who { color:var(--ok); }
 .msg.agent .bubble { background:var(--panel2); border:1px solid var(--border); }
 .msg.system { max-width:100%; text-align:center; margin:6px 0; }
 .msg.system .bubble { background:transparent; color:var(--muted); font-size:12px; padding:2px; }
@@ -403,9 +406,15 @@ function fmtResult(content) {
 function appendMsg(m) {
   const box = $("#messages");
   if (m.role === "user") {
+    // 定时触发与用户输入在日志里 actor 都是 user,仅 origin 可区分:
+    // Scheduler 到点写的 user.message 带 origin="schedule:<name>"(schedule._fire)
+    const origin = typeof m.origin === "string" ? m.origin : "";
+    const sched = origin.indexOf("schedule:") === 0;
     const el = document.createElement("div");
-    el.className = "msg user";
-    el.innerHTML = `<div class="who">你</div><div class="bubble">${esc(m.content ?? "")}</div>`;
+    el.className = sched ? "msg user sched" : "msg user";
+    el.innerHTML = `<div class="who">${sched
+      ? "⏱ 定时触发 · " + esc(origin.slice("schedule:".length)) : "你"}</div>`
+      + `<div class="bubble">${esc(m.content ?? "")}</div>`;
     box.appendChild(el);
     return;
   }

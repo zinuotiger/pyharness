@@ -123,23 +123,39 @@ def _cron_match(self, spec, dt):
 
 ### `def next_fire(self, job: ScheduleJob, now_dt: datetime) -> datetime | None` — 下次触发时刻(内部)
 
-**功能一句话**:按 kind 计算下次触发——cron:向后扫到下一匹配分钟(60s 粒度);interval:last_fired+interval(无则 now+interval);at:fire_at(已过 → None,一次性耗尽)。
+> **BUG-1 修订(2026-09-18,Phase 0 授权)**:原口径为"逐分钟后扫,上限 1440 次(24h),界内无匹配 → None(不触发)"。该口径使**下次触发在 24h 之外**的合法表达式(工作日/每周/每月)同样得到 `None`,而 `_due()` 对 `None` 恒 False ⇒ **注册成功却永不触发的静默态**。现改为:按日推进,上限取完整格里高利周期(400 年);界内无匹配 ⇒ 该表达式**永不存在触发点** ⇒ 显式 `CFG-601`,不再返回 `None`。`None` 现仅为 `at` 一次性耗尽语义。
+
+**功能一句话**:按 kind 计算下次触发——cron:按日推进,命中日取当日最早匹配 (时,分);interval:last_fired+interval(无则 now+interval);at:fire_at(已过 → None,一次性耗尽)。
 
 ```python
 def next_fire(self, job, now_dt):
-    if job.kind == "cron":                           # 逐分钟后扫(上限 1440 次防死循环)
-        t = now_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        for _ in range(1440):
-            if self._cron_match(job.spec, t): return t
-            t += timedelta(minutes=1)
-        return None                                  # 年内无匹配(如 2/30):不触发
+    if job.kind == "cron":
+        return self._cron_next_fire(job.spec, job.expr, now_dt)   # 见下
     if job.kind == "interval":
         base = job.last_fired_at or now_dt           # 固定间隔推进(≥60s)
         return base + timedelta(seconds=job.spec.seconds)
     return job.spec.fire_at if job.spec.fire_at > now_dt else None   # at 一次性:已过即 None
+
+def _cron_next_fire(self, spec, expr, now_dt):
+    # 按日推进(非逐分钟):先按 (月,日,周) 命中筛选日,再取当日最早 (时,分)。
+    # 整月不匹配时直接跳到下月 1 日;上限 CRON_MAX_SCAN_DAYS = 366*400+1
+    # (一个完整格里高利周期 +1 天)⇒ 凡能匹配者必被找到,反之为真无触发点。
+    start = now_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    cursor = start.replace(hour=0, minute=0)
+    for _ in range(CRON_MAX_SCAN_DAYS):
+        if not match(month_f, cursor.month):
+            cursor = (cursor.replace(day=1) + timedelta(days=32)).replace(day=1)
+            continue
+        if match(dom_f, cursor.day) and match(dow_f, (cursor.weekday()+1) % 7):
+            for h in hours_asc:                      # 升序 → 首个 ≥start 即当日最早
+                for mi in minutes_asc:
+                    if cursor.replace(hour=h, minute=mi) >= start:
+                        return cursor.replace(hour=h, minute=mi)
+        cursor += timedelta(days=1)
+    raise CFG-601(expr)                              # 400 年内无匹配 = 真无未来触发点
 ```
 
-**参数表**:`job`/`now_dt`=当前时刻。**异常表**:无。**关联测试**:test_f048_schedule(next_fire 边界)、GWT-F048-05(interval 触发后推进)。
+**参数表**:`job`/`now_dt`=当前时刻。**异常表**:cron 界内无匹配 → `CFG-601`(注册期即拒,不落"可注册但永不触发"态)。**关联测试**:test_f048_schedule(next_fire 边界)、`test_cron_next_fire_covers_week_and_month_cycles_bug1`、`test_register_rejects_never_firing_cron_bug1`、GWT-F048-05(interval 触发后推进)。
 
 ### `async def _tick(self, ctx, *, now_dt: datetime | None = None) -> list[str]` — 每分钟检查(F048 核心)
 

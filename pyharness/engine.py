@@ -10,11 +10,11 @@ envelope → loop.wake),供桌面壳/交互 CLI 把"提问"真正变成 Agent �
 
 偏离说明(契约以各 specs 为准,此处为装配层取舍):
 1. 内置能力全量注册(非空注册表):fs.* 4 工具 + storage.spill/kv + goal/todo +
-   web.search/fetch + exec.*/proc.* + user.ask + skill.*,共 18 个 Definition 真实
-   进注册表;strict 档下按 scope 域显隐(workspace 域 fs/storage 放行、session/
-   self 域恒可见、exec/web 需 basic 档或 allowlist),所以"模型看得见几个工具"
-   由策略决定,不由装配决定。[2026-09-12 更正:此前本注释写"默认不注册任何工具
-   Provider(registry 空)",与同一函数 L427-486 的实现相反,属过期说明。]
+   web.search/fetch + exec.*/proc.* + user.ask + skill.* + schedule,共 20 个
+   Definition 真实进注册表;strict 档下按 scope 域显隐(workspace 域 fs/storage
+   放行、session/self 域恒可见、exec/web 需 basic 档或 allowlist),所以"模型看得见
+   几个工具"由策略决定,不由装配决定。[2026-09-18:增 schedule 工具时校正计数
+   ——此前本注释写 18,与枚举项数(19)及实测注册表均不符,属既有漂移。]
 2. Scope 预算:limits 从 cfg.budget 编译(BudgetLimits.from_cfg);会话级
    budget 闸(F032 计费)与 scope.check_budget(轮闸)在此不挂 Counters——
    会话级预算由 desktop 的 budget_dashboard 只读派生(llm.usage 折叠),
@@ -589,6 +589,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core.skill import SkillManager
     from pyharness.core import tool_skill as _tool_skill
     _tool_skill.register(tool_reg)               # skill.load/list(F073 技能系统)
+    from pyharness.core import tool_schedule as _tool_schedule
+    _tool_schedule.register(tool_reg)            # schedule(F048 定时任务管理面)
     skill_roots = [Path(__file__).resolve().parents[1] / "skills"]
     try:
         extra_skill_dir = getattr(getattr(cfg, "skills", None), "dir", None)

@@ -256,7 +256,13 @@ class ApplicationService:
                 sessions_dir=sessions_dir, store=store,
                 attach_persistence=False)
             self._engines[sid] = spine
-            await _eng.activate_orchestration(spine)
+            # 队列注入必须先于 ticker 启动:activate_orchestration 会 recover 并起
+            # scheduler 分钟泵,而泵到点经 _SpineCtx.task_queue 读 spine.task_queue。
+            # 旧实现在此直接 activate_orchestration(spine)(**无队列**)→ 到点 _fire
+            # 抛 CYC-999「未注入 task_queue」:schedule.trigger 已落盘但任务不入队
+            # (BUG-2)。委托 queue_for 单例(它建 TaskQueue 并以 task_queue=q 激活)。
+            # 仅新装配路径需要:已存在的 spine 必来自本函数或 queue_for,二者均已注入。
+            await self.queue_for(sid, log_)
         return log_, spine
 
     def approval_for(self, sid: str, log_: Any) -> ApprovalProvider:

@@ -364,7 +364,8 @@ class ScheduleRegisteredPayload(_PayloadBase):
     paused: bool
     next_fire_at: Optional[str] = Field(
         default=None, pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
-    # None = cron 在扫描上限内无匹配(如 2/30):可注册但不触发(数据表 datetime|None)
+    # None 仅表示 at 一次性已耗尽。cron 不产生 None:无未来触发点(如 2/30)
+    # 的表达式在注册期即被 CFG-601 拒绝,不落"可注册但永不触发"的静默态。
 
 
 class ScheduleUpdatedPayload(_PayloadBase):

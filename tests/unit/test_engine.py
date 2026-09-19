@@ -81,7 +81,7 @@ async def test_build_spine_components_present(tmp_path):
         # 初始 storage.spill 未激活(懒)
         assert spine.storage.spill is None
         # #39 预设默认 strict:goal/todo/storage.kv 等自管理/存储域可见
-        for need in ("goal", "todo", "storage.kv"):
+        for need in ("goal", "todo", "storage.kv", "schedule"):
             assert need in vis, f"工具 {need} 应可见;实际={sorted(vis)}"
         assert spine.goals is not None and spine.todos is not None
     finally:

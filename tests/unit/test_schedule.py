@@ -9,7 +9,9 @@ updated/removed/blocked/missed)为词表外新增,按 §7 已登记(events.paylo
         meta 不入事件);非法名 CFG-601、重名 BUSY、缺 intent EVT-100、未知 kind
         EVT-100、cron 段数/值域/语法 CFG-601、interval<60 CFG-601、at 已过去 CFG-601
     cron 字段匹配:表达式表驱动(* / 区间 / 列表 / 步长;周 0=周日)、next_fire 边界
-        (GWT-F048-04:0 2 * * * 02:00 命中 / 02:01 不命中;2/30 类永不匹配 → None)
+        (GWT-F048-04:0 2 * * * 02:00 命中 / 02:01 不命中)
+    cron 扫描范围(BUG-1):周/月周期表达式(工作日/每周/每月)必须得到真实未来
+        next_fire(GWT-F048-14);真无触发点(2/30 类)显式 CFG-601,不得返回 None
     触发入队(F043):_tick 到点 → schedule.trigger{job,cron,fired_at} + submit
         (intent + meta.source=schedule:<name>);trigger 先于 task.enqueued(GWT-08);
         at 一次性触发后自动 remove(GWT-07);interval 触发后按 last_fired 推进(GWT-05)
@@ -272,8 +274,14 @@ async def test_cron_match_weekday_zero_sunday():
 
 
 async def test_next_fire_boundaries_gwt04():
-    """next_fire 边界(GWT-04):'0 2 * * *' 02:00 命中、02:01 不命中;
-    永不匹配型(2/30 类)在扫描上限内无结果 → None(注册可、不触发)。"""
+    """next_fire 边界(GWT-04):'0 2 * * *' 02:00 命中、02:01 不命中。
+
+    **BUG-1 修复(CORE-03 判定)**:原断言期望 2/30 类"永不匹配 → None(注册可、
+    不触发)"。该行为判定为**缺陷而非契约**——它让"下次触发在 24h 之外"的合法
+    表达式(工作日/每周/每月)同样拿到 None,并因 _due 恒 False 而**静默永不触发**。
+    改为:真无未来触发点的表达式由 next_fire 显式抛 CFG-601,该静默态不复存在。
+    变更依据:Phase 0 BUG-1 修复授权。
+    """
     sched, _, _ = _mk()
     job = ScheduleJob(name="j", kind="cron", expr="0 2 * * *",
                       template=_tpl(), spec=None)
@@ -282,10 +290,84 @@ async def test_next_fire_boundaries_gwt04():
         == datetime(2026, 9, 7, 2, 0, 0)
     assert sched.next_fire(job, datetime(2026, 9, 7, 2, 0, 30)) \
         == datetime(2026, 9, 8, 2, 0, 0)
-    # 永不匹配:2 月 30 日不存在 → None(不触发)
+    # 永不匹配:2 月 30 日不存在 → 显式 CFG-601(不再返回 None 静默不触发)
     never = ScheduleJob(name="n", kind="cron", expr="0 0 30 2 *",
                         template=_tpl(), spec=None)
-    assert sched.next_fire(never, datetime(2026, 9, 7, 10, 0, 0)) is None
+    with pytest.raises(PyHError) as ei:
+        sched.next_fire(never, datetime(2026, 9, 7, 10, 0, 0))
+    assert ei.value.code == "CFG-601"
+
+
+async def test_cron_next_fire_covers_week_and_month_cycles_bug1():
+    """BUG-1 回归(GWT-F048-14):下次触发在 24h 之外的合法 cron 必须给出真实未来窗。
+
+    旧实现扫描窗仅 1440 分钟(24h),周五傍晚注册的"工作日/周日/周一/每月 1 号"
+    一律得到 next_fire_at=None → _due() 恒 False → 永不触发(静默)。基准取
+    2026-09-18(周五)19:56,右列为期望的真实下一次触发时刻。
+    """
+    sched, _, _ = _mk()
+    friday_evening = datetime(2026, 9, 18, 19, 56, 0)          # 周五
+    cases = [
+        ("0 8 * * 1-5", datetime(2026, 9, 21, 8, 0)),          # 工作日 → 下周一
+        ("0 8 * * 0",   datetime(2026, 9, 20, 8, 0)),          # 周日 → 后天
+        ("0 8 * * 1",   datetime(2026, 9, 21, 8, 0)),          # 周一 → 下周一
+        ("0 8 1 * *",   datetime(2026, 10, 1, 8, 0)),          # 每月 1 号 → 下月
+        ("0 8 20 9 *",  datetime(2026, 9, 20, 8, 0)),          # 9/20 → 后天
+    ]
+    for expr, expect in cases:
+        job = ScheduleJob(name="j", kind="cron", expr=expr,
+                          template=_tpl(), spec=None)
+        got = sched.next_fire(job, friday_evening)
+        assert got == expect, f"{expr}: 期望 {expect},实际 {got}"
+    # 长周期:2/29 且为周一(五字段 AND 语义)必在未来真实存在(约 18 年后)
+    leap = ScheduleJob(name="l", kind="cron", expr="0 0 29 2 1",
+                       template=_tpl(), spec=None)
+    got = sched.next_fire(leap, friday_evening)
+    assert got is not None and (got.month, got.day) == (2, 29)
+    assert got.weekday() == 0                                  # 周一
+
+
+async def test_register_rejects_never_firing_cron_bug1():
+    """BUG-1:真无未来触发点的 cron 在**注册期**即被拒(CFG-601),零事件落盘。
+
+    旧行为为"注册成功 + next_fire_at=None + 永不触发"(静默);新行为显式失败。
+    """
+    sched, sess, _ = _mk()
+    with pytest.raises(PyHError) as ei:
+        await sched.register("never", "cron", "0 0 30 2 *", _tpl("不可能组合"))
+    assert ei.value.code == "CFG-601"
+    assert sess.of("schedule.registered") == []          # 拒绝即零副作用
+    assert "never" not in sched._jobs
+
+
+async def test_recover_heals_legacy_null_next_fire_bug1():
+    """BUG-1 自愈:旧版落盘的 next_fire_at=null 合法 cron,recover 重算并落事件。
+
+    这类 job 无触发历史,常规回放不会重算窗口 → 若不处理,修复后仍永不触发。
+    """
+    sched, sess, q = _mk()
+    # 旧版形态的注册事件:合法表达式但窗口落空(next_fire_at=None)
+    await sess.append("schedule.registered", {
+        "name": "workday", "kind": "cron", "expr": "0 8 * * 1-5",
+        "template": {"intent": "提醒我开始工作"}, "is_risky": False,
+        "paused": False, "next_fire_at": None}, actor="system")
+    ctx = SimpleNamespace(session=sess, task_queue=q)
+    await sched.recover(ctx=ctx, now_dt=datetime(2026, 9, 18, 19, 56))
+    assert sched._jobs["workday"].next_fire_at == datetime(2026, 9, 21, 8, 0)
+    upd = sess.of("schedule.updated")
+    assert len(upd) == 1
+    assert upd[0].payload["next_fire_at"].startswith("2026-09-21T08:00")
+
+    # 历史遗留的**真不可能**表达式:显式留痕 system.error,不阻断恢复
+    sched2, sess2, q2 = _mk()
+    await sess2.append("schedule.registered", {
+        "name": "bogus", "kind": "cron", "expr": "0 0 30 2 *",
+        "template": {"intent": "历史遗留"}, "is_risky": False,
+        "paused": False, "next_fire_at": None}, actor="system")
+    await sched2.recover(ctx=SimpleNamespace(session=sess2, task_queue=q2),
+                         now_dt=datetime(2026, 9, 18, 19, 56))
+    err = sess2.of("system.error")
+    assert len(err) == 1 and err[0].payload["code"] == "CFG-601"
 
 
 # ===================================================================== 触发入队

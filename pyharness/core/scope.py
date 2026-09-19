@@ -103,10 +103,14 @@ WORKSPACE_DOMAINS: frozenset = frozenset({"fs", "workspace", "storage"})
 ALLOWLIST_DOMAINS: frozenset = frozenset({"web", "net"})
 # 会话内部自管理域:无外部副作用(目标/待办/计划/实用),strict 下恒可见
 SELF_DOMAINS: frozenset = frozenset({"goal", "todo", "plan", "util", "user",
-                                     "skill", "session"})
+                                     "skill", "session", "schedule"})
 # session.* = 只读检索自身会话日志(F057 session.fts_query),无外部副作用,与
 # goal/todo 同族 → strict 下恒可见(2026-09-12 装配 FTS 工具时补,原缺此域导致
 # 索引工具在默认 strict 档被域显隐静默隐藏)
+# schedule = 会话内定时任务管理(F048 工具面):调用本身只在会话内写一条 job 定义、
+# 零外部副作用;到点后的真实执行仍走 task_queue → AgentLoop → tools 四关管道
+# (含 high/critical 工具自身的审批与 guard),与 plan 同族 → 同列自管理域
+# (2026-09-18 装配 schedule 工具时补;同 session 域先例:缺域即被静默隐藏)。
 
 # 内置危险分级默认表(F023 同源示意;can_use 只消费 critical——不可审批直接不可用;
 # high 级转审批由 guard 链 g-danger 按工具定义处理,scope 层不拦)。

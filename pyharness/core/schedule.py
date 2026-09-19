@@ -70,7 +70,11 @@ JobKind = Literal["cron", "interval", "at"]
 """三种触发方式:cron(5 字段,核心)/ interval(固定间隔秒)/ at(绝对时间,一次性)。"""
 
 MIN_INTERVAL_SECONDS = 60          # interval 下限:F048 最小粒度 1 分钟
-CRON_SCAN_MINUTES = 1440           # cron 下次匹配扫描上限(伪码 1440 次防死循环)
+# cron 下次触发扫描上限(**按日推进**,非逐分钟)。取一个完整格里高利周期
+# (400 年)加一天:凡在 400 年内至少能匹配一次的表达式,其真实未来触发点必
+# 落在界内;界内无匹配 ⇒ 该表达式**永远不存在**触发点(如 2/30)→ 显式失败。
+# 上限的代价只在不可能表达式上付(常见表达式首日即命中,循环立即返回)。
+CRON_MAX_SCAN_DAYS = 366 * 400 + 1
 DEFAULT_NIGHT_WINDOW = (23, 7)     # 深夜禁触窗:23:00 ≤ h 或 h < 7:00
 _CRON_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))   # 分 时 日 月 周
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
@@ -333,20 +337,53 @@ class Scheduler:
 
     # ========================================================== 窗口推进
     def next_fire(self, job: ScheduleJob, now_dt: datetime) -> Optional[datetime]:
-        """按 kind 计算下次触发(cron 逐分钟后扫 ≤1440;interval 按 last_fired 推进;
-        at 一次性:fire_at 已过 → None,耗尽)。"""
+        """按 kind 计算下次触发(cron 按日扫描;interval 按 last_fired 推进;
+        at 一次性:fire_at 已过 → None,耗尽)。
+
+        cron 无未来触发点(如 2/30)→ CFG-601 显式失败:注册期即拒,运行期不再
+        产生"已注册 + next_fire_at=None + 永不触发"的静默状态(BUG-1 修复)。
+        """
         spec = self._spec_of(job)
-        if job.kind == "cron":                # 从下一分钟向后扫到匹配分钟
-            t = now_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-            for _ in range(CRON_SCAN_MINUTES):
-                if self._cron_match(spec, t):
-                    return t
-                t += timedelta(minutes=1)
-            return None                       # 上限内无匹配(如 2/30):不触发
+        if job.kind == "cron":
+            return self._cron_next_fire(spec, job.expr, now_dt)
         if job.kind == "interval":            # 固定间隔推进(≥60s)
             base = job.last_fired_at or now_dt
             return base + timedelta(seconds=spec.seconds)
         return spec.fire_at if spec.fire_at > now_dt else None   # at:已过即 None
+
+    def _cron_next_fire(self, spec: CronSpec, expr: str,
+                        now_dt: datetime) -> datetime:
+        """cron 下次触发:按日推进,命中日取当日最早的匹配 (时,分)。
+
+        **不再逐分钟扫描**——旧实现上限 1440 分钟(24h),使"下次触发在 24h 之外"
+        的合法表达式(工作日/每周/每月)一律得到 None → 永不触发(BUG-1)。此处
+        按日推进把上限提到完整格里高利周期(CRON_MAX_SCAN_DAYS),整月不匹配时
+        直接跳到下月 1 日,故 400 年上限的实际代价极小。
+
+        界内无匹配 ⇒ 该表达式永远无触发点 → CFG-601 显式失败(不返回 None)。
+        """
+        minute_f, hour_f, dom_f, month_f, dow_f = spec.fields
+        hours = [h for h in range(24) if self._field_match(hour_f, h)]
+        minutes = [mi for mi in range(60) if self._field_match(minute_f, mi)]
+        start = now_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        cursor = start.replace(hour=0, minute=0)
+        for _ in range(CRON_MAX_SCAN_DAYS):
+            if not self._field_match(month_f, cursor.month):
+                # 整月不匹配:跳到下月 1 日,不逐日空转
+                cursor = (cursor.replace(day=1)
+                          + timedelta(days=32)).replace(day=1)
+                continue
+            if (self._field_match(dom_f, cursor.day)
+                    and self._field_match(dow_f, (cursor.weekday() + 1) % 7)):
+                for h in hours:                # 升序遍历 → 首个 ≥start 即当日最早
+                    for mi in minutes:
+                        cand = cursor.replace(hour=h, minute=mi)
+                        if cand >= start:
+                            return cand
+            cursor += timedelta(days=1)
+        raise_code("CFG-601", expr=expr,
+                   hint=f"cron 无未来触发点(400 年内无匹配): {expr}",
+                   advice="检查日/月组合是否存在(如 2 月 30 日不存在)")
 
     def _first_fire(self, kind: str, expr: str,
                     now_dt: datetime) -> Optional[datetime]:
@@ -635,6 +672,25 @@ class Scheduler:
                     if j.kind == "at" and j.next_fire_at is None:
                         continue            # 一次性 at 已彻底过期:由 remove 清理
             # 窗口未到:保持快照(next_fire_at 未来),继续未来触发
+        # BUG-1 自愈:旧版扫描窗为 24h,使下次触发在 24h 之外的合法 cron(工作日/
+        # 每周/每月)落盘 next_fire_at=null 并永不触发。这类 job 无触发历史,回放
+        # 不会重算窗口 → 在此按新口径重算并显式落 schedule.updated(事件即真源)。
+        for j in self._jobs.values():
+            if j.paused or j.kind != "cron" or j.next_fire_at is not None:
+                continue
+            try:
+                nxt = self.next_fire(j, now_dt)
+            except PyHError as e:               # 真无触发点(如 2/30 的历史遗留)
+                await sess.append("system.error", {
+                    "code": e.code,
+                    "hint": f"schedule:{j.name} 无未来触发点,已跳过"},
+                    actor="system")
+                continue
+            await sess.append("schedule.updated", {
+                "name": j.name, "paused": False, "next_fire_at": iso(nxt)},
+                actor="system")
+            j.next_fire_at = nxt
+
         if self._auto_ticker:
             self._ensure_ticker(ctx)
         return missed_total
@@ -757,5 +813,5 @@ __all__ = [
     "Scheduler", "ScheduleJob", "JobInfo",
     "CronSpec", "IntervalSpec", "AtSpec", "JobKind",
     "NAME_RE", "now", "iso", "parse_iso",
-    "MIN_INTERVAL_SECONDS", "CRON_SCAN_MINUTES", "DEFAULT_NIGHT_WINDOW",
+    "MIN_INTERVAL_SECONDS", "CRON_MAX_SCAN_DAYS", "DEFAULT_NIGHT_WINDOW",
 ]

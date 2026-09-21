@@ -16,7 +16,7 @@ import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -25,8 +25,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pyharness.application import ApplicationService, ApplicationServiceRegistry
 from pyharness.core.approval import ApprovalProvider
 from pyharness.core.tenant_settings import (normalize_tenant_id,
-                                            tenant_for_session)
-from pyharness.core.task_queue import TaskQueue
+                                            session_tenants,
+                                            tenant_of_log)
+from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import EVENT_TYPES, Envelope
 from pyharness.events.vocab import TRANSIENT_TYPES, validate_payload
@@ -65,6 +66,7 @@ from .projection import (
 )
 from .sessions import (
     DesktopSessionManager,
+    _SID_RE,
     _await,
     _cfg_of,
     _plugin_within,
@@ -73,6 +75,9 @@ from .sessions import (
     _surface_of,
     validate_session_id,
 )
+
+if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)
+    from .bridge import DesktopBridge
 
 log = logging.getLogger("pyharness.desktop.app")
 
@@ -124,23 +129,113 @@ class DesktopApp:
     def current_tenant(self) -> str:
         return self._tenant_var.get()
 
-    async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
-        client_tenant = normalize_tenant_id(
-            request.headers.get("x-pyharness-tenant")
-            or request.query_params.get("tenant") or "default")
-        # 服务端派生(A3):路径含会话 id 时,以"该会话注册的租户"为准,不信客户端
-        # 自报头。**派生的**两个**必要条件**:① 路径匹配 _SESSION_ID_IN_PATH;
-        # ② 该会话已在本进程登记(register_session_tenant 为**进程内记忆,不落盘**)。
-        # 任一不满足 → **回落客户端头**。回落面 = 重启后尚未登记的磁盘会话、以及
-        # 不含会话 id 的路由(skills/plugins/settings/tenant/attachments/preset)。
-        # 这是**已知残余**(见 LIMITATIONS.md L-1),**不得据此断言
-        # "已阻断全部伪造头"**;闭合需把租户随会话落盘(session identity persistence)。
-        tenant = client_tenant
+    def _candidate_session_dirs(self) -> list[Path]:
+        """会话可能落盘的**全部权威目录** = 默认 sessions 目录 + `<root>/tenants/*/sessions`。
+
+        与 ``ApplicationService._tenant_sessions_dir`` 的派生一致(default 用装配的
+        ``storage.sessions_dir``,其余租户用 ``<storage.root>/tenants/<t>/sessions``)。
+        这里只做**枚举**,不做归属判定 —— "同源规则多份实现必然漂移",故派生点唯一。
+        """
+        dirs: list[Path] = []
+        try:
+            base = _sessions_dir_of(self.ctx)
+            if base:
+                dirs.append(Path(str(base)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            root = Path(str(_cfg_of(self.ctx).storage.root)).expanduser()
+            tdir = root / "tenants"
+            if tdir.is_dir():
+                dirs.extend(sorted(d / "sessions" for d in tdir.iterdir()
+                                   if d.is_dir()))
+        except (AttributeError, TypeError, ValueError, OSError):
+            pass
+        return dirs
+
+    def _disk_owners(self, sid: str) -> tuple[set, bool]:
+        """磁盘上的**权威归属** → ``(租户集合, 是否存在"归属不可得"的会话文件)``。
+
+        第二项是 fail-closed 的枢轴:文件**在盘**但读不出租户(GAP-10 缺失/坏行)
+        ⇒ 归属**未知**,调用方必须拒绝;绝不能把"读不出归属"混同于"会话不存在"
+        (后者才允许回落客户端自报头)。
+        """
+        owners: set = set()
+        unknown = False
+        for d in self._candidate_session_dirs():
+            f = d / f"{sid}.jsonl"
+            try:
+                if not f.is_file():
+                    continue
+            except OSError:
+                unknown = True               # 目录不可读 ⇒ 无法断言归属
+                continue
+            t = tenant_of_log(f)
+            if t:
+                owners.add(t)
+            else:
+                unknown = True                # 会话在盘但未载租户 ⇒ 归属未知
+        return owners, unknown
+
+    @staticmethod
+    def _request_sid(request: Request) -> str:
+        """本请求指向的**会话 id**:路径段优先,其次 ``?sid=``(SSE 流式面)。
+
+        SSE 把 sid 放在查询串(`/api/stream?sid=…`)⇒ 只认路径会**整条绕过**归属
+        判定,流式面就成了"声明即授权"(实测:声明任意租户即可订阅该租户会话事件)。
+        查询参数按 ``validate_session_id`` 同款正则校验,避免把普通查询参数误判为 sid。
+        """
         m = _SESSION_ID_IN_PATH.search(request.url.path)
         if m:
-            derived = tenant_for_session(m.group(1))
-            if derived:
-                tenant = derived
+            return m.group(1)
+        q = str(request.query_params.get("sid") or "")
+        return q if _SID_RE.fullmatch(q) else ""
+
+    def resolve_request_tenant(self, request: Request) -> Optional[str]:
+        """解析本请求的**服务端权威**租户;不可得 → ``None``(调用方须 fail-closed)。
+
+        **不变式(2026-09-21 R31-1)**:客户端自报头只声明"我要访问哪个租户的**分区**",
+        它**绝不决定一个已存在会话的归属**,服务端也**绝不据此把请求改判/重定向到
+        另一个租户**。解析序:
+
+          ① 无会话语境(路径与查询都没有 sid) ⇒ 头即声明(既有语义);
+          ② 会话的权威归属 = 进程内认领集合 ∪ 全部权威目录的落盘事实;
+          ③ **归属不可得**(文件在盘但未载租户)或**归属歧义**(多租户同名 sid)
+             ⇒ ``None``(**拒绝**);
+          ④ 归属确定:声明与归属**相同** ⇒ 放行;**不同** ⇒ ``None``(拒绝);
+          ⑤ 任何权威来源都查无此会话 ⇒ 回落声明(该路由只会 404/EVT-106,无数据可泄)。
+
+        为什么"不一致即拒"而不是"改判为真实归属":改判等于把**声明了 A 的请求交给
+        B 的租户服务作答** ⇒ 未声明 B 的客户端读到 B 的会话正文。两版实现均可复现:
+        HEAD 版在 default 分区(即全局 sessions 目录)按目录归属放行,不认信封租户;
+        本轮前版(按权威目录改判)更彻底 —— **任意头甚至不带头**都返回真实归属的数据
+        (实测 `header=alpha/default/无` 于 beta 会话一律 200 + `BETA-ONLY`)。
+        头本身未认证(全局单 token)不是本函数能解决的边界(见 LIMITATIONS L-1),
+        但**服务端主动跨租户改判**是本函数必须守住的不变式。
+        """
+        declared = normalize_tenant_id(
+            request.headers.get("x-pyharness-tenant")
+            or request.query_params.get("tenant") or "default")
+        sid = self._request_sid(request)
+        if not sid:
+            return declared                      # ① 无会话语境:头即声明
+        owners, unknown = self._disk_owners(sid)
+        owners |= session_tenants(sid)           # ② 进程内认领(仅作**归属来源**)
+        if unknown or len(owners) > 1:
+            return None                          # ③ 归属不可得 / 歧义 ⇒ 拒
+        if not owners:
+            return declared                      # ⑤ 查无此会话(路由只会 404)
+        return declared if declared in owners else None   # ④ 声明≠权威归属 ⇒ 拒
+
+    async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
+        tenant = self.resolve_request_tenant(request)
+        if tenant is None:
+            # 归属不可得 / 歧义 / 声明与权威归属不符 ⇒ **拒绝**;一律不按客户端自报头
+            # 放行,也不改判到别的租户(防伪造头跨租户读取,L-1/R31-1)
+            return JSONResponse(status_code=403, content={
+                "code": "GRD-401",
+                "advice": "会话租户归属不可得、存在歧义,或与请求声明的租户不符;"
+                          "拒绝服务(既不按客户端自报头判定,也不跨租户改判)"})
         token = self._tenant_var.set(tenant)
         try:
             return await call_next(request)
@@ -279,6 +374,14 @@ class DesktopApp:
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions/{sid}/telemetry", self.telemetry_report,
                         methods=["GET"],            # F066 审计导出(桌面面)
+                        dependencies=[Depends(self._require_api_auth)])
+        a.add_api_route("/api/sessions/{sid}/governance-audit",
+                        self.governance_audit,
+                        methods=["GET"],            # GAP-7 治理因果审计面
+                        dependencies=[Depends(self._require_api_auth)])
+        a.add_api_route("/api/sessions/{sid}/governance-evidence",
+                        self.governance_evidence,
+                        methods=["GET"],            # GAP-8 证据归档面
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/stream", self.stream_sse, methods=["GET"],
                         dependencies=[Depends(self._require_api_auth)])  # SSE
@@ -490,7 +593,8 @@ class DesktopApp:
             q = self._queues.get(sid)
             if q is None:
                 runner = await self._engine_runner_for(sid, log_)
-                q = TaskQueue(session=log_, runner=runner)
+                q = TaskQueue(session=log_, runner=runner,
+                              **queue_kwargs_of(getattr(self.ctx, "settings", None)))
                 self._queues[sid] = q
                 spine = self._engines.get(sid)
                 if spine is not None:
@@ -514,7 +618,10 @@ class DesktopApp:
             spine = _eng.build_runner_components(
                 cfg, log_=log_, bus=getattr(self.ctx, "bus", None),
                 sessions_dir=_sessions_dir_of(self.ctx), store=store,
-                attach_persistence=False)   # manager 已订阅落盘;重复订=双写卡死
+                attach_persistence=False,   # manager 已订阅落盘;重复订=双写卡死
+                # GAP-11:Web 桌面壳 = human 通道 "desktop"(框架侧声明,不信任
+                # 前端自报);不下沉到 spine 则该会话每次工具授权 APR-503。
+                channel="desktop")
             self._engines[sid] = spine
         if not getattr(spine, "_plugins_ready", False):
             await _eng._preload_plugins(spine)   # 示例插件预载(util.now 会话可用)
@@ -561,7 +668,7 @@ class DesktopApp:
             spine = _eng.build_runner_components(
                 _cfg_of(self.ctx), log_=log_, bus=getattr(self.ctx, "bus", None),
                 sessions_dir=_sessions_dir_of(self.ctx), store=store,
-                attach_persistence=False)
+                attach_persistence=False, channel="desktop")   # GAP-11
             self._engines[sid] = spine
             await _eng.activate_orchestration(spine)
         return log_, spine
@@ -582,8 +689,10 @@ class DesktopApp:
             # 按本会话 log_ 建 per-session provider——防第二会话拿到第一会话的审批通道。
             if ctx_approval is not None and owner in (None, sid):
                 return ctx_approval          # 装配注入的全会话 provider(单会话形态)
-            provider = ApprovalProvider(session=log_, bus=None,
-                                        config=_cfg_of(self.ctx))
+            provider = ApprovalProvider(
+                session=log_, bus=None, config=_cfg_of(self.ctx),
+                # R12-3:队列联动(惰性取值 ⇒ 与构造序无关)
+                queue_getter=lambda: self._queues.get(sid))
             self._approvals[sid] = provider
         return provider
 
@@ -755,6 +864,23 @@ class DesktopApp:
     async def telemetry_report(self, sid: str) -> dict:
         return await self.service.telemetry_report(sid)
 
+    async def governance_audit(self, sid: str, decision_id: str = "",
+                               since_seq: int = 0,
+                               reconcile: bool = False) -> dict:
+        """治理审计面(GAP-7):决策因果还原 / 被拒清单 / 一致性对账。
+
+        与 ``/telemetry``(旧遥测:事件类型计数)**语义不同**:本端点回答"这条
+        决策为什么发生、经过了什么、拦了没有真执行",数据来源是 append-only
+        事件日志的重放(可复现),不是计数聚合。
+        """
+        return await self.service.governance_audit(
+            sid, decision_id=decision_id, since_seq=since_seq,
+            reconcile=bool(reconcile))
+
+    async def governance_evidence(self, sid: str, task_id: str = "") -> dict:
+        """证据归档面(GAP-8):按任务段聚合的治理证据工件(由日志重建)。"""
+        return await self.service.governance_evidence(sid, task_id=task_id)
+
     async def stream_sse(self, request: Request, sid: str = "",
                          after_seq: int = 0) -> StreamingResponse:
         """SSE 事件流:注册 StreamClient(游标 after_seq)→ 总线事件按 seq 序 fan-out;
@@ -792,14 +918,6 @@ class DesktopApp:
         body = body or {}
         return await self.service.create_message(
             sid, body.get("text"), attachments=body.get("attachments"))
-
-    async def _append_attachments(self, log_: Any, attachments: Any) -> None:
-        for payload in self.service.attachment_payloads(attachments):
-            await log_.append("user.attachment.image", payload, actor="user")
-
-    @staticmethod
-    def _attachment_payloads(attachments: Any) -> list[dict]:
-        return ApplicationService.attachment_payloads(attachments)
 
     async def decide_approval_for(self, sid: str, aid: int,
                                   body: dict = Body(default={})) -> dict:

@@ -101,7 +101,7 @@ _MIN_CJK: int = 2          # 中文下限:≥2 字(2-gram 语义)(F057 边界)
 _MIN_LATIN: int = 3        # 英文/数字下限:≥3 字符(F057 边界)
 _FLUSH_BATCH: int = 64     # 攒批条数闸(≥64 条立即落库;spec 伪码常量)
 
-_OWNER: str = "cap:session_fts"          # 订阅属主(退订按此摘除)
+_OWNER: str = "cap:session_fts"          # 订阅属主**前缀**(实例再拼库路径+会话集,见 __init__)
 TOOL_NAME: str = "session.fts_query"     # LLM 可见搜索工具名(F064 消费)
 _CONTENT_COL: int = 6      # snippet 提取列:7 列布局下 content 的列序号(偏离 1)
 
@@ -249,6 +249,43 @@ def is_indexable(type_: str, env: Any) -> bool:
     return item is not None and item[0] == "insert"
 
 
+# 索引末 seq 的**唯一判据 SQL**(装配内 ``max_seq`` 与装配外 ``read_max_seq`` 共用,
+# 避免 CND-06"读写判据多源"导致的漂移)
+_MAX_SEQ_SQL = "SELECT MAX(seq) FROM fts_rows WHERE session_id=?"
+
+
+def read_max_seq(db_path: Any, session_id: str) -> int:
+    """**装配外**只读索引末 seq(F060 落后对账;repair 无 live 索引句柄时用)。
+
+    2026-09-21 R11-2 修:`repair._fts_last_seq_provider` 只认 ``ctx.session_query``
+    / ``ctx.fts_last_seq``,而**没有任何生产调用方注入它们**(CLI 的 ``auto_scan``
+    连 ctx 都不收)⇒ 索引落后对账**从未真正启用**(``max_seq`` 的旧 docstring 亦自认
+    "装配后仍无法启用")。本函数让"只知道 db 路径"的调用方也能读数。
+
+    语义:库/表不存在 → 0(未索引,调用方按 0 判"不算落后");读取失败 → PERS-202
+    (不静默吞:对账判据不可得时必须显式)。连接短开短合,只读打开。
+    """
+    import sqlite3 as _sql
+    db_file = Path(str(db_path)).expanduser()
+    if not db_file.exists():
+        return 0
+    try:
+        conn = _sql.connect(f"file:{db_file}?mode=ro", uri=True)
+    except _sql.Error as e:
+        raise_code("PERS-202", op="fts_max_seq_ro", path=str(db_file),
+                   hint=f"只读打开索引库失败: {e}")
+    try:
+        row = conn.execute(_MAX_SEQ_SQL, (str(session_id),)).fetchone()
+    except _sql.Error as e:
+        if "no such table" in str(e).lower():       # 索引未建表:未索引
+            return 0
+        raise_code("PERS-202", op="fts_max_seq_ro", path=str(db_file),
+                   hint=f"索引末 seq 读数失败: {e}")
+    finally:
+        conn.close()
+    return int(row[0] or 0) if row else 0
+
+
 # ================================================================= 结果模型
 @dataclass(frozen=True)
 class Hit:
@@ -385,7 +422,13 @@ class SessionQueryIndex:
         self._pending: list[tuple] = []            # 攒批缓冲(行)
         self._pending_edits: list[tuple] = []      # 攒批缓冲(编辑修正)
         self._bus: Any = None                      # 事件总线(enter 时接线)
-        self._owner: str = _OWNER                  # 订阅属主(退订按此摘除)
+        # 订阅属主(退订按此摘除)。**必须含全部隔离维度(R31-1-F)**:总线在多租户
+        # 桌面下是**共享**的,而本索引是**每会话**一个、库按租户分域(R14-8)。
+        # 属主若只用一个模块常量,任一实例 `detach()` 的 `unsubscribe_all(owner)`
+        # 会把**其他租户/会话**的订阅一并摘掉(实测:2 租户共 14 条订阅被一次摘光)
+        # ⇒ 其他租户的检索**静默变陈旧**。故属主 = 常量前缀 + 库路径(含租户)+ 会话集。
+        _sids = ",".join(sorted(str(k) for k in self._sources))
+        self._owner: str = f"{_OWNER}:{self._db_path}:{_sids}"
         self._sched_task: Optional[asyncio.Task] = None  # 200ms 定时落库任务
         # announce 痕迹(detach 逆序摘除用)
         self._announce_ctx: Any = None
@@ -400,7 +443,7 @@ class SessionQueryIndex:
         - CREATE VIRTUAL TABLE IF NOT EXISTS events_fts(7 列,actor 为 UNINDEXED
           冗余列,偏离 1)+ 伴生唯一表 fts_rows(行键幂等闸,偏离 2);
         - 阈值经 ctx.config/cfg 的 storage.fts.* 覆盖(构造显式参数优先);
-        - ctx.bus 接线:按 _INDEX_TYPES 逐类型订阅 → on_event(owner=cap:session_fts),
+        - ctx.bus 接线:按 _INDEX_TYPES 逐类型订阅 → on_event(owner=**本实例属主**),
           并启动 index_batch_ms 攒批定时器;
         - 失败(磁盘/权限/旧 SQLite 无 FTS5)→ PERS-202,回 detached 不留半态。
         """
@@ -732,17 +775,15 @@ class SessionQueryIndex:
         """该会话在索引里已落库的最大 seq(派生视图末位,F060 落后对账用)。
 
         只读;索引未装载 → 0(调用方据 0 判定"未索引",不算落后);与攒批 flush
-        共用连接锁,避免读数与写批交错。修复:此前 SessionQueryIndex 未暴露该
-        读数面,导致 repair.scan_session 的 index_stale 检测在装配后仍无法启用。
+        共用连接锁,避免读数与写批交错。判据 SQL 与 ``read_max_seq`` **同源**
+        (``_MAX_SEQ_SQL``),保证"装配内读数"与"装配外读数"口径一致(CND-06)。
         """
         db = self._db
         if db is None:
             return 0
         with self._lock:
             try:
-                row = db.execute(
-                    "SELECT MAX(seq) FROM fts_rows WHERE session_id=?",
-                    (str(session_id),)).fetchone()
+                row = db.execute(_MAX_SEQ_SQL, (str(session_id),)).fetchone()
             except sqlite3.Error as e:
                 raise_code("PERS-202", op="fts_max_seq",
                            hint=f"索引末 seq 读数失败: {e}")
@@ -987,5 +1028,5 @@ __all__ = [
     "Hit", "QueryResult", "SessionQueryIndex", "FtsQueryHandle",
     "_WHITELIST", "_MIN_CJK", "_MIN_LATIN", "_FLUSH_BATCH",
     "_INDEX_BATCH_MS", "_QUERY_TIMEOUT_S", "_RESULT_LIMIT",
-    "TOOL_NAME", "default_db_path",
+    "TOOL_NAME", "default_db_path", "is_indexable", "read_max_seq",
 ]

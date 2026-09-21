@@ -34,6 +34,7 @@ from pyharness.core.session_query import (
     QueryResult,
     SessionQueryIndex,
     TOOL_NAME,
+    _OWNER,
     default_db_path,
 )
 from pyharness.core.tools_registry import ToolRegistry
@@ -254,9 +255,43 @@ class TestIndexing:
         finally:
             await ix.detach()
         assert ix._bus is None
-        # detach 后总线无残留订阅(cap:session_fts 全部摘除)
+        # detach 后总线无残留订阅(本实例属主全部摘除)
         subs = [s for lst in bus._by_type.values() for s in lst] + list(bus._wild)
-        assert all(s.owner != "cap:session_fts" for s in subs)
+        assert all(not s.owner.startswith(_OWNER) for s in subs), \
+            f"detach 必须摘净本实例订阅,残留={[s.owner for s in subs]}"
+
+    async def test_detach_does_not_unsubscribe_another_tenants_index(self, tmp_path):
+        """**R31-1-F 回归**:一个索引 detach **不得**摘掉**另一个租户**索引的订阅。
+
+        总线在多租户桌面下是**共享**的,而索引是每会话一个、库按租户分域(R14-8)。
+        修复前属主是模块常量 ``cap:session_fts``,`unsubscribe_all(owner)` 按属主
+        精确摘除 ⇒ **连坐**其他租户(实测:2 租户共 14 条订阅被一次摘光)⇒ 其他租户
+        的检索**静默变陈旧**(无异常、无告警,只是不再更新)。
+        """
+        bus = EventBus()
+        ctx_a = types.SimpleNamespace(bus=bus, config=None, cfg=None)
+        ctx_b = types.SimpleNamespace(bus=bus, config=None, cfg=None)
+        ia = SessionQueryIndex(db_path=tmp_path / "tenants" / "alpha" / "index.db",
+                               batch_ms=60000)
+        ib = SessionQueryIndex(db_path=tmp_path / "tenants" / "beta" / "index.db",
+                               batch_ms=60000)
+        await ia.enter(ctx_a)
+        await ib.enter(ctx_b)
+        try:
+            await ia.detach()                       # 甲租户摘除
+            payload = {"type": "user.message", "session_id": SID, "seq": 1,
+                       "ts": TS0, "actor": "user",
+                       "payload": {"content": "乙租户应仍在订阅"}}
+            await bus.emit("user.message", payload)
+            # 先断言**伤害面**:乙租户的索引必须仍在接收事件(静默陈旧的直接证据)
+            assert len(ib._pending) == 1, \
+                "甲租户的 detach 摘掉了乙租户的索引订阅(跨租户连坐)"
+        finally:
+            await ib.detach()
+        # 再断言**机制面**:属主按(库=租户, 会话)分域,而非模块常量
+        assert ia._owner != ib._owner, "两租户的索引不得共用同一订阅属主"
+        assert not any(s.owner.startswith(_OWNER)
+                       for lst in bus._by_type.values() for s in lst)
 
 
 # ===================================================================== query

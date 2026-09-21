@@ -351,6 +351,24 @@ def test_list_unreadable_session_one_line_warning(tmp_path, caplog):
     assert rec and rec[-1].exc_info is None                      # 一行告警,无 traceback
 
 
+def test_list_excludes_rotated_segments_and_backups(tmp_path):
+    """**R14-3 回归**:会话列表只列**真会话** —— 轮转段 ``{sid}.1.jsonl`` 与修复备份
+    ``{sid}.corrupt-*`` 都**不是**会话。
+
+    修复前的守卫是 ``stem.startswith("s-")``(注释还写着"轮转段/备份跳过"),但
+    ``s-xxx.1`` 的 stem **同样**以 ``s-`` 开头 ⇒ 守卫从未生效:实测 1 个真会话被列成
+    3 条,其中一条是"备份伪装成的会话"(UI 里点开即坏)。
+    """
+    mgr = d.DesktopSessionManager(dir=tmp_path, bus=None)
+    (tmp_path / "s-aaa0000001.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "s-aaa0000001.1.jsonl").write_text("", encoding="utf-8")   # 轮转段
+    (tmp_path / "s-aaa0000001.corrupt-20260907T000000000.jsonl").write_text(
+        "", encoding="utf-8")                                              # 修复备份
+    (tmp_path / "s-aaa0000001.2.quarantine-20260907T000000000.jsonl").write_text(
+        "", encoding="utf-8")                                              # 隔离档
+    assert [r["sid"] for r in mgr.list()] == ["s-aaa0000001"]
+
+
 async def test_same_approval_id_can_be_disambiguated_by_session():
     """两个会话同 seq 时,新接口必须裁决指定会话的 provider。"""
     app = await _async_app(_sample_events())
@@ -1133,8 +1151,10 @@ def _stub_entry(monkeypatch, *, wv=_UNSET, listening=True, ctx=None):
     recorded = {}
 
     monkeypatch.setattr(desktop_launcher, "_bootstrap_desktop", lambda cfg_path: ctx)
-    monkeypatch.setattr(desktop_launcher, "run_uvicorn", lambda app, port: recorded.setdefault(
-        "ran", (app, port)))
+    # R24:run_uvicorn 增 host 参(shell.web.host 接线)
+    monkeypatch.setattr(desktop_launcher, "run_uvicorn",
+                        lambda app, port, host=None: recorded.setdefault(
+                            "ran", (app, port, host)))
     monkeypatch.setattr(desktop_launcher, "wait_until_listening", lambda port, timeout=15: listening)
     if wv is _UNSET:                                   # 缺省:可用假窗
         wv = _FakeWv()
@@ -1156,7 +1176,7 @@ def test_main_success_path_returns_0(monkeypatch):
     assert title == "PyHarness" and width == 1280 and height == 800
     assert url.startswith("http://127.0.0.1:")
     assert isinstance(bridge, d.DesktopBridge)
-    app, port = recorded["ran"]
+    app, port, _host = recorded["ran"]
     assert app.url == url and app.stopping.is_set()        # 关窗后优雅停服已跑
 
 
@@ -1205,8 +1225,10 @@ async def test_run_desktop_cli_bridge_returns_0(monkeypatch):
     """CLI desktop 子命令桥:复用已装配 ctx,同一生命周期,返回 0。"""
     ctx = SimpleNamespace(bus=EventBus())
     recorded = {}
-    monkeypatch.setattr(desktop_launcher, "run_uvicorn", lambda app, port: recorded.setdefault(
-        "ran", (app, port)))
+    # R24:run_uvicorn 增 host 参(shell.web.host 接线)
+    monkeypatch.setattr(desktop_launcher, "run_uvicorn",
+                        lambda app, port, host=None: recorded.setdefault(
+                            "ran", (app, port, host)))
     monkeypatch.setattr(desktop_launcher, "_load_webview", lambda: _FakeWv())
     monkeypatch.setattr(desktop_launcher, "wait_listening_async", _null_async)
     fake_wv_holder = {}
@@ -1255,10 +1277,14 @@ def test_session_id_in_path_ignores_non_session_segments():
 
 
 @pytest.mark.asyncio
-async def test_tenant_middleware_derives_registered_fork_session_tenant(tmp_path):
-    """行为面:已登记的 fork 会话 ⇒ **派生租户压过伪造的客户端头**。
+async def test_tenant_middleware_rejects_header_conflicting_with_registered_tenant(tmp_path):
+    """已登记会话:声明租户与登记租户**矛盾** ⇒ 拒绝,而不是"派生租户压过伪造头"。
 
-    修复前 RED:`s-fork-1a2b3c4d` 被截断成 `s-fork`,派生为空 ⇒ 采用伪造头 "evil"。
+    本用例原断言"派生租户应压过伪造头(实得 'acme')" —— 那正是 R31-1 要移除的行为:
+    服务端把**声明了 evil 的请求改判给 acme**作答,等于用 A 的请求去读 B 的数据
+    (声明方未获 B 的授权)。现:声明须与权威归属**相符**才放行,不符即 403。
+
+    fork sid 的**完整捕获**由 `_SESSION_ID_IN_PATH` 的独立用例覆盖;此处只钉租户语义。
     """
     from pyharness.core import tenant_settings as ts
 
@@ -1272,25 +1298,30 @@ async def test_tenant_middleware_derives_registered_fork_session_tenant(tmp_path
         seen["tenant"] = app.current_tenant()
         return "ok"
 
-    req = SimpleNamespace(
-        url=SimpleNamespace(path=f"/api/sessions/{sid}/messages"),
-        headers={"x-pyharness-tenant": "evil"},
-        query_params={})
+    def _mk(header):
+        return SimpleNamespace(
+            url=SimpleNamespace(path=f"/api/sessions/{sid}/messages"),
+            headers={"x-pyharness-tenant": header},
+            query_params={})
+
     try:
-        assert await app._tenant_middleware(req, _call_next) == "ok"
-        assert seen["tenant"] == "acme", \
-            f"派生租户应压过伪造头,实得 {seen['tenant']!r}(修复前为 'evil')"
+        denied = await app._tenant_middleware(_mk("evil"), _call_next)
+        assert getattr(denied, "status_code", None) == 403, \
+            "声明与登记租户矛盾必须拒,不得改判给登记租户"
+        assert "tenant" not in seen, "被拒的请求不得进入调用链(未泄漏任何租户上下文)"
+        assert await app._tenant_middleware(_mk("acme"), _call_next) == "ok"
+        assert seen["tenant"] == "acme", f"声明与登记相符应放行,实得 {seen['tenant']!r}"
     finally:
         ts.unregister_session_tenant(sid)
 
 
 @pytest.mark.asyncio
 async def test_tenant_middleware_documents_unregistered_fallback(tmp_path):
-    """**已知残余 R-1(钉住当前行为,非缺陷修复)**:会话未在本进程登记
-    (register_session_tenant 为进程内记忆、不落盘)⇒ 派生为空 ⇒ 回落客户端头。
+    """**回落只对"任何权威存储都查无此会话"成立**:查无 ⇒ 声明即分区(该路由只会 404)。
 
-    本用例的作用是把该回落**显式化**:若将来改为 fail-closed(拒绝),此用例
-    会 RED,从而强制走一次有意的设计变更,而不是静默漂移。
+    本用例把回落面**显式化**:若将来改为"无会话 id 也拒绝",此用例会 RED,从而强制
+    走一次有意的设计变更,而不是静默漂移。注意与"归属不可得"的区别 —— 文件**在盘**
+    却读不出租户时必须拒(见 test_tenant_settings 的 fail-closed 用例)。
     """
     app = d.DesktopApp(SimpleNamespace(
         session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
@@ -1305,4 +1336,37 @@ async def test_tenant_middleware_documents_unregistered_fallback(tmp_path):
         headers={"x-pyharness-tenant": "evil"},
         query_params={})
     assert await app._tenant_middleware(req, _call_next) == "ok"
-    assert seen["tenant"] == "evil", "当前语义:未登记会话回落客户端头(R-1)"
+    assert seen["tenant"] == "evil", "查无此会话时声明即分区(路由只会 404)"
+
+
+# ================= ADR-011:错误码 → HTTP 状态映射(客户端 vs 引擎)2026-09-21
+def test_client_caused_error_codes_map_to_4xx():
+    """**客户端成因**的码必须映射 4xx/503,不得回落 500。
+
+    修复前:映射表只覆盖 12 码,GRD-401/SKL-901/BUS-002/003/CFG-60x/TLB-802/803/
+    JOB-001 全部落入 ``_STATUS_FOR_CODE.get(code, 500)`` ⇒ 客户端拿到 5xx
+    ("引擎内部错误"),按服务端故障重试/告警,而实际是自己请求的问题(违反 ADR-011)。
+    """
+    from pyharness.desktop.constants import _STATUS_FOR_CODE
+
+    client_caused = {
+        "GRD-401": 403, "APR-502": 409, "SKL-901": 404, "BUS-002": 409,
+        "BUS-003": 409, "CFG-601": 400, "CFG-607": 400, "CFG-608": 409,
+        "TLB-802": 404, "TLB-803": 400, "JOB-001": 503,
+    }
+    for code, expect in client_caused.items():
+        assert _STATUS_FOR_CODE.get(code) == expect, \
+            f"{code} 应映射 {expect},实际 {_STATUS_FOR_CODE.get(code)}"
+    # 引擎侧:未映射(⇒ 500)或显式 500
+    for code in ("CYC-999", "TLB-805", "CRED-703", "PERS-201"):
+        assert _STATUS_FOR_CODE.get(code, 500) == 500, code
+
+
+def test_route_unknown_skill_returns_404_not_500():
+    """**传播链端到端**:技能不存在(SKL-901)→ HTTP 404(修复前 500)。"""
+    app = _app()
+    hdrs = {"X-PyHarness-Token": app._api_token}
+    with TestClient(app.api, base_url="http://127.0.0.1") as client:
+        r = client.get("/api/skills/no-such-skill-xyz", headers=hdrs)
+        assert r.status_code == 404, (r.status_code, r.text[:200])
+        assert r.json()["code"] == "SKL-901"

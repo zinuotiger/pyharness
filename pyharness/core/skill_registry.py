@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Optional
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -47,7 +47,12 @@ def _safe_under(root: Path, *segments: str) -> Path:
     root_r = root.resolve()
     target = root_r.joinpath(*segments).resolve()
     if target != root_r and root_r not in target.parents:
-        raise_code("POL-FS-2", path=str(target), root=str(root_r),
+        # POL-FS-* 是 **guard 拒绝原因**(ERR.md §2.11),不是错误码;与 tool_fs
+        # ``resolve_in_workspace`` 同款:GRD-401 + reason=POL-FS-2。此前把原因当码用
+        # ⇒ ``raise_code`` 按未登记码**静默改写为 CYC-999**(R19):路径穿越的拒绝在
+        # 审计/HTTP 上退化成"未知内部错误",丢了安全语义。
+        raise_code("GRD-401", reason="POL-FS-2", path=str(target),
+                   root=str(root_r),
                    advice="Skill 路径逃逸出根目录,拒绝(路径穿越)")
     return target
 

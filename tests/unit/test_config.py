@@ -101,7 +101,7 @@ def test_flatten_dotted_keys():
 # ============================================================ 四层合并优先级
 def test_layer_file_overrides_default_with_merge_semantics():
     """L2 覆盖 L1:标量覆盖/字典键级合并(部分超时其余回落默认)/列表整体替换/null 删键回落 L1。"""
-    home = _write_cfg(Path(__import__("os").environ["HOME"]), """
+    _write_cfg(Path(__import__("os").environ["HOME"]), """
 llm:
   temperature: 0.3
   fallback_models: [glm-4]

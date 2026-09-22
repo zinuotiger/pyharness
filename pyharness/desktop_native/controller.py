@@ -1,14 +1,16 @@
 """Async controller bridging ApplicationService to Qt signals."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
-from pyharness.application import ApplicationService, ApplicationServiceRegistry
-from pyharness.core.tenant_settings import normalize_tenant_id, tenant_for_session
+from pyharness.application import ApplicationServiceRegistry
+from pyharness.core.tenant_settings import (event_tenant_allowed,
+                                            event_tenant_of,
+                                            normalize_tenant_id)
+from pyharness.desktop.constants import native_event_owner
 from pyharness.events import EVENT_TYPES
 
 log = logging.getLogger("pyharness.desktop_native.controller")
@@ -39,10 +41,11 @@ class NativeController(QObject):
         self.selected_sid: str = ""
         bus = getattr(ctx, "bus", None) if ctx is not None else None
         if bus is not None:
+            owner = native_event_owner(self.tenant_id)   # 按租户唯一(见 constants)
             for type_ in EVENT_TYPES:
                 try:
                     self._subs.append(bus.subscribe(
-                        type_, self._on_bus_event, owner="desktop-native"))
+                        type_, self._on_bus_event, owner=owner))
                 except Exception:                      # noqa: BLE001
                     log.debug("native bus subscribe skipped %s", type_)
 
@@ -56,12 +59,19 @@ class NativeController(QObject):
             return ""
 
     def _event_allowed(self, payload: Any) -> bool:
+        """事件是否投给本壳(租户可见性**单点判据**,与 Web 壳同源)。
+
+        2026-09-21 修:此前写 ``not owner or owner == self.tenant_id`` —— 归属
+        **未知即放行**(fail-open),而 Web 壳投影层对同一问题是 fail-closed ⇒ 两壳
+        失败方向相反;且归属取进程内映射,重启后为空 ⇒ **跨租户事件可达原生 UI**。
+        现统一走 ``event_tenant_of``(优先落盘信封)+ ``event_tenant_allowed``。
+        """
         sid = (getattr(payload, "session_id", "") if not isinstance(payload, dict)
                else (payload or {}).get("session_id"))
         if not sid:
             return self.tenant_id == "default"
-        owner = tenant_for_session(str(sid))
-        return not owner or owner == self.tenant_id
+        return event_tenant_allowed(self.tenant_id,
+                                    event_tenant_of(payload, session_id=str(sid)))
 
     def _on_bus_event(self, type_: str, payload: Any) -> None:
         if not self._event_allowed(payload):
@@ -82,7 +92,7 @@ class NativeController(QObject):
         bus = getattr(self.ctx, "bus", None) if self.ctx is not None else None
         if bus is not None:
             try:
-                bus.unsubscribe_all("desktop-native")
+                bus.unsubscribe_all(native_event_owner(self.tenant_id))
             except Exception:                          # noqa: BLE001
                 pass
         self._subs.clear()
@@ -157,7 +167,20 @@ class NativeController(QObject):
         return await self.service.budget_dashboard(sid)
 
     async def telemetry(self, sid: str) -> dict:
+        """旧遥测面:事件类型计数聚合(保留;与治理因果不同源)。"""
         return await self.service.telemetry_report(sid)
+
+    async def governance_audit(self, sid: str, *, decision_id: str = "",
+                               since_seq: int = 0,
+                               reconcile: bool = False) -> dict:
+        """治理审计面(GAP-7):决策因果 / 被拒清单 / 一致性对账。"""
+        return await self.service.governance_audit(
+            sid, decision_id=decision_id, since_seq=since_seq,
+            reconcile=reconcile)
+
+    async def governance_evidence(self, sid: str, *, task_id: str = "") -> dict:
+        """证据归档面(GAP-8):按任务段聚合的治理证据工件。"""
+        return await self.service.governance_evidence(sid, task_id=task_id)
 
     # ------------------------------------------------------------ interactions
     async def pending_approvals(self) -> dict:

@@ -16,8 +16,7 @@
 import pytest
 
 from pyharness.core.compaction import (
-    Compactor, CompactReport, FoldCandidate, PrefixPlan, SegmentSummary,
-    estimate_tokens, render_compacted_message,
+    Compactor, PrefixPlan, estimate_tokens, render_compacted_message,
 )
 from pyharness.core.session import SessionLog
 from pyharness.errors import PyHError

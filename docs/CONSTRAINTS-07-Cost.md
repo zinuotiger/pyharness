@@ -13,7 +13,7 @@
 ## 2. 成本控制手段
 | # | 手段 | 说明 |
 |---|------|------|
-| C-04 | 最大轮数 | 默认 10 轮;防死循环 |
+| C-04 | 最大轮数 | 默认 30 轮(CFG §3.1 L1 权威 `loop.max_turns=30`);防死循环 |
 | C-05 | 上下文精简 | 派生历史带窗口;旧轮次摘要(第 5 阶段 compaction 前用简单截断) |
 | C-06 | 工具输出有界 | 截断/spill,防大输出进上下文翻倍计费 |
 | C-07 | 模型分级 | 简单任务走便宜模型(如 deepseek-chat),复杂推理才上强模型(如 deepseek-v4)——第 2 阶段多适配器后启用 |
@@ -96,7 +96,7 @@ class BudgetGuard:
         return {"used": self.used, "limit": self.limit,
                 "pct": self.used / self.limit * 100}
 ```
-挂在循环每步: 调 LLM → 记 usage → budget.check() → False 则中止并告知用户。
+挂在循环每步: 调 LLM → 记 usage → `scope.check_budget()`(超限抛 `BudgetExhausted`)→ 循环终态 `reason=budget` 并告知用户。
 
 
 ## 11. 成本约束验收清单(阶段门检查)
@@ -105,12 +105,12 @@ class BudgetGuard:
 - [ ] 长会话有窗口策略(最近 N 轮 + 摘要占位), 无无限增长
 - [ ] 工具输出截断/spill 生效, 大输出不进上下文
 - [ ] /cost 命令可查当前任务费用
-- [ ] 配置键齐全: llm.budget.per_task_cny / llm.max_turns / llm.cost.model_prices
+- [ ] 配置键齐全(真名以 `CFG.md §3` 为准): `budget.task.max_cost_yuan`(单任务硬闸,默认 1.0;硬闸同时看 token 与 cost) / `loop.max_turns` / `llm.usage.unit_price`(单价表,只影响估算/报表)
 
 ## 12. 成本约束与面试问答联动
 **被问"Agent 成本怎么控制"**(必答题): 四件套回答——
 1. 单任务预算: 每轮记 token×单价, 超 ¥1 中止(防止死循环烧钱)
-2. 最大轮数: 默认 10, 失控必终止
+2. 最大轮数: 默认 30(CFG §3.1), 失控必终止
 3. 上下文窗口: 旧轮次摘要, 防长会话线性涨费
 4. 模型分级: 简单任务走 chat, 复杂推理才上强模型
 补充: "我的项目单次演示成本约 ¥0.06, 有 /cost 命令实时可查"——数字比概念有力。

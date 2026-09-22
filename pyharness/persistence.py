@@ -1,8 +1,15 @@
-"""pyharness/persistence.py — 会话日志持久化 (specs/persistence.py.md; F011/F060)
+r"""pyharness/persistence.py — 会话日志持久化 (specs/persistence.py.md; F011/F060)
 
 会话真源的物理形态:事件逐行 JSONL append(UTF-8 单行信封+payload)、攒批/强同步
 双速 flush、原子写(同目录临时文件 + fsync + rename)、轮转(>50MB)、截断检测与
-repair 崩溃恢复入口(备份 → 修复 → recovered 声明)。
+写通道失败状态机(suspended →(通道恢复)→ normal)。
+
+**F060 修复入口在 ``pyharness/repair.py``**(``repair_session``:备份 → 修复 →
+``session.recovered`` 声明;CLI `repair` / 桌面 / 启动自检皆走它)。本模块的
+``SessionStore.repair()`` 是**早期面**(阶段 6 之前先行落地):生产**零调用者**、
+仅由 ``tests/unit/test_persistence.py`` 使用 —— 见 **L-27**。**不要**在生产路径
+调用它。备份命名已按 ``specs/repair.py.md`` 的冲突更正统一为
+``{sid}.corrupt-{ts}.jsonl``(以 PRD F060 为准)。
 
 不变式(INV-01 只追加,INV-07 单写者,INV-08 无回边):
 - 正常写路径纯 append 句柄,无就地改写;一切重写(repair 截断、轮转 rename)
@@ -14,9 +21,11 @@ repair 崩溃恢复入口(备份 → 修复 → recovered 声明)。
 损坏标记 / 隔离约定(供阶段 6 pyharness/repair 模块消费,本模块先行落地):
 - 隔离区:_quarantine:set[int] 行号(repair 决策/用户查看),经 quarantine_info()
   暴露;坏行只记跳隔离、绝不自动删(中部坏行 = 人类决策)。
-- 备份命名:{sid}.jsonl.bak-{ts}(repair 修复前强制,ts=UTC YYYYMMDDTHHMMSSZ)。
+- 备份命名(F060 权威):``{sid}.corrupt-{ts}.jsonl``（``repair.backup_file`` 与本模块
+  早期面 ``SessionStore.repair`` 现已**同名族**，见 specs/repair.py.md 的命名冲突更正）；
+  历史文件名 ``{sid}.jsonl.bak-{ts}`` 仍由 aux 判据 ``\.jsonl\.bak-`` 只扫跳过。
 - 不可修复(编码级坏块):原文件 rename 为 {sid}.jsonl.corrupt-{ts} 保留并
-  PERS-202 明确报错,不覆盖。
+  PERS-202 明确报错,不覆盖（与备份名不同名 ⇒ 不会互相覆盖）。
 - 轮转命名:{sid}.{n}.jsonl(n 从 1 递增),重放按 {sid}.1..n → {sid}.jsonl 序号合并。
 - RepairReport(fixed/quarantined/backup_path) = session.recovered 事件的
   fixed/quarantined/backup 载荷镜像(F060)。
@@ -33,16 +42,16 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shutil
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Iterator, Optional
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Iterator, Optional
 
 from pyharness.config import DEFAULTS
 from pyharness.errors import PyHError, raise_code
-from pyharness.events import Envelope, SYNC_TYPES
+from pyharness.events import Envelope, SYNC_TYPES, declared_ranges
 from pyharness.events.vocab import validate_payload
 
 log = logging.getLogger("pyharness.persistence")
@@ -56,6 +65,12 @@ _DEFAULT_SESSIONS_DIR: str = DEFAULTS["storage"]["sessions_dir"]      # ~/.pyhar
 
 # 重试队列上限(PERS-202 暂停判据之二;PARAMETER-ANCHOR 无锁死,沿用 DIS 伪码 192)
 _RETRY_Q_LIMIT = 192
+
+# 连续失败上限(PERS-202 暂停判据之一;GAP-2)。**全部写路径共用此单一阈值**——
+# 修复前只有 ``_flush_batch``(异步攒批)检查它,而 ``append(sync=True)`` /
+# ``flush()`` 只累加计数不判阈值 ⇒ 强同步与公开 flush 路径在磁盘持续故障时
+# 永不进入失败状态(会话不暂停、retry_q 无界增长)。
+_FAIL_STREAK_LIMIT: int = 3
 
 # 只读检测尾部窗口(半行定位范围)
 _TAIL_WINDOW = 4096
@@ -206,9 +221,170 @@ def release_session_lock(lock_path: Path) -> None:
         del _LOCKS[key]
 
 
+def session_lock_held(lock_path: Path) -> bool:
+    """该会话是否**正被其他持有者占用**(只探测,不改语义;R14-2)。
+
+    启动自检不应把**活会话**当作可修对象:被别的进程持有的会话既不该被报为"待修",
+    本进程也修不动(``repair_session`` 取锁即 PERS-202)。此前自检会把"索引攒批窗口内
+    的正常会话"报为损坏 → ``_ensure_repair`` 撞 PERS-202 并**上抛** ⇒ 第二个 CLI 启动
+    直接失败(两进程实测复现)。
+
+    语义:同进程已持有(``_LOCKS`` 命中)→ True;锁文件不存在 → False(**不**新建);
+    跨进程 ``try_acquire`` 成功 → 立即归还并返回 False。纯探测,不留副作用。
+
+    **残余**(如实标注):探测在被占用时会**失败取锁**(不持有,无窗口);只有在会话
+    **空闲**时才会短暂持有再归还 —— 该微秒级窗口内若有他进程正好 ``open_store`` 同一
+    会话,会收到一次 PERS-202(可重试)。量级远小于它修掉的"第二个 CLI 启动即失败",
+    且与既有取锁语义同源(无新的锁类型)。
+    """
+    if str(lock_path) in _LOCKS:
+        return True
+    if not lock_path.exists():
+        return False                     # 从未取过锁:未被占用(不新建锁文件)
+    lock = _FileLock(lock_path)
+    if lock.try_acquire():
+        lock.release()                   # 探针成功:立即归还(锁文件不删,见 _FileLock)
+        return False
+    return True
+
+
 def session_lock_path(path: Path) -> Path:
     """会话日志对应的锁文件路径(``{sid}.jsonl.lock``;不匹配 repair 的 *.jsonl 扫描)。"""
     return path.with_name(path.name + ".lock")
+
+
+# 会话**辅助档**命名(轮转段/修复备份/隔离档/旧备份名):它们**属于**某会话的字节
+# 历史,但**不是独立会话**。这是判定该事实的**唯一来源**(R14-3)—— 此前只有
+# ``repair`` 用真判据,其余五处各自用 ``stem.startswith("s-")``,而
+# ``{sid}.1.jsonl`` / ``{sid}.corrupt-*`` / ``{sid}.quarantine-*`` 的 stem 同样以
+# ``s-`` 开头 ⇒ 辅助档被当成独立会话(实测:``search`` 撞 fts_rows 主键冲突崩成
+# PERS-202、桌面会话列表混入修复备份、``budget/stats`` 重复计数)。
+AUX_SESSION_PATTERNS: tuple = (
+    re.compile(r"\.\d+\.jsonl$"),          # 轮转段 {sid}.{n}.jsonl
+    re.compile(r"\.corrupt-"),             # 修复备份 {sid}.corrupt-{ts}.jsonl
+    re.compile(r"\.quarantine-"),          # 隔离档 {sid}.quarantine-{ts}.jsonl
+    re.compile(r"\.jsonl\.bak-"),          # persistence 草案旧备份名
+)
+
+
+def is_aux_session_file(path: Any) -> bool:
+    """该文件是否会话**辅助档**(轮转段/修复备份/隔离档)—— 属于某会话但非独立会话。"""
+    return any(p.search(Path(path).name) for p in AUX_SESSION_PATTERNS)
+
+
+def session_log_paths(d: Any) -> list:
+    """枚举目录下的会话**主文件**(每会话恰一个;排序稳定;目录不存在 → [])。
+
+    **唯一枚举点**(R14-3):一并排除非会话命名与全部辅助档。凡"把目录里的 ``*.jsonl``
+    当作会话"的调用方都该走这里,而不是各自 ``glob("*.jsonl")`` +
+    ``stem.startswith("s-")`` —— 后者对辅助档**恒为真**,是五处同源的漏判据。
+    """
+    d = Path(d)
+    if not d.is_dir():
+        return []
+    return [p for p in sorted(d.glob("*.jsonl"))
+            if p.stem.startswith("s-") and not is_aux_session_file(p)]
+
+
+def rotated_segment_paths(main_path: Any) -> list:
+    """该会话的轮转段 ``{sid}.{n}.jsonl``(n 升序)—— 真源的一部分,非独立会话。"""
+    main_path = Path(main_path)
+    pat = re.compile(rf"^{re.escape(main_path.stem)}\.(\d+)\.jsonl$")
+    segs = [p for p in main_path.parent.glob(f"{main_path.stem}.*.jsonl")
+            if pat.match(p.name)]
+    return sorted(segs, key=lambda p: int(pat.match(p.name).group(1)))
+
+
+def session_data_paths(main_path: Any) -> list:
+    """该会话**真源**的全部文件:轮转段(序号升序)+ 主文件(与 ``replay`` 同序)。
+
+    唯一"会话数据面"来源(R14-3):按会话聚合的调用方(replay / 用量统计)必须用它,
+    否则要么漏段(欠计)要么把段当独立会话(重计)。
+    """
+    main_path = Path(main_path)
+    return rotated_segment_paths(main_path) + [main_path]
+
+
+def _iter_replay(paths: list, quarantine: set, *,
+                 tolerate_unreadable: bool = False) -> Iterator[Envelope]:
+    """会话真源(按 ``paths`` 给定顺序的多文件)逐事件回放(**唯一回放实现**)。
+
+    空行跳过;坏行(解码失败/JSON 非法/信封校验失败)行号记入 ``quarantine`` 并**继续**
+    —— 回放 = 恢复 = 审计同一路径,绝不因单行损坏中断(§3.8)。行号按文件从 1 起
+    (多文件时可能重号;隔离判定以 repair 主文件扫描为准)。
+
+    ``tolerate_unreadable``:整个文件打不开(权限/被占/是目录)时,``False`` = 上抛
+    (``SessionStore`` 恢复语义:读不到主文件就是读不到基线),``True`` = 告警跳过
+    (``SessionReader`` 只读派生语义:离线命令不该因单个会话不可读而整体失败)。
+
+    2026-09-21 R14-5:从 ``SessionStore.replay`` 抽出,使**只读**读取方
+    (``SessionReader``)复用同一实现 —— 此前只读命令只能借 ``open_store`` 读,而它会取
+    INV-07 写锁 ⇒ 把所有会话锁住。
+    """
+    for p in paths:
+        try:
+            fh = open(p, "rb")
+        except FileNotFoundError:
+            continue                             # 段/主文件尚未存在:跳过(原语义)
+        except OSError as e:
+            if not tolerate_unreadable:
+                raise
+            log.warning("PERS-201 域:回放源不可读,跳过 file=%s why=%s", p, e)
+            continue
+        with fh:
+            for no, raw in enumerate(fh, 1):
+                line = raw.rstrip(b"\r\n")       # 容忍 \r\n 遗留(Windows 兼容)
+                if not line:
+                    continue                     # 空行跳过(轮转残留容忍)
+                try:
+                    text = line.decode("utf-8")
+                    env = Envelope.model_validate_json(text)  # 信封一次校验
+                    # 读侧 payload 强校验(P1-4):写侧拒坏 payload、读侧曾漏网——
+                    # 缺字段/错类型的行"合法"通过回放,到 reducer/repair 深处才
+                    # KeyError 崩。校验失败落入下方 PERS-201 隔离(与写侧同口径)。
+                    canonical = validate_payload(env.type, env.payload)
+                    if canonical is not env.payload:
+                        env = env.model_copy(update={"payload": canonical})
+                    yield env
+                except Exception:                # noqa: BLE001
+                    # 解码坏块/JSON 非法/信封校验失败统一记 PERS-201 隔离
+                    quarantine.add(no)           # 中部坏行隔离(记跳不中断)
+                    log.warning("PERS-201 域:坏行隔离(记跳不中断,删否经 repair) "
+                                "file=%s line_no=%s", p, no)
+
+
+class SessionReader:
+    """**只读**会话回放源:**不取**会话写锁、不开写句柄、不建文件(R14-5)。
+
+    与 ``SessionStore`` 的差价只在"要不要单写者锁":``SessionStore`` 可能写(append/
+    flush/repair),故必须持 INV-07 锁;只读取真源的命令(如 CLI ``search`` 建索引回放源)
+    却因此把所有会话一并锁住 ⇒ 其他进程开会话撞 PERS-202(实测:`search` 运行期间
+    并发 open 交替得到 OPEN_OK / BLOCKED PERS-202)。
+
+    只暴露 ``replay()``(与 ``SessionStore`` 同形,可直接作 session_query 的注入源);
+    **无任何写面**。并发写者正在追加时可能读到半行 ⇒ 按坏行跳过(读侧不变式)。
+    """
+
+    def __init__(self, session_id: str, *, dir: Optional[Path] = None) -> None:
+        d = Path(dir) if dir is not None else default_sessions_dir()
+        self.session_id = session_id
+        self.path = d / f"{session_id}.jsonl"
+        self._quarantine: set = set()
+
+    def replay(self) -> Iterator[Envelope]:
+        """同 ``SessionStore.replay``(轮转段升序 + 主文件;坏行记跳不中断)。
+
+        不可读的**单个**源文件告警跳过(``tolerate_unreadable``):只读派生用途,
+        离线命令不该因某会话不可读而整体失败(与 ``_scan_usage`` / ``_segment_scan``
+        同款容错)。
+        """
+        return _iter_replay(session_data_paths(self.path), self._quarantine,
+                            tolerate_unreadable=True)
+
+    def quarantine_info(self) -> dict:
+        """坏行隔离区只读暴露(与 ``SessionStore`` 同形):{path, line_nos, count}。"""
+        nos = sorted(self._quarantine)
+        return {"path": str(self.path), "line_nos": nos, "count": len(nos)}
 
 
 def _last_newline_before(f, end: int) -> Optional[int]:
@@ -283,7 +459,7 @@ class RepairReport:
 
     fixed: 修复动作清单(如 "tail-truncated" / "quarantined:[2]" / "seq-holes:[3]");
     quarantined: 坏行行号(隔离不删,人类决策);
-    backup_path: 修复前强制备份(.bak-{ts});文件不存在 → None(空会话)。
+    backup_path: 修复前强制备份(`{sid}.corrupt-{ts}.jsonl`);文件不存在 → None(空会话)。
     幂等:对已修复文件重复 repair,结果一致(无修复动作)。
     """
 
@@ -298,9 +474,10 @@ class SessionStore:
 
     字段(spec 关键数据结构):session_id / path / _fh(append 句柄)/ _pending
     (攒批缓冲)/ _retry_q(失败重试,拒新不丢旧)/ _fail_streak / _quarantine /
-    SYNC_TYPES。写通道状态机:攒批 →(满 batch/定时器)→ flush;强同步三类立即
-    write+flush;OSError 重试 ≤3,3 败 → system.error(PERS-202)+ 会话暂停;
-    repair → recovering → normal。
+    SYNC_TYPES。写通道状态机:攒批 →(满 batch/间隔定时器)→ flush;强同步三类
+    立即 write+flush;OSError 重试 ≤3,3 败 → system.error(PERS-202)+ 会话暂停;
+    repair → recovering → normal。间隔定时器的**持有者**是 ``EngineSpine``
+    (``start_flush_ticker``;本类只暴露 ``flush_interval_s`` 读面,见 GAP-13)。
     """
 
     # 强同步事件族(与 events.vocab 同一 frozenset,单一真源在词表)
@@ -321,6 +498,9 @@ class SessionStore:
         self.flush_interval_s = flush_interval_s or _FLUSH_INTERVAL_S
         self.on_system_event = on_system_event    # 注入回调(装配层/bus 订阅者)
         self._pending: deque[tuple[int, str]] = deque()   # 攒批缓冲(seq, line)
+        # 打开时的"崩溃残片"标记(R13-2):文件非空且末字节非 \n ⇒ 首写前补行尾分隔,
+        # 否则新事件会与残片拼在同一物理行而不可解析(静默丢事件)。
+        self._torn_tail: bool = detect_truncation(path) is not None
         self._retry_q: deque[tuple[int, str]] = deque()   # 写失败重试队列
         self._fail_streak = 0                     # 连续失败计数(≥3 暂停)
         self._quarantine: set[int] = set()        # 坏行行号隔离区(repair/查看)
@@ -345,7 +525,8 @@ class SessionStore:
 
         sync=True(强同步三类:user.message/guard.rejected/approval.* 等):立即
         write+flush,成功才返回(崩溃一致性锚点);否则入 _pending 攒批(满 batch
-        即刷,0.5s 定时器兜底,见 flush)。写入后检查句柄位置触发轮转(>50MB)。
+        即刷,间隔定时器兜底 —— **定时器不在本类**:由 ``EngineSpine`` 持有
+        (``start_flush_ticker``,间隔读本实例 ``flush_interval_s``),见 GAP-13)。
         异常:强同步 OSError → PERS-202 直接抛;异步 3 次重试仍败 → PERS-202 +
         会话暂停;暂停中(拒新不丢旧)→ PERS-202。
         """
@@ -361,13 +542,19 @@ class SessionStore:
                 await self._flush_pending_all()
             except OSError as e:
                 self._fail_streak += 1
+                if self._failure_state_reached():   # GAP-2:强同步同样受阈值约束
+                    await self._enter_failure_state(why=str(e))
+                    raise_code("PERS-202", seq=env.seq,
+                               advice="会话暂停(fail-streak/重试队列达阈值),"
+                                      "repair 后恢复;本行仍在重试队列")
                 raise_code("PERS-202", seq=env.seq, why=str(e),
                            advice="落盘通道故障;跑 repair(F060)")
         else:                                     # 普通事件:攒批(内存即对订阅者可见)
             self._pending.append((env.seq, line))
             if len(self._pending) >= self.flush_batch:   # ≥64 条 → 立即批量 flush
                 await self._flush_batch()
-            # 0.5s 定时器兜底:由独立定时任务调 flush()(append 内不 sleep)
+            # 间隔定时器兜底:由 EngineSpine.start_flush_ticker 周期性调 flush()
+            # (append 内不 sleep;GAP-13 前该定时器不存在,注释与实现不符)
         self._maybe_rotate()                      # >50MB → 轮转(§8.3.4)
 
     async def _flush_pending_all(self) -> None:
@@ -398,8 +585,7 @@ class SessionStore:
         to_write = _resolve_by_seq(retry_old + pending_now)
         self._pending = deque()
         try:
-            for _seq, line in to_write:
-                self._fh.write(line)
+            self._write_batch(to_write)
             self._fh.flush()
             self._fail_streak = 0
             self._retry_q.clear()
@@ -412,7 +598,8 @@ class SessionStore:
         """公开 flush:把 _pending 与 _retry_q 中 seq ≤ up_to_seq 的行写盘+flush。
 
         up_to_seq=None = 全量(定时器/关闭前);成功才返回(强同步契约);OSError →
-        行回重试队列(PERS-202,拒新不丢旧)。调用方:session 强同步点、定时任务。
+        行回重试队列(PERS-202,拒新不丢旧)。调用方:session 强同步点、
+        ``EngineSpine.start_flush_ticker`` 的间隔定时器(GAP-13)、进程收尾。
         两队列同受 up_to_seq 过滤(P3:此前 retry_q 不过滤,>up_to_seq 的旧重试行会被
         提前写出、破坏 seq 升序)。
         """
@@ -431,43 +618,135 @@ class SessionStore:
             self._retry_q = deque(retry_keep)     # 全在 up_to_seq 之后:原位保留
             return
         try:
-            for _seq, line in to_write:
-                self._fh.write(line)
+            self._write_batch(to_write)
             self._fh.flush()
             self._fail_streak = 0                 # 成功:复位连续失败计数
             self._retry_q = deque(retry_keep)     # 仅剩 >up_to_seq 的旧重试行待刷
+            # R14-15:写通道**确已恢复** ⇒ 解除暂停(recovering→normal)。此前解除点只有
+            # ``SessionStore.repair()``(旧面,生产零调用者)⇒ 一旦因磁盘故障达阈值暂停,
+            # 本进程内**永不恢复**:``append`` 恒被 "拒新不丢旧" 挡回 PERS-202,而重试队列
+            # 只靠定时器重写、永不解除暂停(实测)。现由**既有** flush 定时器
+            # (``EngineSpine.start_flush_ticker``)在通道恢复后自动解除,不需新调用方。
+            if self._suspended:
+                self._suspended = False
+                log.warning("会话写通道恢复:解除暂停(重试队列已落盘)path=%s",
+                            self.path)
         except OSError as e:
             self._retry_q = deque(retry_original)  # 旧行原样保序保留
             self._retry_q.extend(take)            # 新取入队:不重不漏
             self._fail_streak += 1
+            if self._failure_state_reached():     # GAP-2:公开 flush 同样受阈值约束
+                await self._enter_failure_state(why=str(e))
+                raise_code("PERS-202", n=len(take),
+                           advice="会话暂停(fail-streak/重试队列达阈值),"
+                                  "repair 后恢复;行不丢")
             raise_code("PERS-202", n=len(take), why=str(e),
                        advice="行已入重试队列不丢;repair 后恢复")
 
+    # ------------------------------------------------------ 失败状态(GAP-2)
+    def _failure_state_reached(self) -> bool:
+        """失败状态判据(**单一真源**;GAP-2):连续失败 ≥ N 或重试队列越界。
+
+        全部写路径(强同步 ``append`` / 公开 ``flush`` / 异步 ``_flush_batch``)
+        共用本判据——修复前只有异步路径检查,强同步路径的 ``_fail_streak``
+        只增不判 ⇒ 磁盘持续故障时永不暂停、队列无界增长。
+        """
+        return (self._fail_streak >= _FAIL_STREAK_LIMIT
+                or len(self._retry_q) > _RETRY_Q_LIMIT)
+
+    async def _enter_failure_state(self, *, why: str = "") -> None:
+        """进入失败状态:发**可观察证据**(system.error)并暂停会话(拒新不丢旧)。
+
+        ``_suspended=True`` 后的新 ``append`` 一律 ``PERS-202``(拒新),已入
+        ``_retry_q`` 的行**一行不丢**(repair → recovering → normal 后恢复)。
+        """
+        await self._on_system_event("system.error", {
+            "code": "PERS-202",
+            "advice": "落盘通道故障,会话暂停(拒新不丢旧);已入重试队列的行不会丢,"
+                      "通道恢复后由定时 flush 自动解除暂停(R14-15);"
+                      "若进程先退出,队列内事件需跑 repair(F060) 复核",
+            "fail_streak": self._fail_streak,
+            "retry_q": len(self._retry_q),
+            **({"why": why} if why else {})})
+        self._suspended = True
+
+    # ------------------------------------------------------- 写入(残片自愈,R13-2)
+    def _heal_torn_tail(self) -> None:
+        """首写前给崩溃残片补一个行尾分隔(2026-09-21 R13-2)。
+
+        崩溃可能留下**无换行的尾部半行**;此后任何 append 都会与该残片拼在**同一物理
+        行** ⇒ 新事件不可解析(内存以为已落盘、磁盘读不回 = **静默丢事件**,实测:
+        `…,"type":"agent.mess{"seq":3,…`)。此处**只补一个 `\\n`**:残片自成一(坏)行、
+        新事件保持完整可解析;**不删任何字节**(残片留待 repair 按"中部坏行"口径隔离),
+        保持"open/回放不修"的既有口径(§repair:先备份再截断)。
+        """
+        if not self._torn_tail:
+            return
+        self._torn_tail = False
+        try:
+            self._fh.write("\n")
+            log.warning("崩溃残片后补行尾分隔(避免新事件与残片拼接) path=%s",
+                        self.path)
+        except OSError as e:                      # 失败照常由调用方按 PERS-202 处置
+            log.error("补行尾分隔失败(%s):新事件可能不可解析", e)
+
+    def _write_batch(self, rows: list) -> None:
+        """批量写(**三个 flush 入口共用**;写前自愈崩溃残片)。
+
+        失败时**重新武装残片标记**(R13-3 二阶):写失败可能停在**一行中间**(磁盘满/
+        中断),而标记已被本轮清除 ⇒ 下一次写会与残行**拼接**(与 R13-2 同类缺陷)。
+        无法知道实际写入多少 ⇒ 保守重武装,下轮写前补 `\\n` 兜底;调用方照旧做队列回填。
+        """
+        self._heal_torn_tail()
+        try:
+            for _seq, line in rows:
+                self._fh.write(line)
+        except OSError:
+            # 只在**文件确实停在行中**时重武装(按事实,不猜):失败可能发生在
+            # "一个字都没写"的场合(如写前即抛),那时补 `\n` 会平白多出空行。
+            self._torn_tail = self._tail_looks_torn()
+            raise
+
+    def _tail_looks_torn(self) -> bool:
+        """写失败后判定"文件是否停在行中"(R13-3)。
+
+        句柄是**缓冲**的 ⇒ 半行可能还在缓冲里:先尽力 ``flush`` 把它推到盘上,再按
+        事实读尾部(``detect_truncation``)。推不出去(仍 OSError)⇒ 无法判定,保守
+        按"可能半行"处理(下轮写前补分隔,最坏多一个空行 —— 空行被 replay 跳过,
+        代价远小于丢事件)。
+        """
+        try:
+            self._fh.flush()
+        except OSError:
+            return True
+        return detect_truncation(self.path) is not None
+
     async def _flush_batch(self) -> None:
-        """内部:攒批写 + 失败重试(摘批先行:并发 append 不阻塞)。"""
+        """内部:攒批写 + 失败重试(摘批先行:并发 append 不阻塞)。
+
+        失败语义:行全部回填 ``_retry_q``(拒新不丢旧),``_fail_streak += 1``;
+        达 ``_failure_state_reached`` ⇒ 暂停会话 + ``PERS-202``;未达阈值 ⇒
+        **静默保留**(等下一次 flush 定时器重试,不在批量路径上抛——批量由
+        ``append`` 的非 sync 分支调用,抛会打断事件发射)。
+        """
         batch, self._pending = self._pending, deque()
         retry = list(self._retry_q)
         to_write = retry + list(batch)
         if not to_write:
             return
         try:
-            for _seq, line in to_write:
-                self._fh.write(line)
+            self._write_batch(to_write)
             self._fh.flush()
             self._fail_streak = 0                 # 成功:复位失败计数
             self._retry_q.clear()
-        except OSError:
+        except OSError as e:
             self._retry_q = deque(retry)
             self._retry_q.extend(batch)           # 拒新不丢旧:全部回重试队列
             self._fail_streak += 1
-            if self._fail_streak >= 3 or len(self._retry_q) > _RETRY_Q_LIMIT:
-                # 注入回调(不反向 import session);通道坏时由装配层/bus 侧兜底
-                await self._on_system_event("system.error", {
-                    "code": "PERS-202",
-                    "advice": "落盘通道故障,会话暂停;跑 repair(F060)"})
-                self._suspended = True            # 暂停会话(拒新不丢旧)
+            if self._failure_state_reached():
+                await self._enter_failure_state(why=str(e))
                 raise_code("PERS-202", advice="会话暂停,repair 后恢复")
-            # 未达阈值:保留重试队列,等下一次 flush 定时器重试
+            # 未达阈值:保留重试队列,等下一次 flush 定时器/强同步点重试
 
     # ------------------------------------------------------------ 读取(隔离,不中断)
     def replay(self) -> Iterator[Envelope]:
@@ -478,30 +757,7 @@ class SessionStore:
         (§3.8)。行号按文件从 1 起(多文件时可能重号,隔离判定以 repair 主文件
         扫描为准)。
         """
-        paths = self._rotated_paths() + [self.path]
-        for p in paths:
-            if not p.exists():
-                continue
-            with open(p, "rb") as f:
-                for no, raw in enumerate(f, 1):
-                    line = raw.rstrip(b"\r\n")   # 容忍 \r\n 遗留(Windows 兼容)
-                    if not line:
-                        continue                 # 空行跳过(轮转残留容忍)
-                    try:
-                        text = line.decode("utf-8")
-                        env = Envelope.model_validate_json(text)  # 信封一次校验
-                        # 读侧 payload 强校验(P1-4):写侧拒坏 payload、读侧曾漏网——
-                        # 缺字段/错类型的行"合法"通过回放,到 reducer/repair 深处才
-                        # KeyError 崩。校验失败落入下方 PERS-201 隔离(与写侧同口径)。
-                        canonical = validate_payload(env.type, env.payload)
-                        if canonical is not env.payload:
-                            env = env.model_copy(update={"payload": canonical})
-                        yield env
-                    except Exception:                            # noqa: BLE001
-                        # 解码坏块/JSON 非法/信封校验失败统一记 PERS-201 隔离
-                        self._quarantine.add(no)  # 中部坏行隔离(记跳不中断)
-                        log.warning("PERS-201 域:坏行隔离(记跳不中断,删否经 repair) "
-                                    "file=%s line_no=%s", p, no)
+        return _iter_replay(self._rotated_paths() + [self.path], self._quarantine)
 
     # ------------------------------------------------------------ 截断检测(只读)
     @staticmethod
@@ -511,67 +767,51 @@ class SessionStore:
 
     # ------------------------------------------------------------ repair 崩溃恢复(F060)
     async def repair(self, session_id: Optional[str] = None) -> RepairReport:
-        """校验 + 修复流水线,幂等(F060):备份 → 截断 → 隔离 → 空洞定位 → recovered。
+        """**委托** F060 权威实现（`pyharness.repair.repair_session`）；本面是早期适配器。
 
-        ①备份(copy2 → {sid}.jsonl.bak-{ts},修复前强制);②尾部半行原子截断;
-        ③编码级坏块(完整行内)→ 原文件 .corrupt-{ts} 保留 + PERS-202 不覆盖;
-        ④中部坏行隔离(不自动删);⑤seq 空洞定位(对照 compacted/recovered 声明,
-        未声明只告警标记不回填);⑥on_system_event 强同步写 session.recovered
-        (fixed 非空才写——载荷模型 fixed min_length=1,空修复不产声明);⑦置
-        recovering→normal 恢复写通道。文件不存在 → 空报告(新会话)。
+        契约（`specs/repair.py.md` §0）：「**本模块是 F060 修复策略与编排的唯一归属**…
+        core/persistence 早期草案中同名 repair 若已实现，**应改为委托本模块，禁两套
+        修复策略并存**」。R24 依此把本方法由「第二套流水线」改为**薄适配器**（此前两套
+        并存：备份命名不同、隔离表示不同、派生视图重建缺失）。
+
+        安全委托序（**关键**）：本对象正持有自己的**追加句柄**，而 `repair_session` 会
+        整体重写主文件（它自己以 `ctx.session` 守卫**拒绝**活会话修复，正是防句柄失
+        同步）⇒ 委托前必须 flush + **关本句柄**，委托后**重开**：
+
+          ① `flush()`（攒批落盘）→ ② 关 `_fh` → ③ 委托 `repair_session`（同进程
+          会话锁可重入，不冲突）→ ④ 重开追加句柄 + 按事实重建 `_torn_tail`
+          → ⑤ 解除暂停（写通道已随修复恢复）。
+
+        返回**本模块的** `RepairReport`（`fixed`/`quarantined: list[int]`/`backup_path`），
+        由权威报告投影而来，保持既有的声明返回类型不变。
         """
         sid = session_id or self.session_id
         path = self.path
         if not path.exists():
-            return RepairReport()                 # 空会话:空报告
-        backup = shutil.copy2(path, path.with_name(f"{sid}.jsonl.bak-{now_ts()}"))
-        fixed: list[str] = []
-        self._quarantine.clear()                  # 隔离区以本次主文件扫描为准(幂等)
-        # ② 尾部半行(崩溃未完成的事实不假装发生):原子截断,先备份后动刀
-        off = detect_truncation(path)
-        if off is not None:
-            self._rewrite_without_tail(off)
-            fixed.append("tail-truncated")
-        # ③ 编码级坏块(截断后仍不可整解码 = 中部坏块):保留原样,明确报错
+            return RepairReport()                 # 空会话:空报告(新会话)
+        await self.flush()                        # ① 攒批先落盘
+        close = getattr(self._fh, "close", None)
+        if callable(close):
+            try:
+                close()                           # ② 关本句柄(防委托期间 inode 失同步)
+            except OSError:                       # noqa: BLE001 关闭失败仍继续(重开会覆盖)
+                log.warning("repair 委托前句柄关闭失败 path=%s", path, exc_info=True)
+        from pyharness.repair import repair_session     # 惰性:避免模块级回边
+        ctx = SimpleNamespace(
+            storage=SimpleNamespace(sessions_dir=path.parent))
         try:
-            lines = _read_clean(path)
-        except UnicodeDecodeError:
-            corrupt = path.with_name(f"{sid}.jsonl.corrupt-{now_ts()}")
-            try:
-                # Windows:持开句柄无法 rename,先关;此后本存储需重新 open_store
-                self._fh.close()
-                os.replace(path, corrupt)         # 原文件保留为 .corrupt,不覆盖
-            except OSError as e:
-                raise_code("PERS-202", op="corrupt-rename", why=str(e),
-                           advice="原文件保留 .corrupt 失败,查磁盘/权限")
-            raise_code("PERS-202",
-                       advice="编码级坏块不可修复;原文件保留 .corrupt,不覆盖",
-                       backup=str(backup), corrupt=str(corrupt))
-        # ④ 中部坏行隔离(不自动删——人类决策,repair 只隔离)
-        for no, text in lines:
-            try:
-                Envelope.model_validate_json(text)
-            except Exception:                    # noqa: BLE001
-                self._quarantine.add(no)
-        if self._quarantine:
-            fixed.append(f"quarantined:{sorted(self._quarantine)}")
-        # ⑤ seq 空洞定位:有 compacted/recovered 声明 → 合法;未声明 → 标记告警(F031 深查)
-        holes = self.seq_holes(path)
-        if holes and not self._declared_by_compaction(holes):
-            fixed.append(f"seq-holes:{holes}")
-        # ⑥ recovered 声明(fixed 非空才写:载荷 fixed min_length=1,空不产事件)
-        if fixed:
-            await self._on_system_event("session.recovered", {
-                "fixed": fixed,
-                "quarantined": sorted(self._quarantine),
-                "backup": str(backup)})
-        else:
-            log.info("repair 无修复动作(幂等),skip session.recovered: %s", path)
-        # ⑦ recovering→normal:写通道恢复(派生视图整体重建在阶段 4/6 装配)
-        self._suspended = False
-        return RepairReport(fixed=fixed,
+            rep = await repair_session(ctx, sid, interactive=False)
+        finally:
+            self._fh = open(path, "a", encoding="utf-8", newline="\n")   # ④ 重开追加句柄
+            self._torn_tail = detect_truncation(path) is not None
+            self._suspended = False               # ⑤ 写通道随修复恢复
+        kept = [int(getattr(e, "line_no", 0)) for e in
+                (getattr(rep, "quarantined", None) or [])]
+        self._quarantine.clear()
+        self._quarantine.update(kept)
+        return RepairReport(fixed=list(getattr(rep, "fixed", None) or []),
                             quarantined=sorted(self._quarantine),
-                            backup_path=backup)
+                            backup_path=getattr(rep, "backup_path", None))
 
     # ------------------------------------------------------------ 原子截断重写(repair 专用)
     def _rewrite_without_tail(self, cut_offset: int) -> None:
@@ -642,6 +882,7 @@ class SessionStore:
             self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
             raise                                # 主文件未动,恢复句柄
         self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
+        self._torn_tail = False                   # 新文件无残片(R13-2)
         log.info("jsonl rotated: %s (size_mb=%d)",
                  target, self.rotate_bytes // 1_048_576)
 
@@ -669,19 +910,14 @@ class SessionStore:
         覆盖来源:compacted.ranges 闭区间、recovered.lost 截断 seq 清单、既往
         recovered.fixed 中 "seq-holes:[…]" 声明(重复 repair 不重复告警)。
         全部被声明覆盖 → 合法空洞(压缩/截断/修复事实),不告警不回填。
+
+        2026-09-21 R14-9:判据**唯一来源** ``events.declared_ranges``(此前本处、
+        ``repair``、``session``、``governance.audit`` 各写一份 ⇒ 漂移)。
         """
         covered: set[int] = set()
         for env in self.replay():
-            if env.type == "context.compacted":
-                for lo, hi in (env.payload.get("ranges") or []):
-                    covered.update(range(lo, hi + 1))
-            elif env.type == "session.recovered":
-                covered.update(env.payload.get("lost") or [])
-                for item in (env.payload.get("fixed") or []):
-                    m = re.match(r"^seq-holes:\[(.*)\]$", str(item))
-                    if m and m.group(1).strip():
-                        covered.update(int(x) for x in m.group(1).split(",")
-                                       if x.strip().isdigit())
+            for lo, hi in declared_ranges(env):
+                covered.update(range(lo, hi + 1))
         return all(h in covered for h in holes)
 
     # ------------------------------------------------------------ 隔离区查询
@@ -711,12 +947,58 @@ class SessionStore:
 
 
 # ================================================================= 工厂
-def open_store(session_id: str, *, dir: Optional[Path] = None) -> SessionStore:
+def session_recorder(store: Any, session_id: str) -> Callable:
+    """总线 → 存储订阅工厂(**唯一实现**;engine 与桌面壳共用,禁各自实现)。
+
+    **sid 过滤是必须的**:多会话**共用一条总线**时,订阅者会收到**所有**会话的信封;
+    不过滤则 B 的事件会串写进 A 的 JSONL(实测:两个 ``session.created`` 落同一文件,
+    回放错序并让 repair 误判空洞/误隔离)。``store.append`` 侧只写字节、**不做** sid
+    校验,故过滤责任**只在此单点**(桌面壳曾各自实现过一份,engine 侧长期缺失 ——
+    2026-09-21 R8 补)。
+
+    另:瞬时类型(``llm.chunk`` 等以 dict 上总线)不进 append-only JSONL。
+    强同步清单**唯一真源** = ``events.vocab.SYNC_TYPES``(ADR-019 P-3),不本地维护副本。
+    """
+    async def _record(type_: str, payload: Any) -> None:
+        if not hasattr(payload, "model_dump_json"):
+            return
+        if session_id and getattr(payload, "session_id", None) != session_id:
+            return                     # 跨会话事件:不落本会话文件
+        await store.append(payload, sync=type_ in SYNC_TYPES)
+    return _record
+
+
+def flush_kwargs_of(cfg: Any) -> dict:
+    """由 Settings **鸭子取值**解析攒批/定时落盘标量(N1)。
+
+    本模块**不 import** ``pyharness.config``(依赖方向纪律):只按属性读取。
+    缺键 ⇒ 返回 ``{}``,``open_store`` 回落模块常量(DEFAULTS),行为与修复前一致
+    —— 即"未配置"与"配置为默认值"不可区分但**结果相同**,不引入新语义。
+    """
+    j = getattr(getattr(cfg, "log", None), "jsonl", None)
+    out: dict = {}
+    fis = getattr(j, "flush_interval_s", None)
+    fb = getattr(j, "flush_batch", None)
+    if fis is not None:
+        out["flush_interval_s"] = fis
+    if fb is not None:
+        out["flush_batch"] = fb
+    return out
+
+
+def open_store(session_id: str, *, dir: Optional[Path] = None,
+               flush_interval_s: Optional[float] = None,
+               flush_batch: Optional[int] = None) -> SessionStore:
     """创建/打开会话存储(工厂):目录 mkdir(700) → 主文件 append 句柄。
 
     文件已存在(重启恢复):由 session.open_session 重放取 _seq 基线;检测到尾部
     半行 → 告警提示先跑 repair(open 不自动截断——修复前强制备份,F060)。
     异常:目录/文件不可写 → PERS-202。
+
+    ``flush_interval_s`` / ``flush_batch``(N1):**已解析的标量**,由**装配层**从
+    ``Settings`` 取值后传入(见 ``flush_kwargs_of``);缺省 ``None`` ⇒ 用模块常量
+    (DEFAULTS)。修复前本工厂**不接收也不传递**这两个值 ⇒ ``config.log.jsonl.*``
+    是**死配置**(实测:配置 3.0/7,store 实为 0.5/64)。
     """
     d = dir or default_sessions_dir()
     try:
@@ -745,11 +1027,15 @@ def open_store(session_id: str, *, dir: Optional[Path] = None) -> SessionStore:
         raise_code("PERS-202", op="open", path=str(path), why=str(e),
                    advice="查磁盘/权限;repair 后恢复")
     return SessionStore(session_id=session_id, path=path, fh=fh,
-                        lock_path=lock_path)
+                        lock_path=lock_path,
+                        flush_interval_s=flush_interval_s,
+                        flush_batch=flush_batch)
 
 
 __all__ = [
     "SessionStore", "RepairReport", "open_store", "detect_truncation",
     "default_sessions_dir", "now_ts",
     "acquire_session_lock", "release_session_lock", "session_lock_path",
+    "session_lock_held", "is_aux_session_file", "session_log_paths",
+    "rotated_segment_paths", "session_data_paths", "SessionReader",
 ]

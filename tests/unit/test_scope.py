@@ -18,13 +18,11 @@ from pyharness.config import Settings
 from pyharness.core import scope as scope_mod
 from pyharness.core.llm_fallback import BudgetGuard, TaskUsage
 from pyharness.core.scope import (
-    ALLOWLIST_DOMAINS,
     BudgetExhausted,
     BudgetLimits,
     Scope,
     ScopePolicy,
     ScopeSnapshot,
-    WORKSPACE_DOMAINS,
     active_scope,
     build_scope,
     from_snapshot,

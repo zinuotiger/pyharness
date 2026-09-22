@@ -26,6 +26,7 @@ envelope → loop.wake),供桌面壳/交互 CLI 把"提问"真正变成 Agent �
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import logging
@@ -34,15 +35,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
-from pyharness.bus import EventBus
+from pyharness.bus import EventBus, bus_kwargs_of
 from pyharness.bus.registry import Registry
-from pyharness.core.agent import create_agent
+from pyharness.core.agent import CHANNEL_UNDECLARED, create_agent
 from pyharness.core.agent_loop import AgentLoop
 from pyharness.core import llm as llm_mod
-from pyharness.core.scope import BudgetLimits, Scope, ScopePolicy
+from pyharness.core.scope import (BudgetLimits, Scope, ScopePolicy,
+                                  session_workspace)
 from pyharness.core.session import open_session
 from pyharness.errors import PyHError
-from pyharness.persistence import open_store
+from pyharness.persistence import flush_kwargs_of, open_store
 
 log = logging.getLogger("pyharness.engine")
 
@@ -94,7 +96,14 @@ class EngineSpine:
     search_backend: Any = None
     budget: Any = None
     fts: Any = None
+    llm_probe: Any = None                          # F033 健康探针后台任务(收尾须取消)
+    bus_owners: list = field(default_factory=list)  # 本会话在总线上持有的订阅属主
     governance: Any = None                         # 治理层单实例(ADR-018;S2-3)
+    # 通道身份(GAP-11):外壳装配期**显式声明**"谁在驱动本引擎"。
+    # 三态:字符串 = 人类通道(cli/web/acp:<id>/desktop);``None`` = 显式 headless;
+    # ``CHANNEL_UNDECLARED`` = 从未声明 ⇒ 不写 ``ctx.channel`` ⇒ 治理层
+    # ``principal_of`` 见属性缺失即 APR-503 fail-closed(禁止静默降级为 system)。
+    channel: Any = CHANNEL_UNDECLARED
     _plugins_ready: bool = False
     _auto_titled: bool = False
     _spill_provider: Any = None
@@ -104,9 +113,106 @@ class EngineSpine:
     _orchestration_ready: bool = False
     _schedule_started: bool = False
     _policy_announced: bool = False        # 装配期策略留痕幂等闸(F-01:每 spine 恰一次)
+    _jobs_recovered: bool = False          # 崩溃 job 事件级恢复幂等闸(B1/R24:每 spine 恰一次)
+    # 攒批落盘定时器(GAP-13):此前 ``flush_interval_s`` 只被存下、**无读取者**,
+    # 而 persistence/cli 三处注释都宣称"0.5s 定时器兜底" —— 文档描述了一个不存在
+    # 的机制。定时器由本 spine 持有(惰性启动、close 时先停),使攒批事件(非 SYNC
+    # 的 tool.call/guard.evaluated/tool.result 等)的**落盘窗口有上界**。
+    _flush_task: Any = None
+    _flush_stop: Any = None
+
+    async def start_flush_ticker(self) -> bool:
+        """幂等启动攒批落盘定时器(间隔 = ``store.flush_interval_s``;GAP-13)。
+
+        语义与边界:
+
+        - **幂等**:已在跑(未 done)→ 返回 False,不重复起任务;
+        - **无 store / 间隔 ≤0** → 不起(返回 False),不是错误;
+        - **单次失败不杀定时器**:``store.flush()`` 抛 ``PERS-202`` 时只记日志,
+          落盘故障状态由 ``SessionStore._fail_streak`` / ``_suspended`` 自行记账
+          (拒新不丢旧),定时器继续按周期间隔重试 —— 崩溃窗口因此**有上界**;
+        - **不吞取消**:收到 ``CancelledError`` 立即 re-raise(取消协议);
+        - 停止方式 = ``close()`` 置位 ``_flush_stop`` 并 await,超时则 cancel。
+
+        该定时器**不是第二写者**:它只调 store 自己的 ``flush()``,与强同步路径
+        共用同一把攒批缓冲与 seq 校验(INV-07 单写者不变)。
+        """
+        if self._flush_task is not None and not self._flush_task.done():
+            return False
+        store = self.persistence
+        if store is None:
+            return False
+        try:
+            interval = float(getattr(store, "flush_interval_s", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            interval = 0.5
+        if interval <= 0:
+            return False
+        stop = asyncio.Event()
+        self._flush_stop = stop
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                    return                       # 收到停止信号:正常退出
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    raise
+                try:
+                    r = store.flush()
+                    if inspect.isawaitable(r):
+                        await r
+                except asyncio.CancelledError:
+                    raise
+                except Exception:                # noqa: BLE001 单次失败不杀定时器
+                    log.warning("flush ticker 落盘失败(store 自行记账 PERS-202)",
+                                exc_info=True)
+
+        self._flush_task = asyncio.create_task(
+            _loop(), name=f"flush-ticker:{getattr(self.session, 'sid', '?')}")
+        return True
 
     async def close(self) -> None:
-        """关闭会话拥有的外部资源(MCP 子进程/调度泵/子任务/派生索引)。"""
+        """关闭会话拥有的外部资源(MCP 子进程/调度泵/子任务/派生索引)。
+
+        GAP-13:攒批落盘定时器**先停**——否则它可能在 store 句柄关闭后触发一次
+        flush(PERS-202 噪音,甚至半写)。停止是协作式的(stop 事件),超时兜底 cancel。
+        """
+        # 任务队列**先**排空(2026-09-21 修):在途/排队任务的终态事件与 `segment.end`
+        # 都是 append,而 `session.finished` 一旦落盘即 EVT-104 拒写 ⇒ 若不先排空,
+        # 实测会出现"任务无终态、段锚不闭合、`wait_for` 悬挂"。此处排空 = 取消在途
+        # (归一化 failed(cancelled))+ 摘除排队 + 等泵退场。
+        queue = self.task_queue
+        if queue is not None and callable(getattr(queue, "shutdown", None)):
+            try:
+                await queue.shutdown(reason="session-close")
+            except Exception:                        # noqa: BLE001 收尾尽力
+                log.warning("task queue shutdown failed", exc_info=True)
+        task, stop = self._flush_task, self._flush_stop
+        if task is not None:
+            if stop is not None:
+                stop.set()
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+            except Exception:                    # noqa: BLE001 定时器自身异常:收尾不阻断
+                log.warning("flush ticker 退出异常", exc_info=True)
+            self._flush_task, self._flush_stop = None, None
+        # F033 探针任务:与 flush ticker 同款协作式收尾(先取消再 await,防止
+        # "Task was destroyed but it is pending" 与关闭后仍 ping 出网)。
+        probe = self.llm_probe
+        if probe is not None:
+            self.llm_probe = None
+            probe.cancel()
+            try:
+                await probe
+            except asyncio.CancelledError:
+                pass
+            except Exception:                        # noqa: BLE001 收尾尽力
+                log.warning("llm probe task exit failed", exc_info=True)
         # 在途 job 先取消(P2):close 此前不触 jobs._on_session_closing,store 关闭后
         # job 仍可能向父会话写终态(脏续写);与 subagent 的 child-first 清理对齐。
         if self.jobs is not None:
@@ -125,11 +231,47 @@ class EngineSpine:
                 self.schedule.stop()
             except Exception:                        # noqa: BLE001 收尾尽力
                 log.warning("schedule stop failed", exc_info=True)
+        # 会话级总线订阅收尾(2026-09-21 修):本会话装配期挂的订阅(落盘记录器 /
+        # 证据收集器 / 证据生产者)**必须按属主摘除**。桌面壳多会话**共用一条总线**
+        # (bus=getattr(self.ctx,"bus")),实测关闭一个会话后在共享总线上遗留 83 条
+        # 订阅:证据生产者会继续对后续会话的 segment.end 反应、落盘记录器会向已关闭
+        # 的 store 写入(PERS 噪音),且内存随会话数线性增长。
+        # 属主串含 sid(_sid_of),故摘除**只影响本会话**(修前属主恒为 "...:?" ⇒ 两会话
+        # 同属主,按属主摘除会误伤)。放在其它 detach 之后、store 关闭之前。
+        bus = self.bus
+        if bus is not None and self.bus_owners:
+            for owner in list(self.bus_owners):
+                try:
+                    bus.unsubscribe_all(owner)
+                except Exception:                    # noqa: BLE001 收尾尽力
+                    log.warning("bus unsubscribe %s failed", owner, exc_info=True)
+            self.bus_owners = []
+        # 审批面收尾(2026-09-21 修):`ApprovalProvider.detach` 的 docstring 写着
+        # "幂等,随 ctx.close()",但全库**零生产调用者** —— 实测会话关闭后
+        # `_pending` 仍挂着未决请求(`denied` 未置)、订阅未摘、信任表未清,等待裁决
+        # 的任务**永久悬挂**。必须放在 store 关闭**之前**(detach 会落
+        # `approval.denied` / `queue.resumed` 事件)。
+        if self.approval is not None:
+            try:
+                self.approval.detach()
+            except Exception:                        # noqa: BLE001 收尾尽力
+                log.warning("approval detach failed", exc_info=True)
         if self.subagent is not None:
             try:
                 await self.subagent.detach()
             except Exception:                        # noqa: BLE001 收尾尽力
                 log.warning("subagent detach failed", exc_info=True)
+        # 会话后台子进程(F052/F053):`proc.start` 起的进程树必须随会话一起终止。
+        # 2026-09-21 修:`proc.close_session` 的 docstring 一直写着"agent close 时
+        # 调用",但全库**零生产调用者** —— 实测会话关闭后进程仍在跑(registry 项、
+        # 泵线程、定时器一并泄漏)。与 jobs/subagent 的 child-first 清理同处收口。
+        try:
+            from pyharness.core import proc as proc_mod
+            n = proc_mod.close_session(str(getattr(self.session, "sid", "")))
+            if n:
+                log.info("session close: ended %d background proc session(s)", n)
+        except Exception:                            # noqa: BLE001 收尾尽力
+            log.warning("proc close_session failed", exc_info=True)
         while self._mcp_clients:
             client = self._mcp_clients.pop()
             try:
@@ -260,6 +402,19 @@ def _make_chain(cfg: Any, bus: Any) -> Any:
     return FallbackChain(adapters=llm_mod.adapters, config=cfg, bus=bus)
 
 
+def _cfg_probe_interval(cfg: Any) -> float:
+    """F033 探针周期取值(CFG `llm.probe.interval_s`,缺省 60s)。
+
+    与 ``flush_kwargs_of``/``_cfg_max_arg_failures`` 同款:装配层解析配置后把**标量**
+    注入组件,组件不 import config。
+    """
+    v = getattr(getattr(getattr(cfg, "llm", None), "probe", None), "interval_s", None)
+    try:
+        return float(v) if v is not None else 60.0
+    except (TypeError, ValueError):
+        return 60.0
+
+
 def _policy_preset(cfg: Any) -> str:
     """security.policy.preset 读取(缺省 strict;任意 cfg 形态容错)。"""
     try:
@@ -268,6 +423,20 @@ def _policy_preset(cfg: Any) -> str:
     except Exception:                                  # noqa: BLE001 非 Settings 对象
         return "strict"
     return str(v) if v in ("locked", "readonly", "standard", "strict") else "strict"
+
+
+def _cfg_max_arg_failures(cfg: Any) -> int:
+    """F026 连败阈值取值(CFG `loop.max_arg_failures_per_round`,缺省由执行器常量兜底)。
+
+    与 ``persistence.flush_kwargs_of`` 同款装配面:装配层解析配置后把**标量**注入
+    组件,组件自身不 import config(N1"声明配置必须可达")。
+    """
+    from pyharness.core.tools_executor import DEFAULT_MAX_ARG_FAILURES
+    v = getattr(getattr(cfg, "loop", None), "max_arg_failures_per_round", None)
+    try:
+        return int(v) if v is not None else DEFAULT_MAX_ARG_FAILURES
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ARG_FAILURES
 
 
 def _apply_preset(cfg: Any, policy: Any, tool_reg: Any,
@@ -317,19 +486,25 @@ def _apply_preset(cfg: Any, policy: Any, tool_reg: Any,
 
 # ---------------------------------------------------------------- spine 装配
 async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
-                      bus: Optional[EventBus] = None) -> EngineSpine:
+                      bus: Optional[EventBus] = None,
+                      channel: Any = CHANNEL_UNDECLARED,
+                      tenant_id: Optional[str] = None) -> EngineSpine:
     """装配脊柱 8 模块束(create_agent 输入)+ 持久化三层。
 
     流程:store(JSONL 真源)→ SessionLog(事件源,总线分发)→ AgentLoop(真
     LLM)→ Scope(strict)→ Registry → spine。不 activate(agent 由调用方
     enter 后 submit)。llm/scope/loop 全部真实,零 mock。
+
+    ``channel``(GAP-11):外壳身份声明,透传 ``build_runner_components``。
+    ``tenant_id``(GAP-10):租户归属,交给 ``open_session`` 盖到每条事件信封。
     """
-    bus = bus or EventBus()
-    store = open_store(sid, dir=sessions_dir)
-    log_ = await open_session(sid, store)    # async 工厂(SessionLog 装配)
+    bus = bus or EventBus(**bus_kwargs_of(cfg))  # F005 背压阈值由装配层注入(N1)
+    # N1:攒批/定时落盘标量由**装配层**从 Settings 解析后注入(工厂不读 config)。
+    store = open_store(sid, dir=sessions_dir, **flush_kwargs_of(cfg))
+    log_ = await open_session(sid, store, tenant_id=tenant_id)  # async 工厂
     spine = build_runner_components(cfg, log_=log_, bus=bus,
                                     sessions_dir=sessions_dir,
-                                    store=store)
+                                    store=store, channel=channel)
     spine.persistence = store
     return spine
 
@@ -348,7 +523,12 @@ async def _preload_plugins(spine: EngineSpine) -> None:
     if not pdir.exists():
         await _preload_mcp(spine)
         return
-    for pd in sorted(pdir.glob("*/")):
+    # `plugins.priority`（R24 接线）:同层无依赖插件的装载次序,**小者先**;
+    # 未列入者按默认 0(平序回落到**名字序**,保持确定性)。该键此前零读取者。
+    prio = dict(getattr(getattr(spine, "settings", None), "plugins", None)
+                and (getattr(spine.settings.plugins, "priority", None) or {}) or {})
+    for pd in sorted(pdir.glob("*/"),
+                     key=lambda d: (int(prio.get(d.name, 0) or 0), d.name)):
         try:
             spec = _pl.load_spec(pd)
             await _pl.load_plugin(spine.plugins, spec, plug_ctx,
@@ -472,7 +652,8 @@ def _build_governance(cfg: Any, *, session: Any, bus: Any,
 def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
                             sessions_dir: Path,
                             store: Any = None,
-                            attach_persistence: bool = True) -> EngineSpine:
+                            attach_persistence: bool = True,
+                            channel: Any = CHANNEL_UNDECLARED) -> EngineSpine:
     """纯组件装配(复用外部已 open 的 SessionLog/bus/store)。
 
     desktop 多会话场景:会话已由 DesktopSessionManager open(log_/store/bus
@@ -484,6 +665,11 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     desktop 复用 manager 会话时 manager._attach_persistence 已订阅(owner=
     persistence:{sid}),重复订阅 → 每事件双写 + store 游标错乱(实测卡死),
     故 desktop 调用传 attach_persistence=False。
+
+    channel(GAP-11):外壳身份声明(三态见 ``EngineSpine.channel``)。**每条
+    生产路径都必须显式声明**——未声明时该引擎产出的任何决策都会在
+    ``authorize()`` 处以 APR-503 fail-closed,这是有意为之(装配缺陷可见,
+    不静默降级为 system 主体)。
     """
     # AgentLoop(真 cfg:max_turns=30 权威默认)
     loop = AgentLoop(cfg)
@@ -493,7 +679,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     limits = BudgetLimits.from_cfg(cfg)
     policy = ScopePolicy()                     # 默认:strict / 空 deny / 空域名
     counters = llm_mod.UsageCounters()
-    scope = Scope(policy, limits, session_id=str(getattr(log_, "session_id", "")),
+    scope = Scope(policy, limits, session_id=str(getattr(log_, "sid", "")),
                   counters=counters, session=log_, bus=bus)
 
     # 预算门面(F032 只读消费面):与 Scope 共用同一 limits/counters 实例,
@@ -501,7 +687,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # 导致 /api/budget 恒 disabled)
     from pyharness.core.budget import BudgetGate
     budget_gate = BudgetGate(limits=limits, counters=counters, scope=scope,
-                             session_id=str(getattr(log_, "session_id", "")))
+                             session_id=str(getattr(log_, "sid", "")))
 
     # Registry(能力三类索引,agent 装配用)
     registry = Registry(bus)
@@ -519,7 +705,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     tool_fs.register(tool_reg)                 # fs.read_file/write_file/list_dir/delete_file
     from pyharness.core import spill as spill_mod
     spill_mod.register(tool_reg)               # storage.spill.read(F039 读工具,strict 可见)
-    tools = ToolExecutor(tool_reg)             # ctx.tools: schemas_for + execute(四关管道)
+    tools = ToolExecutor(tool_reg,                     # ctx.tools: schemas_for + execute(四关管道)
+                         max_arg_failures=_cfg_max_arg_failures(cfg))
     # 内置 g1-g7(单调,事件落 session)——2026-09-14 S1-01 修复:此前直构
     # GuardChain(session,bus),绕过 from_config,导致三处装配缺口:
     #   ① validator 恒 None → g1 g-schema 在生产恒 allow(INV-04 内层复查失效);
@@ -534,8 +721,12 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # (S2-3.2 实测:fs.delete_file 变可见)。故用 gov_policy。
     gov_policy, guard = _build_governance(cfg, session=log_, bus=bus,
                                           tool_reg=tool_reg)
-    approval = ApprovalProvider(session=log_, bus=bus, config=cfg,
-                                channel="desktop")   # 审批请求入 pending,桌面轮询
+    # N5:provider 缺省通道由**装配参数**决定(不再硬编码 "desktop")。
+    # 未声明(CHANNEL_UNDECLARED)⇒ None(无缺省)。ctx 的声明才是权威;
+    # 缺省仅供 user_choice/信任名单判定,**不**作为"ctx 未声明"的回退源。
+    approval = ApprovalProvider(
+        session=log_, bus=bus, config=cfg,
+        channel=(None if channel is CHANNEL_UNDECLARED else channel))
 
     # danger 分级同源装配(F023):注册表 defn.danger → policy.danger_marks,
     # scope.can_use 据此拦 critical、schemas_for 据此过滤不可见工具
@@ -549,11 +740,18 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # 权限预设档位(#39):locked/readonly/standard/strict(注册名已知后编译)
     # scope 传入 → 同步段补 scope.updated 审计(装配期无 await,见 note_tighten)
     _apply_preset(cfg, policy, tool_reg, scope=scope)
-    # workspace 根(F055):scope.policy.workspace_root,未设则 fs.* 全部 fail-closed
+    # workspace 根(F055):**每会话专属根** {storage.workspaces_dir}/{sid}
+    # (PRD-Core §5.6 F055 / CFG.md §3.6 / OPS.md / DEP.md 一致口径;未设则 fs.*
+    # fail-closed)。2026-09-21 修:此前此处赋的是**裸** workspaces_dir → ①所有会话
+    # 共用同一 fs 根,跨会话文件互相可见/可写(会话隔离失效);②子会话工厂按规格
+    # 形态 base.parent/{sub_id} 推导时越出 workspaces 树且目录从未创建(子代理
+    # 文件类工具全废)。派生一律走 scope.session_workspace 单点,不再就地拼接。
     ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
                    ).expanduser()
     ws_root.mkdir(parents=True, exist_ok=True)
-    policy.workspace_root = str(ws_root)
+    policy.workspace_root = session_workspace(
+        str(ws_root), str(getattr(log_, "sid", "")))
+    Path(policy.workspace_root).mkdir(parents=True, exist_ok=True)
     # storage.spill 定位器:首个 agent 就绪时 SpillProvider.enter 挂载(见
     # _activate_storage_caps)——executor 关4 超长输出(>2KB)→ spill 私有区 +
     # ref 回喂(F039);激活失败时报 PERS-221 不崩(截断兜底)
@@ -564,6 +762,19 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     fb_models = list(getattr(getattr(cfg, "llm", None), "fallback_models", None) or [])
     llm_client = llm_mod.LLMClient(
         cfg, chain=_make_chain(cfg, bus) if fb_models else None)
+    # F033 健康探针:**回切的唯一驱动**。2026-09-21 修:`chain.probe_loop` 此前全库
+    # 零生产调用者(只有单测启动过),而健康状态机只能被探针改回 healthy、降级链的
+    # idx 也只在探针里归零 ⇒ **一次降级即永久降级**(进程生命周期内不回切主模型),
+    # `llm.recovered` 永不发出。此处按进程/会话生命周期起任务,close 时取消。
+    probe_task = None
+    llm_chain = getattr(llm_client, "chain", None)
+    if llm_chain is not None:
+        try:
+            probe_task = asyncio.get_running_loop().create_task(
+                llm_chain.probe_loop(interval_s=_cfg_probe_interval(cfg)),
+                name=f"llm-probe:{getattr(log_, 'sid', '?')}")
+        except RuntimeError:                       # 无运行中事件循环(同步装配)
+            log.warning("llm 探针未启动(无运行中事件循环):模型降级后不会自动回切")
     # F010 系统提示词装配器 / F058 压缩器:挂 ctx.sysprompt/ctx.compactor,
     # agent-loop 出网前装配、wake 请求边界压缩(模块完整,装配即真链)
     from pyharness.core.system_prompt import SystemPromptAssembler
@@ -636,11 +847,15 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
             policy.search_host = ""
 
     # SessionLog 接总线落盘订阅(事件一入内存即入真源队列)
+    engine_owners: list[str] = []              # 本会话在总线上持有的属主(收尾按属主摘除)
     if attach_persistence:
         if bus is not None:
-            owner = f"engine:{getattr(log_, 'session_id', '?')}"
+            # 属主含**租户**(R12):多租户共用总线时,同名 sid 可能并存(会话目录按
+            # 租户分目录)—— 属主只含 sid 会让两租户同属主,摘一个连坐另一个。
+            owner = f"engine:{_tenant_of(log_)}:{_sid_of(log_)}"
+            engine_owners.append(owner)
             for t in _EVENT_TYPES_OR_ALL():
-                bus.subscribe(t, _record_to(store), owner=owner)
+                bus.subscribe(t, _record_to(store, _sid_of(log_)), owner=owner)
         if store is not None:
             log_._bus = bus                  # append → 分发 → 落盘闭环
 
@@ -650,7 +865,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # 订阅 owner 与落盘订阅区分开,便于 deactivate 时各自摘除。
     evidence = EvidenceCollector(session=log_)
     if bus is not None:
-        ev_owner = f"governance-evidence:{getattr(log_, 'session_id', '?')}"
+        ev_owner = f"governance-evidence:{_tenant_of(log_)}:{_sid_of(log_)}"
+        engine_owners.append(ev_owner)
         for t in _EVIDENCE_EVENT_TYPES:
             bus.subscribe(t, evidence.on_event, owner=ev_owner)
 
@@ -678,7 +894,9 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         storage=EngineStorage(sessions_dir=sessions_dir),
         persistence=store, plan=plan, schedule=schedule,
         budget=budget_gate,
-        search_backend=search_backend)
+        search_backend=search_backend,
+        llm_probe=probe_task,
+        channel=channel)
     # 真实编排适配层:jobs/subagent 不再停在 runner=None 的模块单测状态。
     # SubagentManager 的 announce 使用 tool_registry 直接绑 Provider;模型经
     # 正常 ToolExecutor 看到 subagent.spawn。
@@ -688,12 +906,47 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     from pyharness.core.subagent import SubagentManager
     spine.jobs = JobManager(session=log_, task_queue=None,
                             runner=EngineIntentRunner(spine), bus=bus)
-    sub_runner = EngineSubagentRunner(spine, sessions_dir)
+    sub_runner = EngineSubagentRunner(spine, sessions_dir,
+                                      evidence_producer=_evidence_producer)
     spine.subagent = SubagentManager(
         session=log_, runner=sub_runner, parent_scope=scope,
         tools=tool_reg, bus=bus, cfg=cfg,
         session_factory=sub_runner.child_session)
+    # N3/M5-3:证据生产者订阅**段关闭**(而非 run_for_task 的函数体)。
+    # 订阅面与落盘订阅 owner 区分开,便于 deactivate 时各自摘除。
+    if bus is not None:
+        prod_owner = f"governance-evidence-producer:{_tenant_of(log_)}:{_sid_of(log_)}"
+        engine_owners.append(prod_owner)
+        bus.subscribe(
+            "segment.end", _evidence_producer(spine), owner=prod_owner)
+    spine.bus_owners = engine_owners
+    # R12-3:审批 → 队列联动接线(惰性取值:队列可能由 attach/外壳在**之后**挂上
+    # spine.task_queue)。挂起审批时真挂起本会话队列,恢复时真恢复 —— 使
+    # `queue.suspended/resumed` 事件与 `queue.status().paused` 一致。
+    try:
+        spine.approval._queue_getter = lambda: spine.task_queue
+    except Exception:                            # noqa: BLE001 旧形状 provider:跳过
+        log.debug("approval 队列联动未接线(provider 形状不支持)")
     return spine
+
+
+def _sid_of(log_: Any) -> str:
+    """会话 id 取值(`SessionLog.sid`;缺省 '?')。
+
+    2026-09-21 修:此前三处订阅属主写 ``getattr(log_, 'session_id', '?')`` ——
+    ``SessionLog`` 只有 ``.sid`` ⇒ 属主恒为 ``...:?``,**所有会话共用同一个属主串**
+    (既是错误标识,又会让"按属主摘除"误伤其他会话)。同 PIT-16 的属性名错第二例。
+    """
+    return str(getattr(log_, "sid", "?") or "?")
+
+
+def _tenant_of(log_: Any) -> str:
+    """会话租户取值(订阅属主用;缺省 '' 表示默认/未声明)。
+
+    2026-09-21 R12:属主串必须含**全部隔离维度**(租户 × 会话)—— 会话目录按租户
+    分目录,同名 sid 跨租户并存合法;属主只含 sid 时,两租户同属主 ⇒ 关一个连坐另一个。
+    """
+    return str(getattr(log_, "tenant_id", "") or "")
 
 
 def _EVENT_TYPES_OR_ALL() -> tuple:
@@ -719,22 +972,22 @@ _EVIDENCE_EVENT_TYPES: tuple[str, ...] = (
 **只读派生索引**。**不订阅** ``tool.result``(属工具执行因果关系,由 S5-3 Audit 承担)。"""
 
 
-def _record_to(store: Any):
-    """总线 → 存储订阅(强同步即写即刷;其余批量落盘由 store 自管)。
+def _record_to(store: Any, session_id: Optional[str] = None):
+    """总线 → 存储订阅(**委托唯一实现** ``persistence.session_recorder``)。
 
-    强同步清单**唯一真源** = ``events.vocab.SYNC_TYPES``(ADR-019 P-3 收敛):
-    此前本函数内有一份 11 名硬编码副本,与 ``desktop/sessions.py`` 的同款副本
-    各成第二真源——新增强同步事件时漏改即**静默漂移**(``policy.updated`` 已实际
-    发生过一次)。本函数不再本地维护清单。
+    2026-09-21 R8 修:此前本函数**没有 sid 过滤** —— 共享总线上会把他会话事件串写进
+    本会话 JSONL(实测:A 文件里出现 B 的 ``session.created``)。桌面壳的同款订阅早有
+    该过滤并注明"过滤责任在订阅者",engine 侧长期缺失 ⇒ 同一横切关注点两处实现、
+    其中一处漏了关键判据。现两处都走 ``session_recorder``。
+
+    ``session_id`` 缺省(None/""):**不做过滤** —— 仅供单会话总线/测试替身使用;
+    生产调用点(见 ``build_runner_components``)必须传真实 sid,故此处对缺省发出告警
+    使"忘记传"可见(不再静默)。
     """
-    from pyharness.events.vocab import SYNC_TYPES
-
-    async def _record(type_: str, payload: Any) -> None:
-        # 瞬时类型(llm.chunk 等)以 dict 上总线,不得进入 append-only JSONL。
-        if not hasattr(payload, "model_dump_json"):
-            return
-        await store.append(payload, sync=type_ in SYNC_TYPES)
-    return _record
+    from pyharness.persistence import session_recorder
+    if not session_id:
+        log.warning("落盘订阅未提供 sid:跳过跨会话过滤(仅适用于单会话总线)")
+    return session_recorder(store, str(session_id or ""))
 
 
 # ---------------------------------------------------------------- runner seam
@@ -776,6 +1029,13 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
     loop = spine.loop
 
     async def run_for_task(task: Any) -> Any:
+        # GAP-13:攒批落盘定时器惰性启动(幂等)。放在此处而非装配段,是因为装配
+        # 段是同步函数、且此时可能尚无运行中的事件循环——本 seam 是 chat/run 的
+        # 唯一生产驱动点,循环必已就绪。
+        try:
+            await spine.start_flush_ticker()
+        except Exception as e:                 # noqa: BLE001 定时器起不来不阻断任务
+            log.warning("flush ticker 启动失败: %s", type(e).__name__)
         # 懒预载:created 已落后首跑前装载示例插件(util.now;EVT-106 首事件
         # 约束 → 不可在 open_session 后立即 append,故延迟到 submit 时刻)
         if not getattr(spine, "_plugins_ready", False):
@@ -797,7 +1057,19 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                 except Exception as e:         # noqa: BLE001 治理留痕失败不阻断任务
                     log.warning("policy.updated 装配留痕失败: %s", type(e).__name__)
             spine._policy_announced = True
-        mark = int(getattr(task, "enqueued_seq", 0) or 0)
+        # 崩溃遗留 job 的**事件级**恢复(B1/R24):补写 `job.failed(reason=crash)`。
+        # 放在本 seam(而非装配期):装配期 seq=0,append 会被 EVT-106 拒;此处是生产
+        # 唯一驱动点且会话已开启 —— 与上方策略留痕同款。幂等闸保证每 spine 恰一次;
+        # 失败只记日志不阻断任务(恢复属收尾)。
+        if not getattr(spine, "_jobs_recovered", False):
+            jobs = getattr(spine, "jobs", None)
+            rec = getattr(jobs, "recover", None)
+            if callable(rec):
+                try:
+                    await rec()
+                except Exception as e:             # noqa: BLE001 恢复失败不阻断
+                    log.warning("job 崩溃恢复失败: %s", type(e).__name__)
+            spine._jobs_recovered = True
         intent = str(getattr(task, "intent", "") or "").strip()
         env = _owned_task_message(log_, task)   # 严格归属窗口(P1-1)
         if env is None and intent:
@@ -812,7 +1084,25 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
         if env is None:
             raise PyHError("CYC-999", ctx={"hint": "runner 找不到对应 user.message 事件"})
         ag_ctx = await _agent_ctx_of(spine, env)
-        res = await loop.wake(env, ctx=ag_ctx)
+        # 当前任务关联(F044 弱耦合字符串引用;2026-09-21 R11-6 修):
+        # goal/todo 工具与 llm.chunk 出口经 ``ctx.task_id`` 取"当前任务",而此前
+        # **全库无任何写入点** ⇒ 恒 None ⇒ ``goal`` 的"所关联任务失败 → 目标状态
+        # 推导"(goal.py:357)与"关联任务"渲染**从未生效**。任务在同一会话内串行
+        # (单 running),故按任务边界设置/清除安全;每个会话(含子会话)各自持 ctx,
+        # 不跨会话串。异常/取消路径经 finally 还原。
+        prev_task_id = getattr(ag_ctx, "task_id", None)
+        ag_ctx.task_id = getattr(task, "id", None)
+        # KF-C(A4/R24):把**框架侧**"本轮来源"提到 ctx —— 到点触发那一轮此前**无任何
+        # 通道**告知模型"这是定时触发" ⇒ 模型只会复述任务状态("提醒已设好"),而不是
+        # 产出提醒本身。取值只取 `task.meta.source`(**受控**:由 schedule._fire 写入),
+        # 不取任何模型/工具文本(注入防御);由 system_prompt 的受控段渲染。
+        prev_src = getattr(ag_ctx, "turn_source", None)
+        ag_ctx.turn_source = _turn_source_of(task)
+        try:
+            res = await loop.wake(env, ctx=ag_ctx)
+        finally:
+            ag_ctx.task_id = prev_task_id
+            ag_ctx.turn_source = prev_src
         # F042/#7 自动标题:run 正常完成后命名一次(幂等;LLM 失败静默留空)
         if (res is not None and getattr(res, "reason", "") == "complete"
                 and not getattr(spine, "_auto_titled", False)):
@@ -822,6 +1112,9 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                     spine._auto_titled = True
             except Exception as e:             # noqa: BLE001 命名失败不阻断对话
                 log.debug("auto_title failed: %s", type(e).__name__)
+        # 证据归档**不在此处**:触发点已移到段生命周期(segment.end 订阅,见
+        # ``_evidence_producer``)。原因:本函数在五种终态中的三种(异常/预算/取消)
+        # 不执行到收尾,放这里会漏归档;且此处早于段关闭(旧 N3)。
         return res
 
     async def cancel_current(task_id: Optional[str] = None) -> None:
@@ -833,6 +1126,142 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                         cancel_current=cancel_current)
 
 
+# ---------------------------------------------------------------- 证据归档(GAP-8)
+async def archive_task_evidence(spine: EngineSpine, task_id: str,
+                                ctx: Any = None) -> Optional[str]:
+    """任务段治理证据归档——``EvidenceCollector`` 的**生产生产者**(GAP-8)。
+
+    修复前:``EvidenceCollector`` 已订阅真总线(4 类事件),但**唯一写点**
+    ``archive()`` 在全库**零调用** ⇒ ``evidence.archived`` 永不产生、索引恒空、
+    ``collect_for_task()`` 恒返回 ``()``。
+
+    **产生规则(冻结)**——这是一个**设计裁定**,不是"为了有调用点而调用":
+
+    1. **单位 = 任务段**(``task_id``)。段是回放/复算/预算审计的最小单位(F044),
+       也正是 ``collect_for_task`` 的聚合键;证据按段组织才有查询语义。
+    2. **触发条件 = 段内至少一条 ``decision.issued``**。治理证据回答的是"这次
+       授权/拒绝发生在什么上下文、依据什么、能否复核",没有治理决策的段**不归档**
+       ——"不发生"与"失败"是两件事,不为空段造工件。
+    3. **只存引用,不复制事件内容**(INV-G4/E1):refs 指向段锚 + 段内每条决策
+       (``decision_id``)与凭证(``receipt_id``)。事件日志仍是唯一真源。
+    4. **幂等**:同一 ``task_id`` 只归档一次——判据取自**日志重放**(已存在指向该
+       段锚的 ``evidence.archived`` 即跳过),故**重启后重放同样成立**,不依赖内存。
+    5. **降级**:治理层未接线(纯内存/单测)、无段锚、引用构造失败 ⇒ 静默跳过,
+       绝不阻断任务(证据是派生视图,不是主链前提)。
+
+    返回 ``evidence_id``;未归档(不满足条件)返回 ``None``。
+    """
+    log_ = getattr(spine, "session", None)
+    coll = getattr(getattr(spine, "governance", None), "evidence", None)
+    if log_ is None or coll is None:
+        return None
+    try:
+        events = list(log_.events_after(0))
+        seg_locator = f"{task_id}:seg"
+        # ① 幂等闸:日志重放判定(重启后仍成立)
+        for e in events:
+            if getattr(e, "type", None) != "evidence.archived":
+                continue
+            for r in (getattr(e, "payload", None) or {}).get("refs") or []:
+                if (isinstance(r, dict) and r.get("kind") == "segment"
+                        and str(r.get("locator")) == seg_locator):
+                    return None
+        # ② 段窗口:本任务 segment.start 之后的全部事件属该段
+        start = next((int(e.seq) for e in events
+                      if getattr(e, "type", None) == "segment.start"
+                      and str((getattr(e, "payload", None) or {})
+                              .get("task_id") or "") == str(task_id)), None)
+        if start is None:
+            return None
+        seg = [e for e in events if int(getattr(e, "seq", 0) or 0) >= start]
+        decisions = [e for e in seg
+                     if getattr(e, "type", None) == "decision.issued"]
+        if not decisions:
+            return None                       # 无治理事实:不归档(非失败)
+        receipts = [e for e in seg
+                    if getattr(e, "type", None) == "receipt.emitted"]
+        denied = [d for d in decisions
+                  if str((getattr(d, "payload", None) or {})
+                         .get("verdict") or "") == "reject"]
+        refs: list[dict] = [{"kind": "segment", "locator": seg_locator}]
+        refs += [{"kind": "decision_id",
+                  "locator": str((getattr(d, "payload", None) or {})
+                                 .get("decision_id") or "")}
+                 for d in decisions]
+        refs += [{"kind": "receipt_id",
+                  "locator": str((getattr(r, "payload", None) or {})
+                                 .get("receipt_id") or "")}
+                 for r in receipts]
+        refs = [r for r in refs if r["locator"]]          # 空 locator 不合法,剔除
+        # 终态标量(N3/M5-3):``task.completed`` / ``task.failed`` **先于**
+        # ``segment.end`` 落盘,故此刻可读。以**标量并入 claim** —— 不新增 payload
+        # 字段(INV-G4「只存引用」;payload schema 变更属 H-3,不在本轮范围)。
+        term = _terminal_state_of(seg, str(task_id))
+        ev = await coll.archive(
+            claim=f"task {task_id} 的治理事实可追溯(终态={term})",
+            refs=refs, ctx=ctx or SimpleNamespace(session=log_),
+            summary=(f"终态={term};决策 {len(decisions)} 条(拒绝 {len(denied)})、"
+                     f"凭证 {len(receipts)} 条"))
+        return getattr(ev, "evidence_id", None)
+    except Exception:                          # noqa: BLE001 派生视图:绝不阻断主链
+        log.warning("证据归档跳过 task=%s", task_id, exc_info=True)
+        return None
+
+
+def _terminal_state_of(seg_events: list, task_id: str) -> str:
+    """段内终态标量(供 claim 标注;N3/M5-3)。
+
+    ``task.completed`` → ``success``;``task.failed`` → ``cancelled`` 或
+    ``error:<code>``;两者皆无(段被外力关闭)→ ``unknown``。
+    """
+    for e in reversed(seg_events):
+        t = getattr(e, "type", None)
+        if t == "task.completed":
+            return "success"
+        if t == "task.failed":
+            p = getattr(e, "payload", None) or {}
+            if str(p.get("reason") or "") == "cancelled":
+                return "cancelled"
+            return f"error:{p.get('error') or 'unknown'}"
+    return "unknown"
+
+
+def _evidence_producer(spine: EngineSpine):
+    """段关闭时的证据生产者回调(**N3/M5-3 的触发点**)。
+
+    **为什么不放在 ``run_for_task`` 的函数体里**:该函数跑在独立子任务中
+    (``task_queue._run_task`` 的 ``create_task``),五种终态里有三种(异常/预算/取消)
+    会让它**不执行到收尾**⇒ 段内有治理决策却零证据(实测 3/5)。而 ``segment.end``
+    由 ``_run_task`` 自身 ``finally`` 中的 ``close_segment`` 落盘,``_run_task``
+    **不被取消**(取消只作用于子任务)⇒ 实测 **5/5** 落盘。挂到该事件即继承此保证,
+    并天然消除 N3(生产者不再早于段关闭)。
+
+    幂等由 ``archive_task_evidence`` 内的日志重放闸保证;失败在该函数内吞掉
+    (派生视图不阻断主链),故本回调不会影响段关闭。
+    """
+    async def _on_segment_end(type_: str, env: Any) -> None:
+        if getattr(env, "type", None) != "segment.end":
+            return
+        task_id = str((getattr(env, "payload", None) or {}).get("task_id") or "")
+        if not task_id:
+            return
+        await archive_task_evidence(spine, task_id)
+    return _on_segment_end
+
+
+def _turn_source_of(task: Any) -> Optional[str]:
+    """本轮**框架侧来源**标记(KF-C/A4):只取 ``task.meta["source"]``,其余一律 None。
+
+    受控取值(非模型文本):``schedule._fire`` 写入 ``{"source": "schedule:<name>"}``;
+    普通用户轮无该键 → None(提示词里不出现该段)。
+    """
+    meta = getattr(task, "meta", None) or {}
+    if not isinstance(meta, dict):
+        return None
+    src = str(meta.get("source") or "").strip()
+    return src or None
+
+
 async def _agent_ctx_of(spine: EngineSpine, env: Any) -> Any:
     """agent_loop 消费的 ctx = create_agent 装配的 Agent.ctx(spine 绑定)。
 
@@ -840,7 +1269,8 @@ async def _agent_ctx_of(spine: EngineSpine, env: Any) -> Any:
     create_agent 构造并绑定 loop。env 仅作输入(loop.wake 已携带)。
     首建 agent 时顺带激活 storage 能力(spill 定位器,幂等)。
     """
-    sid = str(getattr(env, "session_id", "") or spine.session.session_id or "")
+    sid = str(getattr(env, "session_id", "") or getattr(spine.session, "sid", "")
+              or "")
     ag = spine.active_agents.get(sid) if hasattr(spine, "active_agents") else None
     if ag is None:
         ag = create_agent(sid, spine, spine.settings or _cfg_of(spine))
@@ -905,7 +1335,7 @@ async def _activate_session_caps(ag: Any, spine: Any) -> None:
         db = Path(str(getattr(getattr(cfg, "storage", None), "db_path",
                               "~/.pyharness/index.db"))).expanduser()
         sid = str(getattr(ag, "session_id", "")
-                  or getattr(spine.session, "session_id", ""))
+                  or getattr(spine.session, "sid", ""))
         idx = SessionQueryIndex(db, sources={sid: spine.session})
         await idx.enter(ag.ctx)                    # 开库建表 + 总线订阅
         await idx.announce(ag.ctx)                 # 注册 session.fts_query + 挂载
@@ -927,20 +1357,36 @@ def _cfg_of(spine: Any) -> Any:
 
 # ---------------------------------------------------------------- 顶层装配
 async def assemble_real_engine(cfg: Any, *, sid: str,
-                               sessions_dir: Path) -> EngineContext:
-    """一键真实引擎(desktop create_message 用)。
+                               sessions_dir: Path,
+                               channel: Any = CHANNEL_UNDECLARED,
+                               tenant_id: Optional[str] = None) -> EngineContext:
+    """一键真实引擎 —— **演示 / 探针 / e2e 装配入口**。
+
+    **生产外壳不走本函数**（2026-09-21 R18 更正）：CLI/ACP 走 ``attach_engine_to_ctx``，
+    Desktop/服务层走 ``build_runner_components``（per-session 懒装配，复用 manager 已
+    open 的 log_/bus/store）。本函数在 ``pyharness/`` 内**零调用者**，实际使用方是
+    ``scripts/demo_*`` / ``scripts/probe_*`` / ``scripts/e2e_engine.py``（F-08 已登记
+    "死装配"；原 docstring 称 "desktop create_message 用" 与事实不符，本次更正）。
 
     返回 ctx:与 cli.assemble_ctx 同形状(session/bus/llm/scope/task_queue/
     make_runner)+ engine 脊柱。顺序:先 build_spine(会话级共享计数器就绪)→
     register_default_llm(counters=spine.counters)(适配器计量与 scope 预算闸
     同源)→ session.created 首事件、enter/close 生命周期由调用方负责。
-    """
-    from pyharness.core.task_queue import TaskQueue
+    生产路径同样满足"同源"，但**靠另一条机制**：适配器构造时未注入 counters ⇒
+    调用期回落 ``ctx.counters``，而 ``create_agent`` 无条件把 ``spine.counters``
+    播到 agent ctx（``core/agent.py``）。
 
-    spine = await build_spine(cfg, sid=sid, sessions_dir=sessions_dir)
+    channel(GAP-11):外壳身份声明。**生产外壳必须传**;未声明时该引擎的任何
+    工具授权都会 APR-503 fail-closed。
+    """
+    from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
+
+    spine = await build_spine(cfg, sid=sid, sessions_dir=sessions_dir,
+                              channel=channel, tenant_id=tenant_id)
     register_default_llm(cfg, counters=spine.counters)
     runner = make_runner(spine)
-    queue = TaskQueue(session=spine.session, runner=runner)
+    queue = TaskQueue(session=spine.session, runner=runner,
+                      **queue_kwargs_of(cfg))      # F043 队深由装配层注入(N1)
     ctx = EngineContext(
         settings=cfg, bus=spine.bus, session=spine.session,
         llm=spine.llm, scope=spine.scope, loop=spine.loop,
@@ -968,13 +1414,13 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
     避免轻量门面(ctx.task_queue=None / runner=None)实际不可用。调用方可传
     已 open 的 store(若总线落盘已有 owner,则 attach_persistence=False)。
     """
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 
     spine = build_runner_components(
         cfg, log_=log_, bus=bus or getattr(ctx, "bus", None),
         sessions_dir=sessions_dir,
         store=store if store is not None else getattr(log_, "_persistence", None),
-        attach_persistence=False)
+        attach_persistence=False, channel=channel)
     register_default_llm(cfg, counters=spine.counters)   # 幂等;适配器先注则跳过
     if preload:
         try:
@@ -993,11 +1439,12 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
     ctx.search_backend = getattr(spine, "search_backend", None)
     ctx.approval = spine.approval
     try:
-        spine.approval._channel = channel          # None 也必须显式覆盖 headless
+        spine.approval.set_default_channel(channel)   # N5:归一化覆写,不直写 _channel
     except Exception:                              # noqa: BLE001 只读门面:尽力
         pass
     ctx.task_runner = runner
     ctx.make_runner = lambda: runner
-    ctx.task_queue = TaskQueue(session=log_, runner=runner)
+    ctx.task_queue = TaskQueue(session=log_, runner=runner,
+                               **queue_kwargs_of(cfg))   # F043 队深同源注入
     await activate_orchestration(spine, task_queue=ctx.task_queue)
     return spine

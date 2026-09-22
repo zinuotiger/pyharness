@@ -92,6 +92,8 @@ log = logging.getLogger("pyharness.spill")
 # ------------------------------------------------------------------ 常量
 SUMMARY_PREVIEW: int = 500          # 摘要/引用 preview = 头 500 字符(固定)
 DEFAULT_MAX_PER_FILE: int = 10_485_760   # 默认 10MB(storage.spill.max_per_file_bytes)
+# 会话 spill 区**总量**上限(R24 接线:`storage.spill.max_per_session_mb`;此前零读取者)
+DEFAULT_MAX_PER_SESSION_MB: int = 100
 DEFAULT_LIMIT: int = 200            # read 默认行数(1-1000)
 MAX_READ_LIMIT: int = 1000          # read 单次上限行(schema 同步锁死)
 MODE_PRIVATE: int = 0o600           # 私有目录/文件权限(spill 区 600)
@@ -173,6 +175,37 @@ def _max_per_file(ctx: Any) -> int:
         return int(v)
     except (TypeError, ValueError):
         return DEFAULT_MAX_PER_FILE
+
+
+def _max_per_session_bytes(ctx: Any) -> int:
+    """会话 spill 区**总量**上限(字节):`storage.spill.max_per_session_mb`(默认 100MB)。
+
+    R24 接线:该键此前**零读取者**(L-20 死配置)⇒ 文档承诺的"会话总量 100MB 闸"在
+    实现里不存在,只有**单文件** 10MB 闸 ⇒ 同一会话可反复 spill 撑爆磁盘。
+    """
+    v = _cfg(_cfg_holder(ctx), "storage.spill.max_per_session_mb",
+             DEFAULT_MAX_PER_SESSION_MB)
+    try:
+        mb = int(v)
+    except (TypeError, ValueError):
+        mb = DEFAULT_MAX_PER_SESSION_MB
+    return max(0, mb) * 1024 * 1024
+
+
+def _session_dir_bytes(d: Any) -> int:
+    """会话 spill 目录内现有字节数(只读;不存在 → 0,不可读项跳过不放大)。"""
+    total = 0
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return 0
+    for p in entries:
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _redact(ctx: Any, text: str) -> str:
@@ -289,10 +322,22 @@ async def put(text: str, kind: str = "output", ctx: Any = None) -> dict:
         raise_code("PERS-221", hint="put 仅接受 str(Consumer 须先 render_result_text)",
                    advice=_WRITE_FAIL_ADVICE)
     limit = _max_per_file(ctx)
-    if len(text) > limit:                        # 单文件 ≤10MB,超限拒写
-        raise_code("PERS-223", chars=len(text), max=limit,
+    if len(text.encode("utf-8")) > limit:        # 单文件 ≤10MB(**字节**,与键名同口径)
+        raise_code("PERS-223", bytes=len(text.encode("utf-8")), max=limit,
                    advice=_TOO_BIG_ADVICE)
     d = await enter(ctx)                         # 惰性建目录(幂等;失败 PERS-221)
+    # 会话总量闸(R24 接线 `storage.spill.max_per_session_mb`):单文件闸挡不住
+    # "同一会话反复 spill" ⇒ 此处按**目录现有字节 + 本次**判上限,超则拒写。
+    cap = _max_per_session_bytes(ctx)
+    if cap > 0:
+        incoming = len(text.encode("utf-8"))
+        if _session_dir_bytes(d) + incoming > cap:
+            raise_code("PERS-223", op="per_session",
+                       session_bytes=_session_dir_bytes(d), incoming=incoming,
+                       max=cap,
+                       advice="会话 spill 总量超上限"
+                              "(storage.spill.max_per_session_mb);清理会话区内"
+                              " spill-*.txt 或调大该键")
     text = _redact(ctx, text)                    # 出口脱敏(INV-09,spill=明文出口)
     name = f"{FILE_PREFIX}{uuid.uuid4().hex[:8]}.txt"
     tmp = d / (name + ".tmp")                    # 临时文件:坏行不落地(rename 前不可见)

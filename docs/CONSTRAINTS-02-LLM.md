@@ -6,14 +6,14 @@
 ## 1. 模型接入
 | # | 约束 | 说明 |
 |---|------|------|
-| L-01 | 主模型 DeepSeek | OpenAI 兼容格式,openai SDK,base_url=https://api.deepseek.com |
+| L-01 | 主模型 DeepSeek | OpenAI **兼容格式**（wire 协议同构），**不用 `openai` SDK**——传输由自研 `httpx` 适配器承载（见 `llm.py` 偏离 2，与 CONSTRAINTS-01 H-02 一致）；`base_url=https://api.deepseek.com`，`model=deepseek-chat` |
 | L-02 | 备用模型 qwen-max | 同一客户端换 base_url+model 实现降级,禁止第二套客户端逻辑 |
 | L-03 | API key 走环境变量 | 禁止硬编码;命名 DEEPSEEK_API_KEY / QWEN_API_KEY |
 
 ## 2. 调用纪律
 | # | 约束 | 说明 |
 |---|------|------|
-| L-04 | 超时强制 | 连接超时与读超时分开设;LLM 调用无超时 = 不合格 |
+| L-04 | 超时强制 | **三档**分开设:`llm.timeout.connect_s` / `first_token_s` / `total_s`（10/60/180，强制 connect<first<total，违者 CFG-601）;LLM 调用无超时 = 不合格 |
 | L-05 | 重试有界 | 指数退避 + 次数上限;只对幂等请求重试 |
 | L-06 | 降级触发明确 | 触发: 超时/限流(429)/5xx;切换粒度=请求级;回切策略文档化 |
 | L-07 | 参数先验后跑 | 模型输出参数必须 pydantic 校验后才执行工具 |
@@ -23,7 +23,7 @@
 | # | 约束 | 说明 |
 |---|------|------|
 | L-09 | 单任务预算检查 | 超预算中止循环,返回用户"成本超限" |
-| L-10 | 最大轮数上限 | 循环轮数 ≤ 配置值(默认 10),防死循环烧钱 |
+| L-10 | 最大轮数上限 | 循环轮数 ≤ 配置值(默认 30;CFG §3.1 L1 权威),防死循环烧钱 |
 
 ## 4. 如果违反会发生什么
 - 违反 L-04(无超时): 模型 API 卡住 → 线程/协程耗尽 → 整个 agent 假死
@@ -73,7 +73,7 @@
 | 恢复回切 | qwen 成功后主模型恢复 | 下个请求回主模型 |
 
 ## 8. 配置联动
-本文件约束的阈值(超时/重试次数/预算)全部走 CFG.md 配置项,禁止硬编码在 llm 模块内。配置键: llm.timeout.connect / llm.timeout.read / llm.retry.max_attempts / llm.budget.per_task / llm.max_turns。
+本文件约束的阈值(超时/重试次数/预算)全部走 CFG.md 配置项,禁止硬编码在 llm 模块内。配置键(真名以 `CFG.md §3` 为准): `llm.timeout.connect_s` / `llm.timeout.first_token_s`·`llm.timeout.total_s` / `llm.retry.attempts` / `budget.task.max_cost_yuan` / `loop.max_turns`。
 
 
 ## 9. 模型输出校验链(零信任落地清单)

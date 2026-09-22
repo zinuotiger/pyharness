@@ -301,7 +301,7 @@ async def test_agent_loop_to_schedule_tool_closed_loop(tmp_path):
     llm_mod.adapters[cfg.llm.model] = fake
     try:
         ctx = await assemble_real_engine(cfg, sid="s-toolschedloop1",
-                                         sessions_dir=tmp_path / "sessions")
+                                         sessions_dir=tmp_path / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)

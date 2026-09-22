@@ -648,3 +648,279 @@ async def test_same_session_pending_slot_not_treated_as_collision():
         t.cancel()
         await asyncio.gather(t, return_exceptions=True)
         await _settle_tasks()
+
+
+# ============ R12-3:审批 → 队列联动必须**真挂起**(事件宣称 == 运行时事实)
+async def _pending_provider(queue=None):
+    """建 (session, queue, provider, 触发未决审批的 task)。"""
+    import asyncio as _a
+    from types import SimpleNamespace as _SN
+
+    from pyharness.config import load_settings
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.session import SessionLog
+    from pyharness.core.task_queue import TaskQueue
+
+    s = SessionLog(sid="s-r123-000001")
+    await s.append("session.created", {"title": "", "model": "m"}, actor="system")
+    q = queue if queue is not None else TaskQueue(s, runner=None)
+    prov = ApprovalProvider(session=s, bus=None, config=load_settings(),
+                            channel="desktop", queue_getter=lambda: q)
+    ctx = _SN(channel="desktop", session=s)
+    call = _SN(name="fs.write_file", call_id="c1", danger="high", raw_args={})
+    task = _a.create_task(prov.request(call, "path=note.txt", ctx))
+    for _ in range(300):
+        if prov._pending:
+            break
+        await _a.sleep(0.01)
+    assert prov._pending, "前置:应有未决审批"
+    return s, q, prov, task
+
+
+async def test_pending_approval_really_pauses_queue():
+    """**修复前失败**:审批只落 `queue.suspended` 事件,**从不驱动队列** ⇒
+    `queue.status().paused` 恒 False(事件宣称与运行时事实不一致;
+    `delete_session` 的 BUSY 守卫在等审批期间因此失效)。"""
+    s, q, prov, task = await _pending_provider()
+    try:
+        types = [e.type for e in s.events_after(0)]
+        assert types.count("queue.suspended") == 1, "挂起事件恰一条"
+        assert q.status().paused is True, "队列必须**真挂起**(与事件一致)"
+
+        aid = next(iter(prov._pending))
+        prov.approve(aid, by="desktop")
+        await asyncio.wait_for(task, timeout=5)
+        types = [e.type for e in s.events_after(0)]
+        assert types.count("queue.resumed") == 1, "恢复事件恰一条(无双写)"
+        assert q.status().paused is False, "末决必须真恢复"
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+async def test_pending_approval_blocks_next_task_until_settled():
+    """**挂起的行为价值**:等审批期间**排队任务不得开跑**;裁决后自动接续。
+
+    修复前:队列未真挂起(仅事件),该保护**只靠"单 running"偶然成立**;本用例把它
+    变成可断言事实(修复前会看到 t-1 在审批未决时就执行完)。
+    """
+    import asyncio as _a
+
+    from pyharness.core.task_queue import TaskQueue
+
+    ran: list[str] = []
+
+    class _Runner:
+        async def run_for_task(self, task):
+            ran.append(task.id)
+            return f"ok:{task.id}"
+
+        async def cancel_current(self, task_id):    # noqa: ARG002
+            return None
+
+    async def _build():
+        from pyharness.core.session import SessionLog
+        s = SessionLog(sid="s-r123-000002")
+        await s.append("session.created", {"title": "", "model": "m"},
+                       actor="system")
+        return s, TaskQueue(s, runner=_Runner())
+
+    s, q = await _build()
+    _s, _q, prov, task = await _pending_provider(queue=q)
+    try:
+        t1 = await q.submit("排队任务")
+        waiter = _a.create_task(q.wait_for(t1))
+        for _ in range(60):                        # 给泵一个机会(它应因挂起而不弹)
+            await _a.sleep(0.01)
+        assert ran == [], f"审批未决期间不得开跑排队任务,实际 {ran}"
+        assert waiter.done() is False
+
+        aid = next(iter(prov._pending))
+        prov.approve(aid, by="desktop")
+        await _a.wait_for(task, timeout=5)
+        r = await _a.wait_for(waiter, timeout=5)
+        assert r.ok and ran == [t1], "裁决后应自动接续执行"
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+# ============ R12-4:在途等审批 × 取消任务(确定性 gate,无随机 sleep 兜底)
+async def test_cancel_inflight_task_with_pending_approval():
+    """① 审批→denied(APR-502) ② 队列→resumed ③ 等待者→释放 ④ suspended/resumed 严格配对。
+
+    并核对维度:task_id 归属、approval_id(=请求事件 seq)、终态唯一、事件顺序、持久化。
+    """
+    import asyncio as _a
+    from types import SimpleNamespace as _SN
+
+    from pyharness.config import load_settings
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.session import SessionLog
+    from pyharness.core.task_queue import TaskQueue
+
+    s = SessionLog(sid="s-r124-000001")
+    await s.append("session.created", {"title": "", "model": "m"}, actor="system")
+    prov = ApprovalProvider(session=s, bus=None, config=load_settings(),
+                            channel="desktop")
+    entered = _a.Event()
+    outcome: dict = {}
+
+    class _Runner:
+        """模拟 executor 的审批步:真调 provider.request 后**阻塞在裁决等待**。"""
+
+        async def run_for_task(self, task):
+            ctx = _SN(channel="desktop", session=s, approval=prov)
+            call = _SN(name="fs.write_file", call_id="c1", danger="high",
+                       raw_args={})
+            entered.set()                       # gate:已进入审批等待
+            outcome["verdict"] = await prov.request(call, "path=note.txt", ctx)
+            return "unreached"                  # 取消路径不会到这里
+
+        async def cancel_current(self, task_id):   # noqa: ARG002
+            return None
+
+    q = TaskQueue(s, runner=_Runner())
+    prov._queue_getter = lambda: q               # 与生产同形的接线
+    tid = await q.submit("在途等审批")
+    waiter = _a.create_task(q.wait_for(tid))
+    await _a.wait_for(entered.wait(), timeout=3)     # gate 同步点(非概率)
+    for _ in range(300):
+        if prov._pending:
+            break
+        await _a.sleep(0.01)
+    assert prov._pending, "前置:审批未决"
+    assert q.status().paused is True, "前置:队列已因审批挂起"
+    aid = next(iter(prov._pending))
+    req = prov._pending[aid]
+
+    # ---- 取消在途任务
+    assert await q.cancel(tid, by="test") is True
+    r = await _a.wait_for(waiter, timeout=5)
+
+    # ③ 等待者释放(task 级 cancelled 终态)
+    assert r.ok is False and r.code == "cancelled", r
+    # ① 审批置 denied(APR-502),无悬挂 Future
+    assert req.state == "denied" and req.by == "system", (req.state, req.by)
+    assert prov.pending_count() == 0
+    # ② 队列恢复(不得卡在挂起态)
+    assert q.status().paused is False and q.status().running is None
+    # ④ 事件严格配对 + 终态唯一 + 顺序
+    types = [e.type for e in s.events_after(0)]
+    assert types.count("queue.suspended") == types.count("queue.resumed") == 1, types
+    assert types.index("queue.suspended") < types.index("queue.resumed"), types
+    assert types.count("task.failed") == 1 and "task.completed" not in types, types
+    # approval_id 与请求事件 seq 对齐(identity 来自真实事件,非新造 uuid)
+    assert isinstance(aid, int) and aid >= 1
+    assert any(e.seq == aid and e.type == "approval.requested"
+               for e in s.events_after(0)), "approval_id 应等于 approval.requested 的 seq"
+    # 持久化:终态可在日志重放中看到(内存日志即真源投影)
+    replay = [e.type for e in s.events_after(0)]
+    assert "task.enqueued" in replay and "task.started" in replay
+
+
+# ============ R12-5:审批 TTL 超时 × 队列恢复(同步恢复路径 + 配对)
+async def test_approval_ttl_timeout_resumes_queue_and_releases_waiter():
+    """TTL 到点无人裁决 → denied(timeout) + 队列恢复 + 等待者释放 + 事件配对。
+
+    覆盖 R12-3 新增的**同步**恢复路径(`_maybe_resume_soft` → `_spawn(queue.resume)`)。
+    """
+    import asyncio as _a
+    from types import SimpleNamespace as _SN
+
+    from pyharness.config import load_settings
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.session import SessionLog
+    from pyharness.core.task_queue import TaskQueue
+
+    s = SessionLog(sid="s-r125-000001")
+    await s.append("session.created", {"title": "", "model": "m"}, actor="system")
+    prov = ApprovalProvider(session=s, bus=None, config=load_settings(),
+                            channel="desktop")
+    entered = _a.Event()
+
+    class _Runner:
+        async def run_for_task(self, task):
+            ctx = _SN(channel="desktop", session=s, approval=prov)
+            call = _SN(name="fs.write_file", call_id="c1", danger="high",
+                       raw_args={})
+            entered.set()
+            return await prov.request(call, "path=note.txt", ctx,
+                                      ttl_ms=80)     # 极短 TTL:到点自动 timeout
+
+        async def cancel_current(self, task_id):   # noqa: ARG002
+            return None
+
+    q = TaskQueue(s, runner=_Runner())
+    prov._queue_getter = lambda: q
+    tid = await q.submit("等审批超时")
+    waiter = _a.create_task(q.wait_for(tid))
+    await _a.wait_for(entered.wait(), timeout=3)
+    for _ in range(300):
+        if prov._pending:
+            break
+        await _a.sleep(0.01)
+    assert q.status().paused is True, "前置:队列已挂起"
+
+    r = await _a.wait_for(waiter, timeout=6)     # TTL 到点后任务应正常收尾
+    assert r.ok is True, r                        # 裁决=timeout → executor 解读为不执行
+
+    assert prov.pending_count() == 0
+    assert q.status().paused is False, "TTL 超时必须恢复队列"
+    types = [e.type for e in s.events_after(0)]
+    assert types.count("queue.suspended") == types.count("queue.resumed") == 1, types
+    assert types.count("approval.denied") == 1 or types.count("approval.timeout") == 1, types
+
+
+# ============ R12-6:审批的队列联动必须**按会话隔离**(共享总线/同进程多会话)
+async def test_approval_queue_link_is_per_session():
+    """A 的审批只挂起**A 的队列**;B 的队列不受影响(反之亦然)。
+
+    校验 R12-3 新接线的作用域:provider 逐个会话持有 `queue_getter` ⇒ 挂起/恢复
+    不得跨会话串场(否则一个会话等审批会把另一个会话的队列也冻住)。
+    """
+    import asyncio as _a
+    from types import SimpleNamespace as _SN
+
+    from pyharness.config import load_settings
+    from pyharness.core.approval import ApprovalProvider
+    from pyharness.core.session import SessionLog
+    from pyharness.core.task_queue import TaskQueue
+
+    cfg = load_settings()
+    sA = SessionLog(sid="s-r126-a00001")
+    sB = SessionLog(sid="s-r126-b00002")
+    for s in (sA, sB):
+        await s.append("session.created", {"title": "", "model": "m"},
+                       actor="system")
+    qA = TaskQueue(sA, runner=None)
+    qB = TaskQueue(sB, runner=None)
+    provA = ApprovalProvider(session=sA, bus=None, config=cfg,
+                             channel="desktop", queue_getter=lambda: qA)
+    entered = _a.Event()
+
+    async def _ask(prov, s, tag):
+        ctx = _SN(channel="desktop", session=s)
+        call = _SN(name="fs.write_file", call_id=f"c-{tag}", danger="high",
+                   raw_args={})
+        entered.set()
+        return await prov.request(call, "path=note.txt", ctx)
+
+    tA = _a.create_task(_ask(provA, sA, "a"))
+    await _a.wait_for(entered.wait(), timeout=3)
+    for _ in range(300):
+        if provA._pending:
+            break
+        await _a.sleep(0.01)
+    assert provA._pending and provA._suspended is True
+    # A 挂起; B 必须**不受影响**
+    assert qA.status().paused is True, "A 的队列应挂起"
+    assert qB.status().paused is False, "B 的队列不得被 A 的审批挂起"
+    assert [e.type for e in sB.events_after(0)].count("queue.suspended") == 0, \
+        "B 的日志不得出现 queue.suspended(跨会话串场)"
+
+    aid = next(iter(provA._pending))
+    provA.approve(aid, by="desktop")
+    await _a.wait_for(tA, timeout=5)
+    assert qA.status().paused is False and qB.status().paused is False
+    assert [e.type for e in sB.events_after(0)].count("queue.resumed") == 0

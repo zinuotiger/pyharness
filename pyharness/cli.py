@@ -68,14 +68,13 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import signal
 import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from pyharness import config as config
 from pyharness.core import commands
@@ -536,8 +535,8 @@ def assemble_ctx(cfg: Any, *, session: Any = None) -> SimpleNamespace:
     """轻量门面装配(见偏离 11):settings/bus/session/task_queue/approval/shell
     (退出旗标)/storage/handlers(单发处理器注入面)。引擎脊柱八模块注入点保留,
     同批后续任务在此接线。"""
-    from pyharness.bus import EventBus
-    bus = EventBus()
+    from pyharness.bus import EventBus, bus_kwargs_of
+    bus = EventBus(**bus_kwargs_of(cfg))     # F005 背压阈值由装配层注入(N1)
     ns = SimpleNamespace(
         settings=cfg,
         bus=bus,
@@ -563,8 +562,10 @@ def _wire_queue(ns: SimpleNamespace) -> None:
     """任务队列接线(执行器注入面:runner=None 时任务按 CYC-999 快速失败,防
     S-1 伪造已执行;agent_loop.run_for_task 由引擎装配注入)。"""
     from pyharness.core.approval import ApprovalProvider
-    from pyharness.core.task_queue import TaskQueue
-    ns.task_queue = TaskQueue(session=ns.session, runner=None)
+    from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
+    ns.task_queue = TaskQueue(
+        session=ns.session, runner=None,
+        **queue_kwargs_of(getattr(ns, "settings", None)))  # F043 队深同源注入
     try:
         ns.approval = ApprovalProvider(session=ns.session, bus=ns.bus)
     except Exception:                          # noqa: BLE001 审批服务装配失败不阻断
@@ -612,24 +613,22 @@ def _sessions_path(cfg: Any) -> Path:
 
 
 def _attach_log_persistence(bus: Any, log_: Any, store: Any) -> None:
-    """总线 → 存储订阅(事件一入内存即入真源队列;tests/unit/test_agent.py
-    _wired_log 同款 idiom,owner="persistence" 与外壳渲染订阅隔离)。
+    """总线 → 存储订阅(**委托唯一实现** ``persistence.session_recorder``)。
 
-    落盘双速:强同步三类/显式 sync 经 store.append(sync=True) 即写即刷;普通事件
-    入攒批,由后续强同步点 flush(seq) 或收尾全量 flush 落盘(F011 双速写)。
+    2026-09-21 R9:此前这里是**第三份**各自实现 —— 属主固定 ``"persistence"``(多会话
+    同总线时"按属主摘除"会互相误伤)且**无 sid 过滤**(总线上他会话事件会被写进本会话
+    store,同 R8-1 在 engine 侧修掉的缺陷)。现统一:属主 ``persistence:{sid}`` +
+    过滤在 ``session_recorder`` 单点。
+
     SessionLog 构造时 bus=None(open_session 面),装配后回填 _bus 并先订后写。
     """
     from pyharness.events import EVENT_TYPES
-    from pyharness.events.vocab import SYNC_TYPES as _EVT_SYNC
+    from pyharness.persistence import session_recorder
 
-    async def _record(type_: str, payload: Any) -> None:
-        env = payload                          # SessionLog._dispatch 以 Envelope 为载荷
-        if not hasattr(env, "model_dump_json"):
-            return                             # 瞬时 llm.chunk:仅总线,禁落盘
-        await store.append(env, sync=type_ in _EVT_SYNC)
-
-    for t in EVENT_TYPES:                      # 词表 74 类型逐类型订阅(精确命中)
-        bus.subscribe(t, _record, owner="persistence")
+    sid = str(getattr(log_, "sid", "") or "")
+    record = session_recorder(store, sid)
+    for t in EVENT_TYPES:                      # 词表逐类型订阅(精确命中)
+        bus.subscribe(t, record, owner=f"persistence:{sid}")
     log_._bus = bus                            # 回填总线:append 即分发即落盘
 
 
@@ -637,8 +636,8 @@ async def _open_log(cfg: Any, sid: str, bus: Any) -> Any:
     """重放重建会话(核心路径:store 追加句柄 + open_session 全量回放 + 总线落盘
     订阅;坏行由回放记跳 PERS-201 隔离,不中断)。"""
     from pyharness.core.session import open_session
-    from pyharness.persistence import open_store
-    store = open_store(sid, dir=_sessions_path(cfg))
+    from pyharness.persistence import flush_kwargs_of, open_store
+    store = open_store(sid, dir=_sessions_path(cfg), **flush_kwargs_of(cfg))
     log_ = await open_session(sid, store)
     _attach_log_persistence(bus, log_, store)
     return log_
@@ -648,9 +647,9 @@ async def _new_session(cfg: Any, bus: Any) -> Any:
     """开新会话:随机 sid → store → session.created 首事件(seq=1,EVT-106 引导);
     先接总线落盘订阅再写首事件(created 亦入真源)。"""
     from pyharness.core.session import open_session
-    from pyharness.persistence import open_store
+    from pyharness.persistence import flush_kwargs_of, open_store
     sid = f"s-{uuid.uuid4().hex[:12]}"          # Envelope session_id min_length=8
-    store = open_store(sid, dir=_sessions_path(cfg))
+    store = open_store(sid, dir=_sessions_path(cfg), **flush_kwargs_of(cfg))
     log_ = await open_session(sid, store)       # 空日志回放(文件刚建)
     _attach_log_persistence(bus, log_, store)
     await log_.append("session.created",
@@ -660,66 +659,97 @@ async def _new_session(cfg: Any, bus: Any) -> Any:
 
 
 async def _flush_session(sh: ShellCtx) -> None:
-    """收尾落盘:会话存储攒批全量 flush(强同步锚点外的普通事件在退出前落盘;
-    F011 双速写——真源不可丢)。引擎定时 flush 任务装配后此调用仍幂等安全。"""
+    """收尾落盘 + 资源回收:会话存储攒批全量 flush、引擎外部资源 close、会话门面
+    ``shutdown_all``(F011 双速写——真源不可丢;INV-07 会话锁随句柄释放)。
+
+    2026-09-21 R14-13:两步**相互独立**,不得用一个的前置条件短路另一个。此前在
+    "``ctx.session`` 不是会话日志(无 ``_persistence``)"时**直接 return**,而 ACP 外壳
+    的 ``ctx.session`` 是 ``DesktopSessionManager``(其真源在各 store 里)⇒ **spine.close()
+    与 ``shutdown_all()`` 全被跳过**:ACP 退出时既不 flush 也不关 store(61 个非强同步
+    事件类型如 ``agent.message``/``tool.result``/``llm.response`` 仍在攒批缓冲里,
+    进程退出即丢),与 chat/run 形态(``ctx.session`` 是 SessionLog)行为不一致。
+    """
     log_ = getattr(sh.ctx, "session", None)
-    if log_ is None:
-        return
-    persist = getattr(log_, "_persistence", None)
+    persist = getattr(log_, "_persistence", None) if log_ is not None else None
     fl = getattr(persist, "flush", None)
-    if not callable(fl):
-        return
-    try:
-        res = fl()
-        if hasattr(res, "__await__"):
-            await res
-    except Exception:                          # noqa: BLE001 收尾刷盘失败不掩盖退出码
-        log.warning("会话收尾 flush 失败(事件已入攒批,疑磁盘问题)", exc_info=True)
+    if callable(fl):                           # ① 会话日志直连形态:先刷真源
+        try:
+            res = fl()
+            if hasattr(res, "__await__"):
+                await res
+        except Exception:                      # noqa: BLE001 刷盘失败不掩盖退出码
+            log.warning("会话收尾 flush 失败(事件已入攒批,疑磁盘问题)",
+                        exc_info=True)
     spine = getattr(sh.ctx, "engine_spine", None)
     close = getattr(spine, "close", None)
-    if callable(close):
+    if callable(close):                        # ② 引擎外部资源(含 FTS detach/flush)
         try:
             await close()
-        except Exception:                      # noqa: BLE001 外部资源收尾尽力
+        except Exception:                      # noqa: BLE001 收尾尽力
             log.warning("引擎外部资源收尾失败", exc_info=True)
-    mgr = getattr(sh.ctx, "session", None)
-    shutdown = getattr(mgr, "shutdown_all", None) if mgr is not None else None
-    if callable(shutdown):
+    shutdown = getattr(log_, "shutdown_all", None) if log_ is not None else None
+    if callable(shutdown):                     # ③ 会话门面形态(ACP/桌面):关 store
         try:
             res = shutdown()
             if hasattr(res, "__await__"):
                 await res
-        except Exception:                      # noqa: BLE001 门面收尾尽力
+        except Exception:                      # noqa: BLE001 收尾尽力
             log.warning("会话门面收尾失败", exc_info=True)
 
 
-async def _scan_unhealthy(sessions_dir: Path) -> Optional[str]:
+async def _scan_unhealthy(sessions_dir: Path, *,
+                          cfg: Any = None) -> Optional[str]:
     """启动自检(F060):pyharness.repair.auto_scan 装配后取首个不健康会话;模块未
-    装配 → 降级跳过(记日志),不阻断启动(见偏离 7)。"""
+    装配 → 降级跳过(记日志),不阻断启动(见偏离 7)。
+
+    ``cfg``(2026-09-21 R11-2):带上即可启用**索引落后对账**(``auto_scan(db_path=…)``)
+    —— 此前该对账因"无人提供 fts_last_seq"而从未生效。
+
+    ``2026-09-21 R14-2``:跳过**正被其他进程持有**的会话。索引是 200ms **攒批**落的
+    派生视图,活会话在攒批窗口内必然 `view_last < last` ⇒ 被判 `index_stale`;此前自检
+    会把它当"待修"交给 ``_ensure_repair`` ⇒ ``repair_session`` 取锁撞 PERS-202 ⇒
+    **上抛** ⇒ 第二个 CLI 启动直接失败(两进程实测复现)。活会话本就不该是候选:它既不是
+    损坏,本进程也修不动。
+    """
     try:
         from pyharness.repair import auto_scan
     except Exception as exc:                   # noqa: BLE001 repair 模块未装配
         log.info("repair.auto_scan 未装配,跳过启动自检 (%s)", exc)
         return None
+    db_path = str(getattr(getattr(cfg, "storage", None), "db_path", "") or "")
     try:
-        hits = await auto_scan(sessions_dir)
+        hits = await auto_scan(sessions_dir, db_path=db_path or None)
     except PyHError:
         raise
     except Exception:                          # noqa: BLE001 自检失败不阻断启动
         log.warning("启动自检异常,跳过", exc_info=True)
         return None
-    for h in hits:
-        if not getattr(h, "healthy", False):
-            return getattr(h, "sid", None)
-    return None
+    return _repairable_unhealthy(hits, sessions_dir)
 
 
-def _first_unhealthy(hits: list) -> Optional[Any]:
-    """从 auto_scan 结果取首个不健康记录(无 healthy 面视为不健康——auto_scan
-    只返损坏清单时全数命中)。"""
+def _repairable_unhealthy(hits: list, sessions_dir: Path) -> Optional[str]:
+    """从 auto_scan 结果取首个**可修**的损坏会话;**跳过被其他进程持有的活会话**。
+
+    R14-2 / R14-7:索引是 200ms **攒批**落的派生视图 ⇒ 活会话在攒批窗口内必然
+    ``view_last != last`` 而被判 ``index_stale``。这类会话**既不是损坏**、本进程也
+    **修不动**(``repair_session`` 取锁即 PERS-202)⇒ 必须跳过;否则调用方要么
+    启动中止(启动自检,R14-2),要么整条命令以 PERS-202 失败、**永远够不到真正损坏
+    的会话**(``repair``,R14-7 —— 修复前的实测:只有活会话时不报"无损坏会话"而直接
+    抛 PERS-202)。
+
+    **唯一候选筛选点**:自检与 repair 子命令都必须走这里。
+    """
+    from pyharness.persistence import session_lock_held, session_lock_path
     for h in hits:
-        if not getattr(h, "healthy", True):
-            return h
+        if getattr(h, "healthy", False):
+            continue
+        sid = getattr(h, "sid", None)
+        if not sid:
+            continue
+        if session_lock_held(session_lock_path(sessions_dir / f"{sid}.jsonl")):
+            log.info("repair 候选:会话正被其他进程持有,跳过 sid=%s", sid)
+            continue
+        return sid
     return None
 
 
@@ -754,7 +784,7 @@ async def bootstrap_shell(r: ParseResult) -> ShellCtx:
     # chat/run/plan 显式 --session → 缺日志 EVT-106 守卫 + 损坏先修再 open(幂等);
     # 其余命令(repair/desktop/acp/引擎单发)不预开会话,由各自处理器按需装配。
     if sid is None and cmd in {"chat", "run"}:
-        bad = await _scan_unhealthy(sessions_dir)   # repair 模块未装配时跳过
+        bad = await _scan_unhealthy(sessions_dir, cfg=cfg)  # repair 模块未装配时跳过
         if bad is not None:
             sid = bad                               # 命中损坏会话 → 修复并续跑
     if sid is not None and cmd in {"chat", "run", "plan"}:
@@ -995,33 +1025,64 @@ def _sessions_dir_ctx(sh: ShellCtx) -> Path:
                         _sessions_path(cfg))).expanduser()
 
 
+class _session_lines:
+    """会话**真源**(轮转段 + 主文件)合并为一个逐行文本流(R14-3)。
+
+    用法与 ``with open(p, encoding="utf-8") as fh:`` **同形**,便于既有读取循环直接
+    换用;语义按会话:①跨段完整(轮转后旧事件在段里,不读就丢)②段与主文件都归到
+    真实 sid(辅助档本身不是会话,见 ``persistence.session_log_paths``)。
+    逐段顺序开合,不并发持有句柄。
+    """
+
+    def __init__(self, main: Path) -> None:
+        from pyharness.persistence import session_data_paths
+        self._parts = session_data_paths(main)
+
+    def __enter__(self) -> "_session_lines":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    def __iter__(self):
+        for part in self._parts:
+            with open(part, encoding="utf-8", errors="replace") as fh:
+                yield from fh
+
+
 async def _cmd_search(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     """search <q>:FTS 全文检索(派生索引只读,不触真源)。"""
     from pyharness.core.session_query import SessionQueryIndex
-    from pyharness.persistence import open_store
+    from pyharness.persistence import SessionReader, session_log_paths
     q = " ".join(positional).strip()
     if not q:
         raise_code("EVT-100", advice="search 需要检索词",
                    hint="用法:pyharness search <检索词>")
     sessions_dir = _sessions_dir_ctx(sh)
     db = Path(str(sh.ctx.settings.storage.db_path)).expanduser()
-    stores: list = []
     sources: dict = {}
-    if sessions_dir.is_dir():
-        for f in sorted(sessions_dir.glob("*.jsonl")):
-            sid = f.stem
-            if not sid.startswith("s-"):
-                continue
-            try:
-                st = open_store(sid, dir=sessions_dir)
-            except Exception:                        # noqa: BLE001 单会话失败隔离
-                continue
-            stores.append(st)
-            sources[sid] = st
+    # 唯一枚举点(R14-3):**辅助档**(轮转段/修复备份/隔离档)不是独立会话 —— 此前
+    # 按 `stem.startswith("s-")` 判定会把它们当会话注册,而备份/段与主文件**同 seq**
+    # ⇒ rebuild 撞 fts_rows 主键冲突 ⇒ search 直接 PERS-202 崩(实测)。
+    #
+    # 回放源用 **SessionReader**(R14-5):``open_store`` 会取 INV-07 **写**锁并持有到
+    # 查询结束 ⇒ 一条只读命令把**所有**会话锁住,期间其他进程开会话撞 PERS-202
+    # (实测:并发 open 交替 OPEN_OK / BLOCKED)。只读命令不该持有写锁。
+    for f in session_log_paths(sessions_dir):
+        sources[f.stem] = SessionReader(f.stem, dir=sessions_dir)
     idx = SessionQueryIndex(db_path=db, sources=sources)
     try:
         await idx.enter(ctx=SimpleNamespace(config=sh.ctx.settings))
-        await idx.rebuild()
+        # 逐会话重建(R14-4):只动**本次确实读到源**的会话行。此前用全量
+        # ``rebuild()``(DELETE 整表再重插),而打不开的会话(如被活进程持锁 ⇒
+        # open_store 抛 PERS-202 ⇒ 上面 `continue` 未登记源)**索引行被一并抹掉且不再
+        # 重建** —— 实测:被锁会话的索引水位 2 → 0,静默不可搜。sources 为空时更是
+        # 直接清空整个索引。
+        # 残余(如实标注):日志被**手工**移除的会话,其陈旧索引行不再被顺带清除
+        # (正规删除走 ``delete_session`` 级联)。刻意不"按目录反推清理"——索引库是
+        # **全局**的而会话目录按租户分,反推会误删他租户的行。
+        for sid in sources:
+            await idx.rebuild(session_id=sid)
         res = await idx.query(q)
         hits = [{"session_id": h.session_id, "seq": h.seq, "type": h.type,
                  "ts": h.ts, "snippet": h.snippet, "rank": h.rank}
@@ -1031,11 +1092,6 @@ async def _cmd_search(sh: ShellCtx, positional: list[str], flags: dict) -> int:
             await idx.detach()
         except Exception:                            # noqa: BLE001
             pass
-        for st in stores:
-            try:
-                st.close()
-            except Exception:                        # noqa: BLE001
-                pass
     if flags.get("json"):
         _json_line({"query": q, "timed_out": res.timed_out, "hits": hits})
         return 0
@@ -1048,9 +1104,15 @@ async def _cmd_search(sh: ShellCtx, positional: list[str], flags: dict) -> int:
 
 
 async def _cmd_session(sh: ShellCtx, positional: list[str], flags: dict) -> int:
-    """session list / session show <sid>:只读会话清单与回放展示。"""
+    """session list / session show <sid>:只读会话清单与回放展示。
+
+    ``2026-09-21 R14-6``:``show`` 改用**只读回放源** ``SessionReader``(与 ``search`` 同款)
+    —— 此前借 ``open_store`` 读,而它会取 INV-07 **写**锁 ⇒ **会话正被使用时**
+    ``session show`` 自身撞 PERS-202(实测:无锁 rc=0 / 有锁 rc≠0),即"看不了正在跑的
+    会话"。只读命令不该持写锁。
+    """
     from pyharness.core.session import open_session
-    from pyharness.persistence import open_store
+    from pyharness.persistence import SessionReader
     sessions_dir = _sessions_dir_ctx(sh)
     act = (positional or ["list"])[0]
     if act == "list":
@@ -1079,25 +1141,22 @@ async def _cmd_session(sh: ShellCtx, positional: list[str], flags: dict) -> int:
         if not (sessions_dir / f"{sid}.jsonl").exists():
             raise_code("EVT-106", session_id=sid,
                        hint="会话不存在(先 session list 确认 sid)")
-        store = open_store(sid, dir=sessions_dir)
-        log_ = await open_session(sid, store)
-        try:
-            evs = list(log_.events_after(0))
-            msgs = log_.derive_messages()
-            if flags.get("json"):
-                _json_line({"sid": sid, "messages": msgs,
-                            "events": [e.model_dump(exclude_none=True)
-                                       for e in evs]})
-                return 0
-            print(f"会话 {sid} 事件 {len(evs)} 条:")
-            for m in msgs:
-                role = m.get("role", "?")
-                content = str(m.get("content") or "").replace("\n", " ")[:200]
-                if not content and m.get("tool_calls"):
-                    content = "工具调用"
-                print(f"  [{role}] {content}")
-        finally:
-            store.close()
+        # 只读回放源(R14-6):不取会话写锁 ⇒ 会话正被他进程使用时也能查看
+        log_ = await open_session(sid, SessionReader(sid, dir=sessions_dir))
+        evs = list(log_.events_after(0))
+        msgs = log_.derive_messages()
+        if flags.get("json"):
+            _json_line({"sid": sid, "messages": msgs,
+                        "events": [e.model_dump(exclude_none=True)
+                                   for e in evs]})
+            return 0
+        print(f"会话 {sid} 事件 {len(evs)} 条:")
+        for m in msgs:
+            role = m.get("role", "?")
+            content = str(m.get("content") or "").replace("\n", " ")[:200]
+            if not content and m.get("tool_calls"):
+                content = "工具调用"
+            print(f"  [{role}] {content}")
         return 0
     raise_code("EVT-100", advice=f"未知 session 子命令:{act}",
                hint="可用:session list | session show <sid>")
@@ -1106,7 +1165,7 @@ async def _cmd_session(sh: ShellCtx, positional: list[str], flags: dict) -> int:
 async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     """fork <sid>:物理复制事件流到新会话 + 父会话落 fork.created 声明。"""
     from pyharness.core.session import open_session
-    from pyharness.persistence import open_store
+    from pyharness.persistence import flush_kwargs_of, open_store
     sessions_dir = _sessions_dir_ctx(sh)
     if not positional:
         raise_code("EVT-100", advice="fork 需要源会话 sid",
@@ -1115,7 +1174,8 @@ async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     sid = validate_session_id(str(positional[0]))
     if not (sessions_dir / f"{sid}.jsonl").exists():
         raise_code("EVT-106", session_id=sid, hint="源会话不存在")
-    src = open_store(sid, dir=sessions_dir)
+    src = open_store(sid, dir=sessions_dir,
+                     **flush_kwargs_of(sh.ctx.settings))
     try:
         events = list(src.replay())
     finally:
@@ -1123,7 +1183,8 @@ async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     if not events:
         raise_code("EVT-106", session_id=sid, hint="源会话为空(缺 session.created)")
     new_sid = f"s-fork-{uuid.uuid4().hex[:8]}"
-    tgt = open_store(new_sid, dir=sessions_dir)
+    tgt = open_store(new_sid, dir=sessions_dir,
+                     **flush_kwargs_of(sh.ctx.settings))
     try:
         for e in events:
             if e.type == "session.finished":
@@ -1133,7 +1194,8 @@ async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
         await tgt.flush()
     finally:
         tgt.close()
-    store2 = open_store(sid, dir=sessions_dir)
+    store2 = open_store(sid, dir=sessions_dir,
+                        **flush_kwargs_of(sh.ctx.settings))
     log_ = await open_session(sid, store2)
     try:
         base_seq = max((e.seq for e in events), default=0)
@@ -1154,6 +1216,7 @@ async def _cmd_fork(sh: ShellCtx, positional: list[str], flags: dict) -> int:
 async def _cmd_job(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     """job list / show <task_id> / logs <task_id>:任务记录查询(事件源派生)。"""
     sessions_dir = _sessions_dir_ctx(sh)
+    from pyharness.persistence import session_log_paths
     action = (positional or ["list"])[0]
     if action not in ("list", "show", "logs"):
         raise_code("EVT-100", advice=f"未知 job 子命令:{action}",
@@ -1161,12 +1224,10 @@ async def _cmd_job(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     rows: dict[str, dict] = {}
     events_by_tid: dict[str, list] = {}
     if sessions_dir.is_dir():
-        for f in sorted(sessions_dir.glob("*.jsonl")):
+        for f in session_log_paths(sessions_dir):
             sid = f.stem
-            if not sid.startswith("s-"):
-                continue
             try:
-                with open(f, encoding="utf-8", errors="replace") as fh:
+                with _session_lines(f) as fh:      # 会话级真源(段 + 主文件)
                     for line in fh:
                         line = line.strip()
                         if not line:
@@ -1199,6 +1260,23 @@ async def _cmd_job(sh: ShellCtx, positional: list[str], flags: dict) -> int:
                             rec["reason"] = p.get("error") or p.get("reason")
             except Exception:                        # noqa: BLE001 坏文件跳过
                 continue
+    # 崩溃遗留补正(R14-12):无终态的 job 只有在**宿主进程仍持有该会话**时才可能真在跑
+    # —— job 跑在持有会话锁的宿主进程里,宿主崩溃即释放锁。此前一律报 `running` ⇒
+    # 日志派生的 `job list/show` 永远显示一个并不存在的运行中任务(模块 docstring 声称
+    # "崩溃…自动失败并告警",但全库无终态写入者:实测崩溃遗留 job 恒显示 running)。
+    # 此处只**如实显示**、不写事件(读命令保持只读);事件层的恢复写入见 L-26。
+    from pyharness.persistence import session_lock_held, session_lock_path
+    live: dict[str, bool] = {}
+    for rec in rows.values():
+        if rec["status"] not in ("queued", "running"):
+            continue
+        sid = rec.get("sid") or ""
+        if sid not in live:
+            live[sid] = session_lock_held(
+                session_lock_path(sessions_dir / f"{sid}.jsonl"))
+        if not live[sid]:                            # 无进程持有 ⇒ 任务不可能在跑
+            rec["status"] = "failed"
+            rec["reason"] = rec["reason"] or "宿主进程已不在(崩溃遗留)"
     if action in ("show", "logs"):
         want = positional[1] if len(positional) > 1 else None
         if not want:
@@ -1239,17 +1317,16 @@ async def _cmd_job(sh: ShellCtx, positional: list[str], flags: dict) -> int:
 async def _cmd_schedule(sh: ShellCtx, positional: list[str], flags: dict) -> int:
     """schedule list / add/remove/pause/resume(--session <sid>)。"""
     from pyharness.core.schedule import Scheduler
+    from pyharness.persistence import session_log_paths
     sessions_dir = _sessions_dir_ctx(sh)
     action = (positional or ["list"])[0]
     if action == "list":
         jobs: dict[str, dict] = {}
         if sessions_dir.is_dir():
-            for f in sorted(sessions_dir.glob("*.jsonl")):
+            for f in session_log_paths(sessions_dir):
                 sid = f.stem
-                if not sid.startswith("s-"):
-                    continue
                 try:
-                    with open(f, encoding="utf-8", errors="replace") as fh:
+                    with _session_lines(f) as fh:   # 会话级真源(段 + 主文件)
                         for line in fh:
                             line = line.strip()
                             if not line:
@@ -1296,11 +1373,12 @@ async def _cmd_schedule(sh: ShellCtx, positional: list[str], flags: dict) -> int
         raise_code("EVT-100", advice="管理定时任务需要 --session <sid>",
                    hint="用法:pyharness schedule add ... --session <sid>")
     from pyharness.core.session import open_session
-    from pyharness.persistence import open_store
+    from pyharness.persistence import flush_kwargs_of, open_store
     sid = str(sid)
     if not (sessions_dir / f"{sid}.jsonl").exists():
         raise_code("EVT-106", session_id=sid, hint="目标会话不存在")
-    store = open_store(sid, dir=sessions_dir)
+    store = open_store(sid, dir=sessions_dir,
+                       **flush_kwargs_of(sh.ctx.settings))
     log_ = await open_session(sid, store)
     sched = Scheduler.rebuild_for_session(log_)
     try:
@@ -1403,7 +1481,7 @@ async def _cmd_workflow(sh: ShellCtx, positional: list[str], flags: dict) -> int
     runner = WorkflowRunner(log_, queue_submit_adapter(log_, queue), name="cli")
     results = await runner.run(steps, stop_on_fail=True)
     ok = bool(results) and all(r["ok"] for r in results)
-    sid = str(getattr(log_, "session_id", ""))
+    sid = str(getattr(log_, "sid", ""))
     if flags.get("json"):
         _json_line({"sid": sid, "ok": ok, "results": results})
     else:
@@ -1578,41 +1656,51 @@ def _config_cmd(positional: list[str], flags: dict) -> int:
 
 
 def _scan_usage(sessions_dir: Path) -> dict:
-    """会话日志只读扫描(离线派生):逐文件数事件、尾部终态与 llm.usage 成本聚合。
+    """会话日志只读扫描(离线派生):逐**会话**数事件、尾部终态与 llm.usage 成本聚合。
 
     单文件不可读(被占用/权限)只跳过并告警,**不中止整条离线命令**——与
     ``_scan_unhealthy`` 同款容错(RT-02:此前一个坏文件使 budget/stats 整体
     以 CYC-999 退出)。``sessions`` 仍记扫描面(含被跳过者),聚合值只含可读者。
+
+    2026-09-21 R14-3:改为按**会话**聚合(``session_data_paths`` = 轮转段 + 主文件,
+    每事件恰计一次)。此前按 ``glob("*.jsonl")`` **逐文件**计,而 ``{sid}.N.jsonl`` /
+    ``{sid}.corrupt-*`` / ``{sid}.quarantine-*`` 全被当作独立会话 ⇒ 修复备份是主文件的
+    **字节副本** ⇒ 事件与成本**重复计**,隔离档的坏行也计入事件数(实测:1 会话 → 报
+    "3 个会话 / 3 事件")。终态只取**主文件**尾部(段不承载终态)。
     """
-    files = sorted(sessions_dir.glob("*.jsonl")) if sessions_dir.is_dir() else []
+    from pyharness.persistence import session_data_paths, session_log_paths
+    sessions = session_log_paths(sessions_dir)
     total_events = 0
     finished = 0
     cost = 0.0
-    for f in files:
+    for main in sessions:
         tail_type = ""
         n = 0
         try:
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    n += 1
-                    try:
-                        ev = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue                  # 坏行不计(repair 域)
-                    tail_type = ev.get("type", "")
-                    if tail_type == "llm.usage":
-                        cost += float((ev.get("payload") or {}).get("cost_est") or 0.0)
-        except OSError as e:                      # 单文件不可读:跳过并告警,不中止
-            log.warning("budget 扫描跳过不可读文件 file=%s why=%s", f, e)
+            for f in session_data_paths(main):
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        n += 1
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue              # 坏行不计(repair 域)
+                        if f == main:             # 终态只见于主文件尾部(按值比较:
+                            tail_type = ev.get("type", "")   # Path(p) 非同对象)
+                        if ev.get("type") == "llm.usage":
+                            cost += float(
+                                (ev.get("payload") or {}).get("cost_est") or 0.0)
+        except OSError as e:                      # 单会话不可读:跳过并告警,不中止
+            log.warning("budget 扫描跳过不可读会话 sid=%s why=%s", main.stem, e)
             continue
         total_events += n
         if tail_type == "session.finished":
             finished += 1
-    return {"sessions": len(files), "events": total_events, "finished": finished,
-            "cost_est": round(cost, 4)}
+    return {"sessions": len(sessions), "events": total_events,
+            "finished": finished, "cost_est": round(cost, 4)}
 
 
 def _budget_cmd(flags: dict) -> int:
@@ -1665,9 +1753,14 @@ async def repair_cmd(sh: ShellCtx, sid: Optional[str] = None) -> int:
     不可修复 → 明确报错 + 备份留存(PERS-201 上抛)。"""
     from pyharness.repair import auto_scan, repair_session     # 惰性(偏离 7)
     if not sid:
-        hits = await auto_scan(sh.ctx.storage.sessions_dir)
-        hit = _first_unhealthy(hits)
-        sid = getattr(hit, "sid", None) if hit is not None else None
+        # R11-2:带上 db_path ⇒ 索引落后对账一并生效(此前该对账无提供者,恒不启用)
+        _db = str(getattr(getattr(getattr(sh.ctx, "settings", None), "storage", None),
+                          "db_path", "") or "")
+        hits = await auto_scan(sh.ctx.storage.sessions_dir,
+                               db_path=_db or None)
+        # R14-7:与启动自检同一候选筛选点(跳过活会话)—— 否则唯一"待修"是活会话时
+        # 整条命令直接抛 PERS-202,且够不到真正损坏的会话。
+        sid = _repairable_unhealthy(hits, sh.ctx.storage.sessions_dir)
     if not sid:
         print("[repair] 无损坏会话")
         return 0

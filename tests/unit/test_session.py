@@ -18,7 +18,6 @@
 """
 import pytest
 
-from pyharness import bus as B
 from pyharness.bus import EventBus
 from pyharness.core.session import SessionLog, open_session
 from pyharness.errors import PyHError
@@ -175,8 +174,9 @@ def test_append_only_no_second_history_store_inv02():
     log = SessionLog(sid=SID)                  # 纯内存模式
     data_attrs = {k: v for k, v in vars(log).items()
                   if isinstance(v, (list, dict, set))}
-    # 唯一列表态历史:事件缓存 + seq 平行索引 + 声明区间;无独立"消息历史"副本
-    assert set(data_attrs) <= {"_cache", "_seqs", "_folded", "_holes_warned"}
+    # 唯一列表态历史:事件缓存 + seq 平行索引 + 声明区间(折叠 / 空洞合法化);无独立"消息历史"副本
+    assert set(data_attrs) <= {"_cache", "_seqs", "_folded", "_holes_declared",
+                               "_holes_warned"}
     assert "history_cache" in vars(log) and vars(log)["history_cache"] is None
     # 派生结果与日志事件一一联动:无独立可变消息存储
     assert not hasattr(log, "messages") and not hasattr(log, "history")
@@ -496,7 +496,8 @@ async def test_rebuild_from_log_invariant_inv03():
     assert log.derive_messages() == before_msgs
     assert log.stats() == {"session_id": SID, "seq": len(before_evs),
                            "event_count": len(before_evs), "closed": False,
-                           "folded_ranges": [], "holes_warned": []}
+                           "folded_ranges": [], "holes_declared": [],
+                           "holes_warned": []}
     # append 后再 rebuild 仍一致(缓存纪律:append 即失效,可随时重建)
     await log.append("user.message", {"content": "追加一问"}, actor="user")
     log.rebuild_from_log()
@@ -585,7 +586,8 @@ async def test_open_session_warn_hole_undeclared():
         seq=3, ts="2026-09-06T07:00:00.000002Z", type="user.message",
         session_id=SID, actor="user", payload={"content": "跳号后"}))
     recovered = await open_session(SID, store)
-    assert recovered.stats()["holes_warned"] == [3], "seq 空洞(缺 2)应告警"
+    # R14-9:告警报**首个缺失的 seq**(此前误报空洞之后那条=3),与注释口径一致
+    assert recovered.stats()["holes_warned"] == [2], "seq 空洞(缺 2)应告警,且报缺失号本身"
     # 空洞不回填:_seq 从最后完整点续写
     e = await recovered.append("user.message", {"content": "继续"}, actor="user")
     assert e.seq == 4

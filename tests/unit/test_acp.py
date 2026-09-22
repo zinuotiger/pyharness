@@ -29,11 +29,9 @@ import io
 import json
 import types
 
-import pytest
 
 from pyharness import acp as mod
-from pyharness.acp import (AcpBridge, JsonRpcRequest, cmd_approve, cmd_chat,
-                           cmd_initialize, cmd_read_events, dispatch, error_resp,
+from pyharness.acp import (AcpBridge, JsonRpcRequest, dispatch, error_resp,
                            engine_error, notify, parse_request, serve)
 from pyharness.config import Settings
 from pyharness.core.approval import ApprovalProvider

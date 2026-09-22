@@ -50,7 +50,7 @@
 | 给 LLM | `to_llm_text()` ≤2000 字符含 advice,可行动 | LLM 上下文 | LLM 自纠 |
 | 给用户/远端 | 只含 code+advice,不吐 ctx 敏感值 | API 响应/前端 | 用户 |
 
-转换规则(§5 展开):各层必须**透传 code**,禁止模糊化;错误事件 actor=触发模块,禁用户冒名;强同步三类(user.message/guard.rejected/approval.*)失败立即抛(PERS-202);ctx 只放脱敏值,secret 原文永不出 CredentialsProvider(INV-09)。
+转换规则(§5 展开):各层必须**透传 code**,禁止模糊化;错误事件 actor=触发模块,禁用户冒名;强同步事件(`SYNC_TYPES`)(user.message/guard.rejected/approval.*)失败立即抛(PERS-202);ctx 只放脱敏值,secret 原文永不出 CredentialsProvider(INV-09)。
 
 ## 1.5 登记纪律
 
@@ -335,7 +335,7 @@ CYC-999 → 1) 本地 debug 日志取完整堆栈(堆栈绝不上行/外泄)
 
 ## 6.3 脱敏与留痕
 
-全出口(日志/事件/LLM 文本)经 credentials.redact_out 横切打码(owner=spine 不可卸、只可加严);密钥显示 sk-abc***;INV-09 断言日志 grep 无 32+ 位疑似密钥;credentials.yaml 权限 600 且不进版本库。**双落纪律**:每次 raise_code ≥ 一行日志 + 一条错误事件(事件=审计事实、日志=排障);强同步三类错误须双落后再抛/暂停。
+全出口(日志/事件/LLM 文本)经 credentials.redact_out 横切打码(owner=spine 不可卸、只可加严);密钥显示 sk-abc***;INV-09 断言日志 grep 无 32+ 位疑似密钥;credentials.yaml 权限 600 且不进版本库。**双落纪律**:每次 raise_code ≥ 一行日志 + 一条错误事件(事件=审计事实、日志=排障);强同步事件(`SYNC_TYPES`)错误须双落后再抛/暂停。
 
 # 7 排查速查(症状反查)
 

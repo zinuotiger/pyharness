@@ -16,7 +16,6 @@
 只做构造级冒烟,不发请求。
 """
 import asyncio
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +28,7 @@ from pyharness.core.llm import (  # noqa: E501
     parse_tool_calls, register_adapter, report_usage, require_adapter,
     resolve_secret_ref,
 )
-from pyharness.errors import ConfigError, CredentialError, PyHError, raise_code
+from pyharness.errors import ConfigError, CredentialError, PyHError
 from pyharness.core.session import SessionLog
 
 MODEL = "deepseek-chat"
@@ -850,3 +849,27 @@ class TestBuildClient:
             build_client(AdapterTriple("https://x", "env:X", "m"),
                          TimeoutLimits(10, 60, 180), resolver=lambda ref: "")
         assert ei.value.code == "CRED-701"
+
+
+def test_cred702_loose_credential_permission_is_rejected(tmp_path):
+    """**CRED-702**（R27 接线）：凭据文件权限过宽(>600) ⇒ 拒载，不静默读。
+
+    该码此前**已登记但全库从不抛出**（TS-06 实测为 43 码中唯一无测试者）—— 文档
+    承诺的「权限过宽 → 启动拒载」在实现里不存在。POSIX 查 mode 的 group/other 位；
+    Windows 的 mode 位是合成的、无安全含义（仓库既有口径：ACL 尽力而为）⇒ 跳过。
+    """
+    import os as _os
+
+    from pyharness.core.llm import resolve_secret_ref
+    from pyharness.errors import PyHError
+
+    secret = tmp_path / "cred.txt"
+    secret.write_text("sk-cred702-secret\n", encoding="utf-8")
+    if _os.name == "nt":
+        pytest.skip("Windows mode 位无安全含义（ACL 尽力而为），本检查仅 POSIX 生效")
+    _os.chmod(secret, 0o644)                       # group/other 可读 → 过宽
+    with pytest.raises(PyHError) as e:
+        resolve_secret_ref(f"file:{secret}")
+    assert e.value.code == "CRED-702"
+    _os.chmod(secret, 0o600)                       # 收紧 → 正常读取
+    assert resolve_secret_ref(f"file:{secret}") == "sk-cred702-secret"

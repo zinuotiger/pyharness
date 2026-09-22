@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from pyharness.core.todo import DEFAULT_TASK_ID, MAX_ITEMS, TodoManager
+from pyharness.core.todo import DEFAULT_TASK_ID, TodoManager
 from pyharness.errors import PyHError
 
 

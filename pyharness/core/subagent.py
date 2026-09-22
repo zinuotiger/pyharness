@@ -350,15 +350,39 @@ class SubagentManager:
                         return m
         return "deepseek-chat"
 
+    def _child_workspace_root(self, parent_root: Any, sub_id: str) -> str:
+        """F055 子会话独立根 = {storage.workspaces_dir}/{sub_id}(唯一派生点)。
+
+        权威:`specs/subagent.py.md` §约束常量"child workspace 根=
+        `~/.pyharness/workspaces/{sub_id}/`"、`CFG.md §3.6`。根目录取 config 权威键
+        `storage.workspaces_dir`;cfg 未注入(单测注入替身)时按**父根同族**推导
+        ——父根形态即 `{workspaces_dir}/{parent_sid}`,取 `.parent` 回到树根。
+        两条路径都经 `scope.session_workspace` 拼接,禁止就地字符串拼接。
+
+        2026-09-21 修(N10):此前恒用 `base.parent/{sub_id}`,而装配层父根曾为**裸**
+        workspaces_dir → 子根落到 `~/.pyharness/{sub_id}`(越出 workspaces 树)且
+        无人 mkdir,子代理文件类工具全废(治理判 allow、provider 报 TLB-802)。
+        """
+        ws_dir = getattr(getattr(self._cfg, "storage", None),
+                         "workspaces_dir", None)
+        if not ws_dir:
+            from pathlib import Path
+            base = Path(str(parent_root or
+                            "~/.pyharness/workspaces")).expanduser()
+            ws_dir = str(base.parent)
+        from pyharness.core.scope import session_workspace
+        return session_workspace(str(ws_dir), sub_id)
+
     def _default_child_scope(self, parent_scope: Any, sub_id: str,
                              child_session: Any, limits: Any,
                              deny_extra: Optional[list[str]] = None) -> Any:
         """默认子 scope 工厂:父策略快照值拷贝 + deny_extra 只收窄 + 独立根。
 
-        workspace 根 = storage.workspaces_dir/{sub_id}(F055 每会话独立根;从父根
-        推导同目录族);预算 limits 用缩放后的子预算(父×ratio,下限 1);spec.deny_
-        extra 并入子策略 deny_tools(只紧不松,无父级担保通道)。Scope 直接构造不
-        注册全局表——子 scope 生命周期随 handle(偏离 1)。
+        workspace 根 = storage.workspaces_dir/{sub_id}(F055 每会话独立根,派生见
+        `_child_workspace_root`)且**立即建目录**(否则子代理 fs.* 必然 TLB-802);
+        预算 limits 用缩放后的子预算(父×ratio,下限 1);spec.deny_extra 并入子策略
+        deny_tools(只紧不松,无父级担保通道)。Scope 直接构造不注册全局表——子 scope
+        生命周期随 handle(偏离 1)。
         """
         if parent_scope is None:
             return None
@@ -370,9 +394,13 @@ class SubagentManager:
             from pyharness.core.scope import Scope, ScopePolicy
             s = snap()
             pol = ScopePolicy(**s.policy.model_dump())      # 值拷贝(COW 起点)
-            base = Path(str(s.policy.workspace_root or
-                             "~/.pyharness/workspaces")).expanduser()
-            pol.workspace_root = str(base.parent / sub_id)  # 独立根(F055)
+            root = self._child_workspace_root(s.policy.workspace_root, sub_id)
+            pol.workspace_root = root                        # 独立根(F055)
+            try:
+                Path(root).mkdir(parents=True, exist_ok=True)   # 根必须存在
+            except OSError as exc:                          # 权限/磁盘:不降级 scope
+                log.warning("子 workspace 根创建失败 sub=%s path=%s: %s"
+                            "(文件类工具将报 TLB-802)", sub_id, root, exc)
             pol.deny_tools |= set(deny_extra or ())         # deny 只收窄(单调)
             return Scope(policy=pol, limits=limits,
                          session_id=sub_id,
@@ -1009,7 +1037,13 @@ class SubagentSpawnProvider:
                                or DEFAULT_BUDGET_RATIO),
             depth=int(args.get("depth") or base + 1),
             creds_allowed=list(args.get("creds_allowed") or []),
-            notify=bool(args.get("notify", True)))
+            # N11:JSON-Schema 的 ``notify`` 默认值是 ``null``,经 pydantic 校验后
+            # ``args["notify"]`` **存在但为 None** ⇒ ``args.get("notify", True)`` 拿到
+            # None(默认值 True 永不生效)→ ``bool(None)=False`` ⇒ LLM 工具路径上
+            # ``subagent.joined`` **永不发出**(父会话丢失回收事实)。此处把"缺省/显式
+            # None"统一收敛为 True(契约默认),只有显式传 False 才关闭。
+            notify=(True if args.get("notify") is None
+                    else bool(args.get("notify"))))
         sub_id = await self._mgr.spawn(spec, ctx)       # 四道闸内聚(spawn 校验)
         return await self._mgr.join(sub_id, ctx=ctx)    # 摘要 ≤2KB(join 到终态)
 

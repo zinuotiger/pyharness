@@ -22,7 +22,7 @@
 ## 常量与词表
 
 ### ACTORS / SYNC_TYPES / TRANSIENT_TYPES 常量
-**功能**:actor 六枚举;强同步三类事件族(SYNC_TYPES,落盘成功才返回);瞬时事件(仅总线,禁入日志)。
+**功能**:actor 六枚举;强同步事件族(`events.vocab.SYNC_TYPES`;原始三类族见 EVENT-SCHEMA §1.2)(SYNC_TYPES,落盘成功才返回);瞬时事件(仅总线,禁入日志)。
 **伪代码**:
 ```python
 ACTORS = ("user", "agent", "llm", "tool", "system", "plugin")       # Envelope.actor Literal

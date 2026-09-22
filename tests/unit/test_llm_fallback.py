@@ -24,7 +24,7 @@ import pytest
 from pyharness.config import Settings
 from pyharness.core.llm_fallback import (AdapterHealth, BudgetGuard,
                                          FallbackChain, TaskUsage)
-from pyharness.errors import LLMError, PyHError
+from pyharness.errors import PyHError
 
 log = logging.getLogger(__name__)
 

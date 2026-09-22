@@ -19,10 +19,12 @@ from __future__ import annotations
 import bisect
 import logging
 import re
-from typing import Iterator, Optional, Protocol, TYPE_CHECKING, Union
+from typing import Iterator, Optional, Protocol, TYPE_CHECKING
 
 from pyharness.errors import raise_code
-from pyharness.events import Envelope, SeqState, SYNC_TYPES, is_transient, make_envelope
+from pyharness.events import (DECLARE_TYPES, Envelope, SeqState, SYNC_TYPES,
+                              call_id_of, declared_ranges, is_transient,
+                              make_envelope)
 
 if TYPE_CHECKING:  # 总线仅作类型标注;构造未接线时跳过分发(不硬依赖装配)
     from pyharness.bus import EventBus
@@ -96,17 +98,21 @@ class SessionLog:
     def __init__(self, sid: str, *,
                  persistence: Optional[SessionStoreProtocol] = None,
                  _persistence: Optional[SessionStoreProtocol] = None,
-                 bus: Optional["EventBus"] = None) -> None:
+                 bus: Optional["EventBus"] = None,
+                 tenant_id: Optional[str] = None) -> None:
         """构造空会话日志。
 
         参数: sid = 会话 id;persistence = SessionStore 注入(新会话/恢复都建议经
         open_session 走重放路径);bus = EventBus 注入(总线日志订阅者负责物理落盘;
         None = 纯内存模式,单测/未装配阶段用)。_persistence 为 DIS-CORE §3.3.4
         旧写法的兼容别名(两份规格调用点写法不一致,见偏离说明)。
+        tenant_id(GAP-10):本会话的租户归属,由**框架侧**装配时注入,经 append
+        盖到每条 Envelope 上(不由各调用点逐个传)。None = 未声明(单租户)。
         """
         if _persistence is not None:  # DIS 兼容:两处规格对构造参数命名不一致
             persistence = _persistence
         self.sid: str = sid
+        self.tenant_id: Optional[str] = tenant_id   # GAP-10:框架侧租户归属
         self._persistence = persistence
         self._bus = bus
         self._seq: int = 0
@@ -116,21 +122,31 @@ class SessionLog:
         self._closed: bool = False
         self.history_cache: Optional[list[dict]] = None
         self._holes_warned: list[int] = []    # warn_hole 告警的 seq(F031)
+        # 空洞**合法化**声明区间(compacted 折叠 **与** recovered 修复声明)。与 _folded
+        # 分开存:_folded 是"已折叠"语义(compaction 判重折用),二者不可混用(R14-9)。
+        self._holes_declared: list[list[int]] = []
         self._seq_state = SeqState()          # 框架 seq 分配单真源(events 层)
         # 存在持久化真源但尚未回放:派生读先惰性 rebuild(events_after 语义)
         self._needs_rebuild: bool = persistence is not None
 
     # ============================================================ 内部辅助
     def _absorb(self, env: Envelope) -> None:
-        """吸收一条事件入缓存(append/回放共用):seq 推进 + folded 索引同步。"""
+        """吸收一条事件入缓存(append/回放共用):seq 推进 + 声明索引同步。"""
         self._cache.append(env)
         self._seqs.append(env.seq)
         self._seq = env.seq
         if env.type == "context.compacted":
-            # 折叠声明入索引(空洞合法化口径;区间合法性已由 payload 模型保证)
+            # 折叠声明入索引(compaction 的"已折叠"语义;区间合法性由 payload 模型保证)
             for pair in env.payload["ranges"]:
                 self._folded.append(list(pair))
             self._folded.sort(key=lambda r: r[0])
+        if env.type in DECLARE_TYPES:
+            # 空洞合法化声明(**唯一判据** `declared_ranges`):含 compacted.ranges 与
+            # recovered.lost / "seq-holes:[…]"。R14-9 前此处只认 compacted ⇒ 已声明的
+            # 修复空洞在下次回放被重报为"未声明空洞(疑丢事件)"。
+            for lo, hi in declared_ranges(env):
+                self._holes_declared.append([lo, hi])
+            self._holes_declared.sort(key=lambda r: r[0])
 
     def _seq_index(self) -> list[int]:
         """seq 升序索引(与缓存平行;append-only 保证与 _cache 严格对齐)。"""
@@ -141,13 +157,14 @@ class SessionLog:
         if self._needs_rebuild:
             self.rebuild_from_log()
 
-    def _folded_contains(self, seq: int) -> bool:
-        """seq 是否落在某 compacted 声明区间内。"""
-        return any(lo <= seq <= hi for lo, hi in self._folded)
-
     def _gap_declared(self, gap_lo: int, gap_hi: int) -> bool:
-        """空洞区间 [gap_lo, gap_hi] 是否被声明区间完全覆盖(合法空洞不回填)。"""
-        return all(self._folded_contains(s) for s in range(gap_lo, gap_hi + 1))
+        """空洞区间 [gap_lo, gap_hi] 是否被**声明**完全覆盖(合法空洞不回填)。
+
+        判据源 = ``_holes_declared``(compacted + recovered),**不是** ``_folded``
+        (后者只是"已折叠",不含修复声明;R14-9)。
+        """
+        return all(any(lo <= s <= hi for lo, hi in self._holes_declared)
+                   for s in range(gap_lo, gap_hi + 1))
 
     def warn_hole(self, seq: int) -> None:
         """未声明空洞告警(F031):记录 + 日志;不中断回放、不回填。"""
@@ -193,7 +210,6 @@ class SessionLog:
         """日志 → 消息历史纯折叠(§3.5 reducer 唯一权威实现,INV-02)。"""
         msgs: list[dict] = []
         sources: list[Optional[int]] = []     # 与 msgs 平行的源 seq(修正定位用)
-        pending: Optional[int] = None         # 待配对 tool 的 response seq
         paired: set[str] = set()              # 已产出 tool 消息的 call_id(ADR-022 终局兜底用)
         req_index: dict = {}                  # approval.requested: seq → (call_id, tool)
         for ev in self._cache:                # seq 升序遍历
@@ -231,7 +247,7 @@ class SessionLog:
                     msgs.append(am)
                     sources.append(ev.seq)
             elif t == "tool.result":
-                cid = p.get("call_id") or ""
+                cid = call_id_of(ev)
                 msgs.append({"role": "tool",
                              "tool_call_id": cid,
                              "content": p.get("summary") or "",
@@ -241,7 +257,7 @@ class SessionLog:
             elif t == "tool.error":
                 # 失败也须配对 tool 消息(assistant.tool_calls 后悬空 → 端点 400,
                 # 实测 LLM-304 刷屏);content = 错误摘要回喂,LLM 可据此改口
-                cid = p.get("call_id") or ""
+                cid = call_id_of(ev)
                 msgs.append({"role": "tool",
                              "tool_call_id": cid,
                              "content": (str(p.get("code") or "")
@@ -251,7 +267,7 @@ class SessionLog:
                 paired.add(cid)
             elif t == "approval.requested":
                 # 仅建索引(**不入上下文**):供 denied/timeout 反查 call_id
-                req_index[ev.seq] = (str((ev.trace or {}).get("call_id") or ""),
+                req_index[ev.seq] = (call_id_of(ev),
                                      str(p.get("tool") or ""))
             elif t in ("approval.denied", "approval.timeout"):
                 # ADR-022 D-1/D-2:审批拒绝亦须配对,否则同上悬空。
@@ -267,7 +283,7 @@ class SessionLog:
                     paired.add(cid)
             elif t == "guard.rejected":
                 # ADR-022 D-1/D-2:guard 链拒绝(scope-hidden/g-rule/critical)配对。
-                cid = str((ev.trace or {}).get("call_id") or "")
+                cid = call_id_of(ev)
                 if cid and cid not in paired:
                     msgs.append({"role": "tool", "tool_call_id": cid,
                                  "name": str(p.get("tool") or "") or None,
@@ -384,6 +400,7 @@ class SessionLog:
             # 6) 框架打点 + 五步校验链(失败拒写:EVT-100/102/101/106)
             env = make_envelope(self.sid, type_, actor, payload,
                                 origin=origin, task_id=task_id, trace=trace,
+                                tenant_id=self.tenant_id,
                                 seq_state=self._seq_state)
             # 7) 记账 + 入内存:订阅者/派生视图可即时读(先于总线,spec 顺序)
             self._seq = env.seq
@@ -478,6 +495,7 @@ class SessionLog:
         self._cache = []
         self._seqs = []
         self._folded = []
+        self._holes_declared = []
         self._holes_warned = []
         self._seq = 0
         self.history_cache = None
@@ -505,6 +523,7 @@ class SessionLog:
             "event_count": len(self._cache),
             "closed": self._closed,
             "folded_ranges": [list(r) for r in self._folded],
+            "holes_declared": [list(r) for r in self._holes_declared],
             "holes_warned": list(self._holes_warned),
         }
 
@@ -518,37 +537,57 @@ class SessionLog:
 
 # ------------------------------------------------------------------ 工厂/恢复
 async def open_session(sid: str,
-                       persistence: SessionStoreProtocol) -> SessionLog:
+                       persistence: SessionStoreProtocol,
+                       *, tenant_id: Optional[str] = None) -> SessionLog:
     """启动/恢复重建:重放日志重建会话状态(崩溃恢复与审计回放同一条代码路径)。
 
     repair(F060)先于本函数执行;文件不存在 = 新会话(等 session.created,由校验链
     EVT-106 守卫);坏行 PERS-201 记跳不中断;无 compacted/recovered 声明的空洞 →
     warn_hole 告警(F031);_seq 从最后完整点续写(空洞不回填);终态会话恢复后仍拒写。
+
+    ``tenant_id``(GAP-10)**两源合一,日志优先**:调用方传入的是"本次装配认为的
+    租户";而日志里已落的 ``Envelope.tenant_id`` 是**既成事实**。恢复时以日志为准
+    ——否则重启后换一个调用方就能给历史会话贴上不同租户(那正是 L-1 登记的"租户
+    未随会话落盘"残余)。两者不一致时保留日志值并告警,不回写、不覆盖事实。
     """
-    log_ = SessionLog(sid=sid, persistence=persistence)
+    log_ = SessionLog(sid=sid, persistence=persistence, tenant_id=tenant_id)
     last: Optional[Envelope] = None
     first_seq: Optional[int] = None
+    logged_tenant: Optional[str] = None
+    gaps: list[tuple[int, int]] = []             # 待判定空洞(声明可能落在其后)
     for env in persistence.replay():            # 坏行由 replay 记跳隔离,不中断
         if env.session_id != sid:
             continue                            # 多会话文件过滤
+        if getattr(env, "tenant_id", None):
+            logged_tenant = env.tenant_id        # 日志是既成事实:最后一条胜出
         if first_seq is None:
             first_seq = env.seq
-            if env.seq > 1 and not log_._gap_declared(1, env.seq - 1):
+            if env.seq > 1:
                 # 首段连续缺失(轮转文件丢失/坏文件):seq 1..(env.seq-1) 整体缺失,
                 # 旧实现只查相邻差、对前缀失明(P1-5,与 repair.check_seq_gap 对齐)
-                log_.warn_hole(env.seq)
+                gaps.append((1, env.seq - 1))
         elif last and env.seq != last.seq + 1:
-            gap_lo, gap_hi = last.seq + 1, env.seq - 1
-            if not log_._gap_declared(gap_lo, gap_hi):
-                log_.warn_hole(env.seq)         # 无声明空洞 → 告警(F031)
+            gaps.append((last.seq + 1, env.seq - 1))
         log_._absorb(env)
         last = env
+    # 空洞判定**必须在声明全部吸收之后**(R14-9):`session.recovered` 声明通常由 repair
+    # **追加在流尾**,边读边判会把"刚被声明的修复空洞"重新报成未声明空洞(假 F031 线索)。
+    for gap_lo, gap_hi in gaps:
+        if not log_._gap_declared(gap_lo, gap_hi):
+            log_.warn_hole(gap_lo)               # 报**首个缺失的 seq**(此前误报空洞后那条)
     if last:
         log_._seq_state.rebuild(sid, log_._seq)  # 开闸:从最后完整点续写
         if last.type == "session.finished":
             log_._closed = True                  # 终态会话恢复后仍拒写(EVT-104)
     log_.history_cache = None                    # 派生缓存一律重建(INV-03)
     log_._needs_rebuild = False
+    # GAP-10:租户以**日志**为准(既成事实)。日志无归属(旧会话/单租户)时保留
+    # 调用方注入值;两者冲突时日志胜出并告警——绝不因重开而改写历史归属。
+    if logged_tenant is not None:
+        if tenant_id is not None and tenant_id != logged_tenant:
+            log.warning("会话 %s 租户不一致:装配=%s 日志=%s(以日志为准)",
+                        sid, tenant_id, logged_tenant)
+        log_.tenant_id = logged_tenant
     return log_
 
 

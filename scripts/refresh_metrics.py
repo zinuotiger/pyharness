@@ -35,7 +35,9 @@ def _test_definition_count() -> int:
 def _collected_tests() -> int:
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
-         "-o", "addopts="],
+         "-o", "addopts=",
+         "--ignore=tests/unit/test_desktop_native.py",
+         "--ignore=tests/unit/test_shell_parity.py"],
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
         errors="replace")
     if proc.returncode != 0:

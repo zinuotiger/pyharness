@@ -24,7 +24,6 @@
 code/零副作用。Windows 上权限 600 为尽力而为(spec 偏离 4:ACL 不由 Python
 管),模式断言仅 posix 执行;符号链接逃逸用例在无权限环境自动 skip。
 """
-import os
 import sys
 import types
 from pathlib import Path
@@ -218,7 +217,8 @@ class TestPut:
         with pytest.raises(PyHError) as ei:
             await spill.put("x" * 1025, kind="read", ctx=ctx)
         assert ei.value.code == "PERS-223"
-        assert ei.value.ctx["chars"] == 1025 and ei.value.ctx["max"] == 1024
+        # R24:口径改为**字节**(与键名 max_per_file_bytes 同口径;此前按字符数比较)
+        assert ei.value.ctx["bytes"] == 1025 and ei.value.ctx["max"] == 1024
         assert files_in(ctx.config) == []                 # 拒写零副作用
 
     async def test_write_fail_raises_pers221(self, tmp_path: Path):

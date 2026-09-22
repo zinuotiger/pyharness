@@ -8,7 +8,7 @@
 1. **唯一写入口 `append`**:全系统改变会话事实的唯一通道(原则 1);先校验后写——坏数据(信封非法/类型未注册/seq 乱序/终态后写入)在入口被拒,不进内存/总线/日志;`seq/ts` 只由框架在此分配,LLM/工具/插件无权自报(防伪造乱序)。
 2. **append-only,无 update/delete API**:本类**不提供**任何 update/delete/原地改写方法(测试钉死:类方法清单 grep 断言);"修正"= 追加修正事件(`user.message_edited`/`user.feedback`/`context.compacted`/`session.recovered`),原文永留日志,reducer 取新版留旧痕。
 3. **派生视图工厂(纯函数)**:`derive_messages()`(别名 `derive_history`,§3.5 reducer 唯一权威实现,禁止第二份历史存储)、`events_after()`(增量读)、`events_between()`(闭区间切片)、`get()`(单条读取)——UI/消息历史/FTS/计量一切视图都经此派生,不另存状态。
-4. **强同步三类**(§3.6/EVENT-SCHEMA §1.2):`user.message`、`guard.rejected`、`approval.*` 在 append 内落盘成功才返回——崩溃最多丢强同步点后 ≤0.5s 攒批窗事件,由 repair 的 `session.recovered` 声明。
+4. **强同步事件(`SYNC_TYPES`)**(§3.6/EVENT-SCHEMA §1.2):`user.message`、`guard.rejected`、`approval.*` 在 append 内落盘成功才返回——崩溃最多丢强同步点后 ≤0.5s 攒批窗事件,由 repair 的 `session.recovered` 声明。
 5. **缓存纪律(INV-01/INV-03)**:`history_cache` 仅当日志尾部未变时有效;任何 append 后整体失效;`open_session` 重放重建后缓存一律重建;rebuild 与缓存逐事件比对测试钉死。
 6. **会话状态机**:`pending → active → finished`(session.created seq=1 引导;close 写 finished 后拒一切 append:EVT-104);repair 恢复路径经 `recovering` 由 recovered 事件声明合法化。
 
@@ -46,7 +46,7 @@
 
 ### `async def append(type_: str, payload: dict, *, actor: str, sync: bool = False, trace: dict | None = None, origin: str | None = None, task_id: str | None = None) -> Envelope` — 唯一写入口(F009)
 
-**功能**:校验 → 分配 seq → 入内存(订阅者可即时读)→ 总线分发 →(强同步三类)落盘 → 派生缓存整体失效;返回带 seq 的 Envelope。**本类唯一写方法**。
+**功能**:校验 → 分配 seq → 入内存(订阅者可即时读)→ 总线分发 →(强同步事件(`SYNC_TYPES`))落盘 → 派生缓存整体失效;返回带 seq 的 Envelope。**本类唯一写方法**。
 
 ```python
 async def append(self, type_, payload, *, actor, sync=False, trace=None,
@@ -62,7 +62,7 @@ async def append(self, type_, payload, *, actor, sync=False, trace=None,
     self._seq = env.seq                           # seq 单调前进(max+1,永不回填)
     self._cache.append(env)                       # 先入内存:订阅者/派生视图可即时读
     await bus.emit(env.type, env)                 # 总线分发;日志订阅者(§8)负责物理落盘
-    if sync or env.type in SYNC_TYPES:            # 强同步三类:user.message /
+    if sync or env.type in SYNC_TYPES:            # 强同步事件(`SYNC_TYPES`):user.message /
         await self._persistence.flush(env.seq)    #   guard.rejected / approval.*(§3.6)
     self.history_cache = None                     # 派生缓存整体失效(INV-03)
     return env
@@ -226,7 +226,7 @@ def rebuild_from_log(self):
 4. **seq 空洞合法化**:空洞必须以 context.compacted / fork.created / session.recovered 声明;append 永远 max+1,永不回填。
 5. **单进程单写者**(INV-07):禁止跨进程打开同一日志写(写由注入的 persistence 单句柄完成)。
 6. **版本演进**:未知类型回放跳过 + 警告不中断(§3.8);事件类型只增不改,payload 只加可选字段。
-7. **SYNC_TYPES 常量** = `{"user.message", "guard.rejected", "approval.requested", "approval.granted", "approval.denied", "approval.timeout"}`(§3.6 强同步三类全集)。
+7. **SYNC_TYPES 常量** = `{"user.message", "guard.rejected", "approval.requested", "approval.granted", "approval.denied", "approval.timeout"}`(§3.6 强同步事件(`SYNC_TYPES`)全集)。
 
 ## 关联测试(汇总)
 

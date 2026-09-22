@@ -81,7 +81,6 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
@@ -302,8 +301,30 @@ def _is_linkish(p: str) -> bool:
     return False
 
 
+def _in_read_extra(target: str, extra_read_dirs: Any) -> bool:
+    """target 是否落在**只读例外目录**内(A2;两层同判口径)。
+
+    例外目录条目按 `expanduser` + `abspath`(+ 尽力 `realpath`)归一后比较;
+    不可解析的条目跳过(不放大)。**只判包含**:是否"允许"由调用方按**读写**决定。
+    """
+    for entry in (extra_read_dirs or ()):
+        raw = str(entry or "").strip()
+        if not raw:
+            continue
+        try:
+            base = os.path.abspath(os.path.expanduser(raw))
+            real = os.path.realpath(base)
+        except (OSError, ValueError):
+            continue
+        if _inside_workspace(target, base) or _inside_workspace(target, real):
+            return True
+    return False
+
+
 def _resolve_geometry(raw: Any, workspace_root: str,
-                      *, link_resolver: Optional[Callable[[str], str]] = None
+                      *, link_resolver: Optional[Callable[[str], str]] = None,
+                      read_only: bool = False,
+                      extra_read_dirs: Any = ()
                       ) -> tuple[str, Optional[str]]:
     """路径几何单点判定(g3 权威语义;F055 单点 guard 侧实现)。
 
@@ -312,19 +333,24 @@ def _resolve_geometry(raw: Any, workspace_root: str,
         POL-FS-2 ".." 段逃逸(规范化后越界)
         POL-FS-3 symlink/junction 终解析越界(词法在界内,真实在界外)
     全过返回 (target, None)。纯只读:零 stat 之外副作用(os.path 探测)。
+
+    ``read_only`` + ``extra_read_dirs``(**A2/R24**):``security.policy.read_extra_dirs``
+    声明的例外目录**只对读类工具**放行(写类一律仍越界拒)。此前例外在两层都被忽略
+    ⇒ 配置了仍被拒(L-24)。此处与 provider ``resolve_in_workspace`` **同判**。
     """
     target = _norm_target(raw, workspace_root)
     ws = os.path.abspath(os.path.expanduser(workspace_root))
+    exempt = bool(read_only) and _in_read_extra(target, extra_read_dirs)
     # 1) POL-FS-1:绝对路径词法越界(不 startswith workspace)
-    if os.path.isabs(str(raw).strip()) and not _inside_workspace(target, ws):
+    if os.path.isabs(str(raw).strip()) and not _inside_workspace(target, ws)             and not exempt:
         return (target, "POL-FS-1")
     # 2) POL-FS-2:".." 段逃逸(规范化后不在 workspace)
-    if _has_dotdot(str(raw)) and not _inside_workspace(target, ws):
+    if _has_dotdot(str(raw)) and not _inside_workspace(target, ws)             and not exempt:
         return (target, "POL-FS-2")
     # 3) POL-FS-3:symlink/junction 终解析越界(链点存在才查,防误伤普通路径)
     if _is_linkish(target):
         final = (link_resolver or _final_realpath)(target)
-        if not _inside_workspace(final, ws):
+        if not _inside_workspace(final, ws) and not exempt:
             return (target, "POL-FS-3")
     return (target, None)
 
@@ -390,9 +416,13 @@ async def g_fs_path_check(call: Any, scope: Any,
     非文件域 → allow(match 兜底);workspace 根取自 scope.policy.workspace_root
     (F055 fresh workspace);越界即拒,零副作用(只读探测)。
     """
-    ws = getattr(_policy_of(scope), "workspace_root", None) or ""
-    target, policy = _resolve_geometry(_fs_target(call), ws,
-                                       link_resolver=link_resolver)
+    pol = _policy_of(scope)
+    ws = getattr(pol, "workspace_root", None) or ""
+    # A2:只读例外目录**仅对读类工具**生效(写类仍一律越界拒);与 provider 同判。
+    target, policy = _resolve_geometry(
+        _fs_target(call), ws, link_resolver=link_resolver,
+        read_only=call.name.startswith(_READ_PREFIXES),
+        extra_read_dirs=getattr(pol, "read_extra_dirs", None) or ())
     if policy:
         return ("reject", policy)
     return ("allow", None)
@@ -942,6 +972,17 @@ def register_guard_hook(hook: str, guard: Guard) -> None:
     _PLUGIN_HOOKS[hook] = guard
 
 
+def unregister_guard_hook(hook: str) -> bool:
+    """注销插件 guard 钩子名(幂等;返回是否真的摘除)。
+
+    2026-09-21 补:此前**只有注册没有注销**,而 ``PluginManager.uninstall`` 的
+    docstring 明写"支持重装(F004)" —— 含 guard 钩子的插件重装时会在
+    ``register_guard_hook`` 处撞 TLB-801"名全库唯一",即**该声明对这类插件为假**;
+    且卸载后陈旧 Guard 仍留在表里,``match_guard_by_hook`` 仍会把它挂到新声明上。
+    """
+    return _PLUGIN_HOOKS.pop(str(hook), None) is not None
+
+
 def match_guard_by_hook(defn: Any) -> list[Guard]:
     """按 Definition.guard_hooks 名字解析出 Guard 实例(announce 时挂载用)。
 
@@ -1079,7 +1120,7 @@ __all__ = [
     "g_overwrite_match", "g_overwrite_check",
     # 装配/工厂
     "build_builtin_chain", "from_config",
-    "register_guard_hook", "match_guard_by_hook",
+    "register_guard_hook", "unregister_guard_hook", "match_guard_by_hook",
     # 声明式描述(S2-1;治理层装配消费面——只读,不改判定)
     "RuleDescriptor", "describe_rules",
     # 常量(审计/测试锚点)

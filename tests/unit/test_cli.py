@@ -450,7 +450,6 @@ class TestBootstrap:
     async def test_scan_unhealthy_module_missing_skips(self, monkeypatch, tmp_env):
         """repair 模块未装配(同批任务未落地):启动自检降级跳过不阻断(cfg 干净)。"""
         monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
-        cfg = str(tmp_env / "no.yaml")
         out = await cli._scan_unhealthy(Path(tmp_env))
         assert out is None
 
@@ -474,7 +473,7 @@ class TestBootstrap:
             ctx.session = log_                        # 修复后装回会话(幂等)
             ctx.task_queue = cli._wire_queue(ctx) and ctx.task_queue
 
-        async def fake_auto_scan(d):
+        async def fake_auto_scan(d, **_kw):
             h = SimpleNamespace(sid=sid, healthy=False)
             return [h]
 
@@ -489,6 +488,33 @@ class TestBootstrap:
             sh.ctx.session._persistence.close()
         except Exception:                             # noqa: BLE001 清理不阻断
             pass
+
+    async def test_scan_unhealthy_skips_live_session(self, tmp_env, monkeypatch):
+        """**R14-2 回归**:正被持有的**活会话**不得作为修复候选。
+
+        根因:索引是 200ms **攒批**落的派生视图 ⇒ 活会话在攒批窗口内必然
+        `view_last < last` ⇒ 被 `scan_session` 判 `index_stale`;自检若把它交给
+        `_ensure_repair`,`repair_session` 取锁即撞 PERS-202 并**上抛** ⇒ 第二个 CLI
+        启动直接失败(**两进程实测复现**)。此处同进程持锁等价复现该占用。
+        """
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(tty=False))
+        cfg = str(tmp_env / "no.yaml")
+        sh0 = await cli.bootstrap_shell(self._parsed("chat", "--config", cfg))
+        sid = sh0.ctx.session.sid                     # store 仍打开 = 持锁(活会话)
+        sdir = tmp_env / "sessions"
+
+        async def fake_auto_scan(d, **_kw):
+            return [SimpleNamespace(sid=sid, healthy=False)]
+
+        mod = types.ModuleType("pyharness.repair")
+        mod.auto_scan = fake_auto_scan
+        monkeypatch.setitem(sys.modules, "pyharness.repair", mod)
+
+        assert await cli._scan_unhealthy(sdir) is None, \
+            "活会话(锁被持有)必须跳过,否则第二个 CLI 会因 PERS-202 启动失败"
+        sh0.ctx.session._persistence.close()           # 释放锁 = 会话不再活跃
+        assert await cli._scan_unhealthy(sdir) == sid, \
+            "负空间:锁释放后同一会话必须恢复为候选(并非永久屏蔽)"
 
 
 # ============================================================== run 单发/R8
@@ -1134,6 +1160,211 @@ class TestOffline:
         out = capsys.readouterr().out
         assert "会话数: 1" in out and "事件总数: 2" in out and "已终态会话: 1" in out
 
+    async def test_search_survives_rotated_segment_and_backup(self, tmp_env,
+                                                              capsys):
+        """**R14-3 回归**:目录里有轮转段/修复备份时,``search`` 必须照常工作。
+
+        根因:枚举守卫是 ``stem.startswith("s-")``,而 ``{sid}.1.jsonl`` /
+        ``{sid}.corrupt-*`` 的 stem **同样**以 ``s-`` 开头 ⇒ 辅助档被当成独立会话
+        注册进索引;备份是主文件的**字节副本**(同 session_id、同 seq)⇒ rebuild 撞
+        ``fts_rows`` 主键冲突 ⇒ **PERS-202,search 直接崩**(实测)。
+        """
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        from pyharness.events import Envelope
+
+        def _j(seq, type_, actor, payload):
+            return Envelope(seq=seq, ts="2026-09-07T06:00:00.000000Z", type=type_,
+                            session_id=SID, actor=actor,
+                            payload=payload).model_dump_json() + "\n"
+
+        created = _j(1, "session.created", "system", {"title": "", "model": "m"})
+        needle = _j(2, "user.message", "user", {"content": "needle-zzz"})
+        (sessions / f"{SID}.1.jsonl").write_text(created, encoding="utf-8")
+        (sessions / f"{SID}.jsonl").write_text(needle, encoding="utf-8")
+        (sessions / f"{SID}.corrupt-20260907T000000000.jsonl").write_text(
+            needle, encoding="utf-8")               # 备份 = 主文件字节副本
+
+        cfg = str(tmp_env / "no.yaml")
+        rc = await cli.cli_main(cli.parse_args(
+            ["search", "needle", "--config", cfg]))
+        out = capsys.readouterr().out
+        assert rc == 0, f"辅助档不得让 search 崩(PERS-202);out={out!r}"
+        assert SID in out and "[needle]" in out      # snippet 用 [] 标命中词
+        assert f"{SID}.corrupt" not in out and f"{SID}.1" not in out, \
+            "命中只应挂真实会话 id(辅助档不是会话)"
+
+    async def test_job_reads_session_across_rotated_segment(self, tmp_env,
+                                                            capsys):
+        """**R14-3**:``job`` 按**会话**读(轮转段 + 主文件),且 sid 归真实会话。
+
+        此前段被当作独立会话 ⇒ 段的 stem(``s-xxx.1``)会成 job 记录的 sid;若改为
+        只读主文件,段内的旧记录又会被丢掉。两者都不是会话级语义。
+        """
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        started = ('{"seq": 1, "ts": "t", "type": "job.started", "actor": "system",'
+                   ' "payload": {"task_id": "job:alpha"}}\n')
+        done = ('{"seq": 2, "ts": "t", "type": "task.completed", "actor": "system",'
+                ' "payload": {"task_id": "job:alpha"}}\n')
+        (sessions / f"{SID}.1.jsonl").write_text(started, encoding="utf-8")
+        (sessions / f"{SID}.jsonl").write_text(done, encoding="utf-8")
+        (sessions / f"{SID}.corrupt-20260907T000000000.jsonl").write_text(
+            started + done, encoding="utf-8")        # 备份:不得造出第二条记录
+
+        cfg = str(tmp_env / "no.yaml")
+        assert await cli.cli_main(cli.parse_args(
+            ["job", "show", "job:alpha", "--config", cfg])) == 0
+        out = capsys.readouterr().out
+        assert "job:alpha" in out and f"sid={SID}" in out, \
+            f"job 记录须归真实会话(非 .1/备份的 stem):{out!r}"
+        assert "completed" in out, f"跨段读取须看到主文件里的终态:{out!r}"
+
+    async def test_session_show_does_not_take_session_lock(self, tmp_env, capsys):
+        """**R14-6 回归**:``session show`` 是**只读**命令,不得取会话写锁。
+
+        此前借 ``open_store`` 读 ⇒ 它会取 INV-07 写锁 ⇒ **会话正被他进程使用时**
+        ``session show`` 自身撞 PERS-202(实测:无锁 rc=0 / 有锁 rc≠0)——
+        "看不了正在跑的会话"。改走 ``SessionReader``(只读回放源)。
+        """
+        from pyharness import persistence as P
+
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        from pyharness.events import Envelope
+
+        (sessions / f"{SID}.jsonl").write_text("\n".join([
+            Envelope(seq=1, ts="2026-09-07T06:00:00.000000Z", type="session.created",
+                     session_id=SID, actor="system",
+                     payload={"title": "", "model": "m"}).model_dump_json(),
+            Envelope(seq=2, ts="2026-09-07T06:00:01.000000Z", type="user.message",
+                     session_id=SID, actor="user",
+                     payload={"content": "hello-zzz"}).model_dump_json(),
+        ]) + "\n", encoding="utf-8")
+        key = str(P.session_lock_path(sessions / f"{SID}.jsonl"))
+
+        cfg = str(tmp_env / "no.yaml")
+        assert await cli.cli_main(cli.parse_args(
+            ["session", "show", SID, "--config", cfg])) == 0
+        out = capsys.readouterr().out
+        assert "hello-zzz" in out, f"负空间:必须真的读出内容:{out!r}"
+        assert key not in P._LOCKS, "只读命令不得持有会话写锁"
+
+    async def test_search_does_not_wipe_index_outside_its_session_set(self, tmp_env,
+                                                                      capsys):
+        """**R14-4 回归**:``search`` 不得抹掉**不在本次会话集里**的索引行。
+
+        ``search`` 会重建索引,但源只是**本次枚举到的**会话。此前用全量 ``rebuild()``
+        (**DELETE 整表**再重插)⇒ 任何未参与本次搜索的会话,其索引行被一并删除。
+        索引库是**全局**的(``~/.pyharness/index.db``)而会话目录**按租户分** ⇒ 在租户 B
+        的目录里跑一次 search 就会抹掉租户 A / 其他目录来源的全部索引(实测触发面同源)。
+        """
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        from pyharness.events import Envelope
+
+        ok = Envelope(seq=1, ts="2026-09-07T06:00:00.000000Z", type="user.message",
+                      session_id=SID, actor="user",
+                      payload={"content": "alpha-zzz"}).model_dump_json() + "\n"
+        (sessions / f"{SID}.jsonl").write_text(ok, encoding="utf-8")
+
+        db = tmp_env / "pyharness.db"               # PH_STORAGE_DB_PATH(tmp_env)
+        outsider = "s-other-0007"                   # 不在本次 sessions 目录里的会话
+        import sqlite3
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE IF NOT EXISTS fts_rows("
+                     "session_id TEXT NOT NULL, seq INTEGER NOT NULL,"
+                     " PRIMARY KEY (session_id, seq)) WITHOUT ROWID")
+        conn.execute("INSERT OR REPLACE INTO fts_rows VALUES(?,?)", (outsider, 5))
+        conn.commit()
+        conn.close()
+
+        cfg = str(tmp_env / "no.yaml")
+        assert await cli.cli_main(cli.parse_args(
+            ["search", "alpha", "--config", cfg])) == 0
+        capsys.readouterr()
+        conn = sqlite3.connect(str(db))
+        left = conn.execute("SELECT COUNT(*) FROM fts_rows WHERE session_id=?",
+                            (outsider,)).fetchone()[0]
+        mine = conn.execute("SELECT COUNT(*) FROM fts_rows WHERE session_id=?",
+                            (SID,)).fetchone()[0]
+        conn.close()
+        assert left == 1, "本次会话集之外的索引行必须原样保留(索引库是全局的)"
+        assert mine == 1, "本次会话必须被索引(负空间:不是靠'什么都不重建'通过)"
+
+    async def test_job_crash_orphan_reported_failed_not_running(self, tmp_env,
+                                                                capsys):
+        """**R14-12 回归**:崩溃遗留的 job 不得永远显示 `running`。
+
+        job 跑在**持有会话锁**的宿主进程里 ⇒ 锁已释放而仍无终态 = 不可能在跑。此前
+        `job list/show` 只看事件,崩溃遗留(进程被杀 → `_run` 的 finally 未执行 → 无
+        `job.completed/failed`)的 job 恒显示 `running`(模块 docstring 声称"崩溃自动
+        失败",但**事件级无写入者**,实测)。现读侧按宿主存活如实补正。
+        """
+        from pyharness import persistence as P
+
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        from pyharness.events import Envelope
+
+        def _j(seq, type_, payload):
+            return Envelope(seq=seq, ts="2026-09-07T06:00:00.000000Z", type=type_,
+                            session_id=SID, actor="system",
+                            payload=payload).model_dump_json() + "\n"
+
+        (sessions / f"{SID}.jsonl").write_text(
+            _j(1, "session.created", {"title": "", "model": "m"})
+            + _j(2, "job.started", {"task_id": "job:j-1", "intent": "build"}),
+            encoding="utf-8")
+        cfg = str(tmp_env / "no.yaml")
+
+        # ① 无进程持有会话(宿主已崩溃)→ 必须判 failed
+        assert await cli.cli_main(cli.parse_args(
+            ["job", "show", "job:j-1", "--config", cfg])) == 0
+        out = capsys.readouterr().out
+        assert "failed" in out and "running" not in out, \
+            f"崩溃遗留不得显示 running:{out!r}"
+
+        # ② 负空间:宿主存活(锁被持有)→ 仍须显示 running
+        holder = P.open_store(SID, dir=sessions)
+        try:
+            assert await cli.cli_main(cli.parse_args(
+                ["job", "list", "--config", cfg])) == 0
+            out = capsys.readouterr().out
+            assert "running" in out and "failed" not in out, \
+                f"宿主存活时必须如实报 running:{out!r}"
+        finally:
+            holder.close()
+
+    async def test_stats_does_not_count_aux_files_as_sessions(self, tmp_env,
+                                                              capsys):
+        """**R14-3 回归**:用量统计按**会话**聚合(轮转段 + 主文件),辅助档不算会话、
+        不重复计事件 —— 此前把备份(主文件字节副本)当独立会话 ⇒ 会话数与事件数双超。"""
+        sessions = tmp_env / "sessions"
+        sessions.mkdir(parents=True)
+        from pyharness.events import Envelope
+
+        def _j(seq, type_, payload):
+            return Envelope(seq=seq, ts="2026-09-07T06:00:00.000000Z", type=type_,
+                            session_id=SID, actor="system",
+                            payload=payload).model_dump_json() + "\n"
+
+        created = _j(1, "session.created", {"title": "", "model": "m"})
+        msg = _j(2, "user.message", {"content": "hi"})
+        fin = _j(3, "session.finished", {"reason": "done"})
+        (sessions / f"{SID}.1.jsonl").write_text(created, encoding="utf-8")
+        (sessions / f"{SID}.jsonl").write_text(msg + fin, encoding="utf-8")
+        (sessions / f"{SID}.corrupt-20260907T000000000.jsonl").write_text(
+            msg + fin, encoding="utf-8")            # 副本:不得被重复计入
+
+        cfg = str(tmp_env / "no.yaml")
+        assert await cli.cli_main(cli.parse_args(
+            ["stats", "--config", cfg])) == 0
+        out = capsys.readouterr().out
+        assert "会话数: 1" in out, f"辅助档不是会话:{out!r}"
+        assert "事件总数: 3" in out, f"每事件恰好计一次(段+主文件):{out!r}"
+        assert "已终态会话: 1" in out            # 终态取主文件尾部
+
     # ------------------------------------------------------ RT-02 扫描容错
     def _two_sessions(self, root):
         """建 1 个正常会话 + 1 个不可读会话,返回 (sessions_dir, bad_path)。"""
@@ -1195,7 +1426,7 @@ class TestRepairCmd:
     def _install_repair(self, monkeypatch, *, hits=(), report=None, calls=None):
         mod = types.ModuleType("pyharness.repair")
 
-        async def fake_auto_scan(sessions_dir):
+        async def fake_auto_scan(sessions_dir, **_kw):
             return list(hits)
 
         async def fake_repair_session(ctx, sid, *, interactive=False, policy=None):
@@ -1212,6 +1443,48 @@ class TestRepairCmd:
         sh = _sh(_ctx(), headless=True)
         assert await cli.repair_cmd(sh) == 0
         assert capsys.readouterr().out.strip() == "[repair] 无损坏会话"
+
+    async def test_skips_live_session_and_reaches_real_damage(self, monkeypatch,
+                                                              tmp_path, capsys):
+        """**R14-7 回归**:候选筛选必须跳过被其他进程持有的**活会话**,才能修到真损坏。
+
+        索引是 200ms **攒批**落的派生视图 ⇒ 活会话在攒批窗口内必然 `index_stale`。
+        修复前 ``repair`` 无 sid 时直接取首个不健康者 ⇒ 唯一"待修"是活会话时整条命令
+        抛 **PERS-202**;而活会话排在前面时,**真正损坏的会话永远够不到**。
+        此处按最坏顺序(活会话在前)钉死两种行为。
+        """
+        from pyharness import persistence as P
+
+        live, dead = "s-live-0001", "s-dead-0002"
+        for sid in (live, dead):
+            (tmp_path / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
+        holder = P.open_store(live, dir=tmp_path)          # 持锁 = 活会话
+        try:
+            calls: list = []
+            self._install_repair(
+                monkeypatch,
+                hits=[SimpleNamespace(sid=live, healthy=False),
+                      SimpleNamespace(sid=dead, healthy=False)],
+                report=SimpleNamespace(fixed=1, lost=0, backup_path="b",
+                                       quarantined=0),
+                calls=calls)
+            sh = _sh(_ctx(storage=SimpleNamespace(sessions_dir=tmp_path)),
+                     headless=True)
+            assert await cli.repair_cmd(sh) == 0
+            assert [c[0] for c in calls] == [dead], \
+                f"必须跳过活会话并修到真损坏的会话(实测顺序影响结果):{calls}"
+
+            calls.clear()                                  # 只有活会话时:不抛、报"无损坏"
+            self._install_repair(
+                monkeypatch,
+                hits=[SimpleNamespace(sid=live, healthy=False)],
+                report=SimpleNamespace(fixed=1, lost=0, backup_path="b",
+                                       quarantined=0),
+                calls=calls)
+            assert await cli.repair_cmd(sh) == 0
+            assert calls == [] and "无损坏会话" in capsys.readouterr().out
+        finally:
+            holder.close()
 
     async def test_repair_report_text(self, monkeypatch, capsys):
         report = SimpleNamespace(fixed=2, lost=0, backup_path="b.jsonl",
@@ -1281,3 +1554,97 @@ class TestEndToEndSmoke:
         finally:
             if sh.ctx.session is not None:
                 sh.ctx.session._persistence.close()
+
+
+async def test_cli_log_recorder_filters_sid_and_scopes_owner():
+    """R9:CLI 落盘订阅必须**按 sid 过滤** + 属主**含 sid**(原为第三份各自实现)。
+
+    修复前实测:属主固定 ``"persistence"`` 且无 sid 过滤 ⇒ 同一总线上开第二个会话时,
+    他会话事件会被写进本会话 store(engine/desktop 两侧都已修,CLI 侧漏)。
+    """
+    from types import SimpleNamespace
+    from typing import Any
+
+    from pyharness.bus import EventBus
+    from pyharness import cli as cli_mod
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        async def append(self, env: Any, sync: bool = False) -> None:
+            self.calls.append(env.session_id)
+
+    class _Env:
+        def __init__(self, sid: str) -> None:
+            self.session_id = sid
+
+        def model_dump_json(self) -> str:
+            return "{}"
+
+    bus = EventBus()
+    rec = _Rec()
+    log_ = SimpleNamespace(sid="s-cli-0000001")
+    cli_mod._attach_log_persistence(bus, log_, rec)
+
+    owners = {s.owner for lst in bus._by_type.values() for s in lst}
+    assert owners == {"persistence:s-cli-0000001"}, owners
+
+    handlers = [s.handler for lst in bus._by_type.values() for s in lst]
+    assert handlers, "应已订阅词表类型"
+    handler = handlers[0]
+    await handler("user.message", _Env("s-cli-0000001"))     # 本会话:落盘
+    await handler("user.message", _Env("s-cli-other-02"))    # 外来:丢弃
+    await handler("llm.chunk", {"delta": "x"})               # 瞬时:丢弃
+    assert rec.calls == ["s-cli-0000001"], rec.calls
+
+
+# ============================== R14-13:收尾不得被"没有会话日志"短路
+async def test_flush_session_teardown_is_not_short_circuited():
+    """**R14-13 回归**:收尾的三步彼此独立,不得相互短路。
+
+    ACP 外壳的 ``ctx.session`` 是 ``DesktopSessionManager``(真源在各 store 里,没有
+    ``_persistence``)。修复前 ``_flush_session`` 在"会话日志不可 flush"时**直接 return**
+    ⇒ ``spine.close()``(含 FTS detach/flush)与 ``shutdown_all()``(关各 store ⇒ 落盘)
+    全被跳过:ACP 退出时 61 个非强同步事件类型(``agent.message``/``tool.result``/
+    ``llm.response`` 等)仍留在攒批缓冲里,进程退出即丢。
+    """
+
+    class _Mgr:
+        def __init__(self):
+            self.n = 0
+
+        def shutdown_all(self):
+            self.n += 1
+
+    class _Spine:
+        def __init__(self):
+            self.n = 0
+
+        async def close(self):
+            self.n += 1
+
+    # ① manager 形态(ACP):两步都必须执行
+    mgr, spine = _Mgr(), _Spine()
+    await cli._flush_session(SimpleNamespace(
+        ctx=SimpleNamespace(session=mgr, engine_spine=spine)))
+    assert mgr.n == 1, "会话门面必须关闭(否则攒批事件随进程退出丢失)"
+    assert spine.n == 1, "引擎外部资源必须收尾(含 FTS detach/flush)"
+
+    # ② 会话日志形态(chat/run):flush 仍要发生,且两步照样执行
+    flushed = []
+
+    class _Persist:
+        async def flush(self):
+            flushed.append(True)
+
+    log_ = SimpleNamespace(_persistence=_Persist())
+    mgr2, spine2 = _Mgr(), _Spine()
+    await cli._flush_session(SimpleNamespace(
+        ctx=SimpleNamespace(session=log_, engine_spine=spine2)))
+    assert flushed == [True], "会话日志直连形态必须先刷真源"
+    assert spine2.n == 1                      # manager 面缺失也不影响收尾
+    assert mgr2.n == 0
+
+    # ③ 空 ctx:不抛
+    await cli._flush_session(SimpleNamespace(ctx=SimpleNamespace()))

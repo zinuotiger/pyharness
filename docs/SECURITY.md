@@ -25,7 +25,7 @@
 
 # 1 威胁建模:STRIDE 逐类分析
 
-**适用性判定**:单进程无网络层身份伪造,但内容/事件/裁决语义层威胁更重。判定:Spoofing 弱、Tampering/Repudiation/信息泄露/DoS/EoP 高度适用。
+**适用性判定**:单进程,但**桌面壳存在 HTTP 面**（`127.0.0.1`），故网络层身份伪造**并非不存在**——2026-09-21 起按 ADR-023 收紧（全局令牌 + 每租户令牌两级）。内容/事件/裁决语义层威胁仍更重。判定:Spoofing 中(HTTP 面可伪造身份声明,已按 ADR-023 收敛)、Tampering/Repudiation/信息泄露/DoS/EoP 高度适用。
 
 **Spoofing(假冒)**:S-1 伪造"已执行"——诱导 LLM 不调工具直接输出"文件已删除" → 终态/完成只认事件不认文本(F007/F047 核对)。S-2 伪造审批裁决——approval.* 的 actor 由框架按通道打(§3.2),approval_id=请求 seq 防重放(F015)。S-3 冒充脊柱名/重名工具——BUS-002/TLB-801 拒,registry.updated 留痕。
 
@@ -74,7 +74,7 @@
 | 契约 | 工具存在?(注册表) | TLB-802 回喂 | R1 |
 | 参数先验后跑 | raw_args 过 pydantic 强类型(strict 拒多余字段);raw_args/args 双份存档 | TLB-803 回喂,绝不执行;连败 2 次终止该轮 | R1/INV-06 |
 | scope 前置 | 工具在当前 scope 可见? | REJECT 终局(GRD-401) | R2 |
-| guard 链 | [g-schema, g-danger, g-fs-path, g-credential-read, g-net-outbound]+钩子(g-exec/g-overwrite)+插件(只加严) | 任一 reject 终局,guard.rejected 强同步;approval 转人类 | R2/R4/R5/R7 |
+| guard 链 | **求值序 = 动作形状先行、危险分级殿后**：[g-schema, g-fs-path, g-credential-read, g-exec, g-overwrite, g-net-outbound, g-danger]+插件(只加严,恒在链尾)。`g-danger` **必须最后**——分级只决定「是否需要人类审批」，不短路形状 guard 求值;若它提前短路(旧口径曾如此)，`g-exec`/`g-overwrite` 对 `danger=high` 工具将**恒为死代码**(shell/cwd/strict 约束与覆写审批在人类批准前从未求值)。链序源 = `tools_guard._BUILTIN_IDS` | 任一 reject 终局,guard.rejected 强同步;approval 转人类 | R2/R4/R5/R7 |
 | 审批 | danger≥high 人类确认;critical 不可审批 | denied/timeout 不执行;granted 重入链起点 | R2/R8 |
 | 执行 | 工具 60s 超时、线程池 | tool.error(TLB-805)回喂 | R6 |
 
@@ -179,7 +179,7 @@ tool.call(danger≥high) → approval.requested(approval_id=请求 seq, args_sum
 
 **记录什么(事件全集即审计全集,不另建审计表)**:安全关键事件=tool.call(参数 args+raw_args 双份,INV-06)、guard.evaluated(INV-04 依据)、**guard.rejected(强同步,"拦了"的证据)**、**approval.requested/granted/denied/timeout(强同步,含 by/ttl/approval_id)**、tool.result/tool.error(含 TLB-802/803/805、GRD-401)、sandbox.opened/scope 变更、guard.disabled(安全降级)、llm.request/usage(成本含 degraded_from)、**user.message(强同步)**、session.finished/system.cancelled(终态原因)、plugin.installed/uninstalled/registry.updated。
 
-**不可篡改(结构保证+诚实边界)**:append-only API(F009)——无 update/delete,修正只能追加(F063);seq/ts 框架分配(§3.2)——防伪造乱序/重复,LLM/插件无权自报;强同步三类(user.message/guard.rejected/approval.*)——安全关键事实不因崩溃丢失,崩溃最多丢之后 ≤0.5s 攒批事件由 repair 声明(F060);文件权限 600——防本机他用户读,不防物理级/管理员篡改(假定 OS 可信,§1.3 T-1);轮转>50MB+repair 前强制备份(F011/F060);可逆审计(F058)——compaction 折叠区间与摘要同留可展开核对,guard 拒绝记录**不可折叠**,摘要失真可被发现;自检对账(F031/F060)——seq 连续/缓存一致/guard 覆盖,违规只告警+提示 repair 不杀进程。
+**不可篡改(结构保证+诚实边界)**:append-only API(F009)——无 update/delete,修正只能追加(F063);seq/ts 框架分配(§3.2)——防伪造乱序/重复,LLM/插件无权自报;强同步事件(`SYNC_TYPES`)(user.message/guard.rejected/approval.*)——安全关键事实不因崩溃丢失,崩溃最多丢之后 ≤0.5s 攒批事件由 repair 声明(F060);文件权限 600——防本机他用户读,不防物理级/管理员篡改(假定 OS 可信,§1.3 T-1);轮转>50MB+repair 前强制备份(F011/F060);可逆审计(F058)——compaction 折叠区间与摘要同留可展开核对,guard 拒绝记录**不可折叠**,摘要失真可被发现;自检对账(F031/F060)——seq 连续/缓存一致/guard 覆盖,违规只告警+提示 repair 不杀进程。
 
 **事件关联(seq/血缘/段)**:seq=会话内全序时间轴,回放因果链(guard.rejected seq31→LLM 换招 seq35);trace.parent_seq=工具事件←触发它的 llm.response,定位"哪次模型输出引发危险调用";call_id=call↔result/error,断言拒绝调用无 result(INV-05);approval_id(=请求 seq)=请求↔裁决,防重放、追查谁批了什么;task_id/段(F044)=任务边界,按任务切审计切片,子 agent/job 独立审计;session_id(+fork base_seq F059)=跨会话追查。**典型查询**:找"昨天 plan 任务里 AI 有没有尝试删文件"→ 按 task_id 取段 → 过滤 guard.rejected → 沿 trace.parent_seq 找诱导上下文 → 沿 tool.result 确认零执行;F057 FTS/events_between 秒级完成(N4)。
 

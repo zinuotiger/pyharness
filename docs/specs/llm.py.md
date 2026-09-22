@@ -9,7 +9,7 @@
 2. **协议与解析层**(ADI §1):`parse_tool_calls` 负责 assistant 消息 tool_calls 拆解——`function.arguments` 是**字符串内嵌 JSON**,必须二次 `json.loads`;失败抛 `ToolCallSyntaxError` → 上层映射 TLB-803 回喂,零执行、零补全(零猜原则)。
 3. **流式聚合**(F027):chunk 只经 `bus.emit("llm.chunk")` 给 UI、**不进日志**;增量 tool_calls 按 index 分片合并(跨块追加不覆盖);完成时聚合为单条 `llm.response` 落盘,与逐 chunk 拼接逐字节一致(INV 比对)。
 4. **错误归一**(ADI §7):只按异常类别/HTTP 状态判定(ADR-011),绝不匹配厂商错误文本;归一后对外仅 LLM-301/302/303/304 五码,非 API 异常不上 LLM 码(内部缺陷 → CYC-999)。
-5. **用量计量**(F029):`report_usage` 每成功请求落 `llm.usage` 事件(model/in_tokens/out_tokens/cost_est)+ 更新 `UsageCounters`;计数器可由事件日志重建(INV-01),预算硬闸只读 token 数(F032)。
+5. **用量计量**(F029):`report_usage` 每成功请求落 `llm.usage` 事件(model/in_tokens/out_tokens/cost_est)+ 更新 `UsageCounters`;计数器可由事件日志重建(INV-01),预算硬闸判据 = **token 与 cost 并列**(out/in/`cost_est` 任一 ≥ 上限即 exhausted;`cost_est` 由**软约束**单价表 `llm.usage.unit_price` 估算,上限 `budget.task.max_cost_yuan`,F032)。
 
 ## 依赖
 

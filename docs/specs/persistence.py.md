@@ -6,7 +6,7 @@
 ## 模块职责
 
 1. **JSONL 唯一真源落盘**:一行一事件(Envelope + payload 拍平单行,`model_dump_json()`),路径 `{sessions_dir}/{session_id}.jsonl`(可配);只追加物理格式,无就地改写。
-2. **双速 flush(§3.6)**:普通事件内存即对订阅者可见、persistence 攒批(≤0.5s 或 ≥64 条)flush;**强同步三类**(`user.message` / `guard.rejected` / `approval.*`)立即 write + flush,成功才返回——崩溃最多丢强同步点之后 ≤0.5s 事件,由 repair 的 recovered 事件声明。
+2. **双速 flush(§3.6)**:普通事件内存即对订阅者可见、persistence 攒批(≤0.5s 或 ≥64 条)flush;**原始三类族**(`user.message` / `guard.rejected` / `approval.*`;现全量见 `SYNC_TYPES`)立即 write + flush,成功才返回——崩溃最多丢强同步点之后 ≤0.5s 事件,由 repair 的 recovered 事件声明。
 3. **原子写**(DIS 细化,重写路径专用):凡"重写文件"操作(repair 截断/隔离重写、轮转合并)一律走 **同目录临时文件 + fsync + rename** 原子替换——rename 原子性保证任何时刻磁盘上要么是旧完整文件、要么是新完整文件,杜绝半写;正常 append 路径仍是纯追加句柄,不经临时文件。
 4. **损坏检测与读取隔离**:`replay()` 严格行解析,坏行记 `PERS-201` 跳过并进隔离区,**绝不中断回放**(§3.8);`detect_truncation()` 定位崩溃遗留的尾部半行。
 5. **repair 崩溃恢复入口(F060)**:备份 → 截断检测 → 中部坏行隔离 → seq 空洞定位 → 派生视图重建 → `session.recovered` 声明;幂等(重复执行结果一致);修复前强制备份。
@@ -39,7 +39,7 @@
 ```text
  NORMAL(攒批)──(满64/0.5s)──► FLUSHING ──成功──► NORMAL
    │                            │失败
-   │ 强同步点(sync 三类)         ▼
+   │ 强同步点(`SYNC_TYPES`)         ▼
    │   │                    ERROR_BACKOFF(重试≤3)──成功──► NORMAL
    │   ▼                        │3 败
    └─► SYNC_FLUSH ──失败──► SUSPENDED(PERS-202,会话暂停)──repair──► RECOVERING──► NORMAL
@@ -48,7 +48,7 @@
 | 当前→目标 | 触发 | 动作/事件 |
 |---|---|---|
 | normal→flushing | 攒批满 64 条/0.5s 定时器 | 批量 write + flush |
-| normal→sync_flush | 强同步三类事件 | 立即 write + flush,成功才返回 |
+| normal→sync_flush | 强同步事件(`SYNC_TYPES`) | 立即 write + flush,成功才返回 |
 | flushing/sync→error_backoff | OSError | 入 _retry_q;重试 ≤3 次 |
 | error_backoff→suspended | 3 次失败 | PERS-202 事件 + 暂停会话(拒新不丢旧) |
 | suspended→recovering | repair(F060) | 备份/截断/隔离/原子重写/重建 |
@@ -79,7 +79,7 @@ def open_store(session_id, *, dir=None):
 
 ### `async def append(self, env: Envelope, sync: bool = False) -> None` — 事件落盘(F011 双速写)
 
-**功能**:Envelope → 单行;`sync=True`(强同步三类)立即 write + flush,成功才返回;否则入 `_pending` 攒批(满 64 条即刷,0.5s 定时器兜底);写入后检查文件大小触发轮转。调用方:session.append 内部(强同步点)、总线日志订阅者。
+**功能**:Envelope → 单行;`sync=True`(强同步事件(`SYNC_TYPES`))立即 write + flush,成功才返回;否则入 `_pending` 攒批(满 64 条即刷,0.5s 定时器兜底);写入后检查文件大小触发轮转。调用方:session.append 内部(强同步点)、总线日志订阅者。
 
 ```python
 async def append(self, env, sync=False):
@@ -109,7 +109,7 @@ async def append(self, env, sync=False):
 
 ### `async def flush(self, up_to_seq: int | None = None) -> None` — 公开 flush(session 强同步点调用)
 
-**功能**:把 `_pending` 中 `seq ≤ up_to_seq` 的全部行写盘 + flush,成功才返回;`up_to_seq=None` = 全量(定时器/关闭前调用);session.append 在强同步三类时以此保证"该事件已物理落盘"。
+**功能**:把 `_pending` 中 `seq ≤ up_to_seq` 的全部行写盘 + flush,成功才返回;`up_to_seq=None` = 全量(定时器/关闭前调用);session.append 在强同步事件(`SYNC_TYPES`)时以此保证"该事件已物理落盘"。
 
 ```python
 async def flush(self, up_to_seq=None):
@@ -287,7 +287,7 @@ def seq_holes(self, path):
 
 ## 边界与限制
 
-1. **崩溃一致性**:强同步三类之后的事件最多丢 ≤0.5s,由 repair 截断 + recovered 声明;已落盘事实永不回滚。
+1. **崩溃一致性**:强同步事件(`SYNC_TYPES`)之后的事件最多丢 ≤0.5s,由 repair 截断 + recovered 声明;已落盘事实永不回滚。
 2. **只追加物理格式**:正常写路径纯 append 无就地改写;一切重写(repair 截断/隔离、轮转)走**临时文件 + fsync + 原子 rename**,且修复前强制备份。
 3. **单进程写**(INV-07):文件句柄 append 模式单写者;轮转文件名带序号,重放按序合并。
 4. **敏感性**:事件 payload 全序列化(工具大结果只进 spill_ref,F039);日志全出口脱敏(INV-09:日志无凭据)。
@@ -309,7 +309,7 @@ GWT-P8-01 强弱同步分级 · GWT-P8-02 坏行隔离(repair 后隔离区可查
 
 ## 关联文档
 
-- PRD-Core.md §3.6(JSONL 物理格式/强同步三类/损坏行)、§2.5(启动/强同步三类)、§5.2 F011、§5.7 F060(repair)
+- PRD-Core.md §3.6(JSONL 物理格式/强同步事件(`SYNC_TYPES`)/损坏行)、§2.5(启动/强同步事件(`SYNC_TYPES`))、§5.2 F011、§5.7 F060(repair)
 - DIS-CORE.md §8(本模块伪代码级唯一权威,写通道状态机/repair 流水线)
-- EVENT-SCHEMA.md §1.2(强同步三类语义)、§5(JSONL 物理格式)、§3.1(session.recovered payload)
+- EVENT-SCHEMA.md §1.2(强同步事件(`SYNC_TYPES`)语义)、§5(JSONL 物理格式)、§3.1(session.recovered payload)
 - ERR.md §2.3(PERS-201/202 处置与可重试性)、§3(用户可见消息基准);ADD.md ADR-001/ADR-006

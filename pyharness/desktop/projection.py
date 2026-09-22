@@ -4,14 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
 
-from pyharness.core.tenant_settings import tenant_for_session
+from pyharness.core.tenant_settings import (event_tenant_allowed,
+                                            event_tenant_of)
 from pyharness.events import Envelope
 
-from .constants import SSE_HEARTBEAT_S, TIMELINE_KINDS, _SENSITIVE_HINTS
+from .constants import _SENSITIVE_HINTS
 
 log = logging.getLogger("pyharness.desktop.projection")
 
@@ -86,15 +86,14 @@ class EventStreamHub:
             sid = _env_session_id(payload)  # 持久/带作用域瞬时事件按会话过滤
             seq = getattr(payload, "seq", None)
         text = _serialize_event(type_, payload)
-        event_tenant = tenant_for_session(sid or "") if sid else ""
+        # 租户归属:优先**落盘信封**(GAP-10,免疫重启/跨租户 sid 撞名),回落进程内映射
+        event_tenant = event_tenant_of(payload, session_id=sid or "")
         async with self._lock_for(sid):
             for c in tuple(self.clients):
                 if c.dead:
                     continue
-                if c.tenant and event_tenant and c.tenant != event_tenant:
-                    continue                # 租户过滤:禁止跨租户事件泄漏
-                if c.tenant and not event_tenant and c.tenant != "default":
-                    continue                # 未知会话非默认租户 fail-closed
+                if not event_tenant_allowed(c.tenant, event_tenant):
+                    continue                # 租户过滤:禁止跨租户事件泄漏(单点判据)
                 if c.sid and sid and c.sid != sid:
                     continue                # 会话过滤:只投本会话客户端
                 c.queue.put_nowait((type_, text))

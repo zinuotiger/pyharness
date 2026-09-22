@@ -313,7 +313,7 @@ def derive_history(events, max_tokens: int) -> list[dict]:
 ## 3.6 JSONL 物理格式与落盘
 
 - 路径 `~/.pyharness/sessions/{session_id}.jsonl`(可配);一行一事件,UTF-8;信封与 payload 拍平单行。
-- 写策略:普通事件内存即对订阅者可见,persistence 攒批(≤0.5s 或 ≥64 条)flush;**强同步三类**:user.message、guard.rejected、approval.*(立即写 + flush,成功才返回)。崩溃最多丢强同步点之后 ≤0.5s 的事件,由 repair 声明。
+- 写策略:普通事件内存即对订阅者可见,persistence 攒批(≤0.5s 或 ≥64 条)flush;**强同步事件(`SYNC_TYPES`)**:user.message、guard.rejected、approval.*(立即写 + flush,成功才返回)。崩溃最多丢强同步点之后 ≤0.5s 的事件,由 repair 声明。
 - 行样例(实际单行):
 
 ```jsonl

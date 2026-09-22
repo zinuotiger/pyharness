@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from pyharness.errors import raise_code
-from pyharness.events.envelope import check_seq_gap
+from pyharness.events.envelope import check_seq_gap, declared_ranges
 from pyharness.governance.receipt import _read_events
 
 # 因果链各段名(输出字典的键;``missing`` 里出现即表示"应有而未找到")
@@ -226,22 +226,16 @@ class AuditSystem:
     # ------------------------------------------------------------ 对账
     @staticmethod
     def _declared_holes(events: list) -> list:
-        """合法空洞声明(**只读**)：
+        """合法空洞声明(**只读**):对账用 ``SEQ-GAP`` 判据。
 
-        - ``context.compacted.ranges`` —— ``[[lo, hi], …]``（折叠闭区间）;
-        - ``session.recovered.lost`` —— ``[seq, …]``（修复丢弃的单个 seq）。
+        2026-09-21 R14-9:判据**唯一来源** ``events.declared_ranges``。此前本处自写一份
+        且**漏掉** ``session.recovered.fixed`` 里的 ``"seq-holes:[…]"`` 词条 ⇒ repair
+        刚声明过的空洞在治理对账里仍被报成 ``SEQ-GAP``(**假一致性发现**:对账把一次
+        合法修复当成治理缺陷)。
         """
         out: list = []
         for e in events:
-            t = getattr(e, "type", None)
-            p = getattr(e, "payload", None) or {}
-            if t == "context.compacted":
-                for pair in (p.get("ranges") or []):
-                    if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                        out.append((int(pair[0]), int(pair[1])))
-            elif t == "session.recovered":
-                for s in (p.get("lost") or []):
-                    out.append((int(s), int(s)))
+            out.extend(declared_ranges(e))
         return out
 
     async def reconcile(self, *, session_id: str = "", ctx: Any = None,

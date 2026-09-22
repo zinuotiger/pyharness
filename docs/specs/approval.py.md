@@ -61,7 +61,7 @@ async def request(self, call, args_summary, ctx, *, ttl_ms=None):
     if reqs and not reqs[0].is_terminal():
         reqs.append(self._new_waiter(call, args_summary, ch, ttl_ms))
         return await self._wait_any(reqs[-1])           # 挂到既有批,不新增请求事件
-    ev = await session.append("approval.requested",     # 强同步三类之一(§3.6)
+    ev = await session.append("approval.requested",     # 原始三类族之一(§3.6)
         {"approval_id": self._next_seq_hint(),          # 实际=append 返回 seq
          "tool": call.name, "args_summary": args_summary,
          "ttl_ms": ttl_ms or self._ttl_ms, "channel": ch}, actor="tool", sync=True)

@@ -23,7 +23,12 @@ from pyharness.errors import raise_code
 
 
 def _sandbox_dir(ctx: Any):
-    """会话工作目录:workspace_root/<sid>/sandbox(fail-closed:无根 → CYC-999)。"""
+    """会话工作目录:workspace_root/sandbox(fail-closed:无根 → CYC-999)。
+
+    workspace_root 本身已是**会话专属根**(F055,{workspaces_dir}/{sid},见
+    scope.session_workspace)——2026-09-21 修:此前再拼一层 /{sid} 是"根=共享
+    workspaces_dir"时代的遗留,会把沙箱塞进 {sid}/{sid}/sandbox 双嵌套。
+    """
     from pathlib import Path
     scope = getattr(ctx, "scope", None)
     ws = None
@@ -33,8 +38,7 @@ def _sandbox_dir(ctx: Any):
     if not ws:
         raise_code("CYC-999", module="exec",
                    hint="workspace_root 未装配:沙箱目录无法定位(fail-closed)")
-    sid = getattr(getattr(ctx, "session", None), "sid", "anon")
-    return Path(str(ws)) / str(sid) / "sandbox"
+    return Path(str(ws)) / "sandbox"
 
 
 def _wallclock(ctx: Any) -> int:

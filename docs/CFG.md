@@ -86,6 +86,31 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 
 **键名**:点分=YAML 层级(`llm.timeout.total_s`);env/CLI 名见 §4.3。**覆盖列**:L2=仅文件;**L2+**=文件+env+CLI(L2/L3/L4,白名单面一致 §4.5);空=仅 L1 禁外部覆盖。secret-ref 默认形如 `env:NAME`(语法 §7.1);枚举 `a|b`;溯源引用以被引章节为准。
 
+> **声明 ≠ 生效（2026-09-21 实测，务必先读）**：下列 **12 个键**在本表中被声明为可调，
+> 但**当前实现无任何读取点**——改 YAML / env 均**不生效且无告警**。它们对应 PRD-Core §7
+> **未勾选**的功能项，属"已声明未实现"，不是缺陷修复范围：
+>
+> `loop.step_timeout_s`(F017) · `loop.tool_concurrency`(F022) · `loop.thread_pool_size`(PRD §2.5) ·
+> `loop.message_edit_window_s`(F063) · `security.sandbox.proc_mem_limit_mb`(F054) ·
+> `security.credentials.cache_ttl_s`(SEC §6) · `storage.archive_days`(F055) ·
+> `storage.spill.max_per_session_mb`(N3) · `plugins.ctx_lazy`(DIS-SEAM §3.3) ·
+> `plugins.pre_activate`(DIS-SEAM §3.4) · `plugins.priority` · `plugins.deadletter_samples`(F005)
+>
+> 另有 **`shell.web.host` / `shell.web.port`**（§3.8）同样零读取者：Web 壳绑模块常量
+> `127.0.0.1` 并用 `pick_free_port()` 动态取口 ⇒ 设 `PH_WEB_PORT` 得到的是随机口。
+> **接线 host 等于允许绑 `0.0.0.0`，与"仅绑 127.0.0.1"的安全姿态冲突 ⇒ 须先裁定**
+> （接线 / 移除，二选一，见 L-23）。
+>
+> **R1-R6 已接线 7 键**（原亦为死配置）：`loop.max_arg_failures_per_round`（F026 阈值）、
+> `llm.probe.interval_s`（F033 探针周期）、`plugins.backpressure_limit`（F005 总线背压）、
+> `loop.task_queue_max`（F043 队深）、`security.attachment.max_per_message` / `max_bytes` /
+> `mime_whitelist`（F061 附件校验 —— 随 R6-5 按 PRD 实现一并接线）——**这 7 个现在可调且生效**。
+>
+> 权威清单与理由见 `LIMITATIONS.md` **L-20 / L-23**；防线由
+> `tests/invariants/test_inv_config_reachability.py`（AST 级"声明键必须有真实读取点"
+> + `KNOWN_UNIMPLEMENTED` 显式登记，新死配置立即变红；已接线者必须移出登记表）固化。
+> **接线前不得在运维文档中把这些当作可用旋钮。**
+
 ## 3.1 模型域(F012/F013/F028/F029/F030/F033)
 
 | 键 | 类型 | 默认值 | 取值范围 | 说明 | 覆盖 |
@@ -114,12 +139,12 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 | 键 | 类型 | 默认值 | 取值范围 | 说明 | 覆盖 |
 |---|---|---|---|---|---|
 | `loop.max_turns` | int | `30` | 1-1000 | 轮数上限,超限强制终态 max_turns(F007);只许收紧 | L2+ |
-| `loop.step_timeout_s` | int | `60` | 1-600 | 工具/子进程默认墙钟上限(F017/F052);超时杀进程树 | L2+ |
+| `loop.step_timeout_s` | int | `60` | 1-600 | 工具/子进程默认墙钟上限(F017/F052);超时杀进程树 | L2+ **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
 | `loop.input_queue_max` | int | `10` | 1-100 | running 中新输入队深,>10 拒新 BUSY(F007) | L2 |
 | `loop.task_queue_max` | int | `32` | 1-1024 | 任务队列深度,满拒 QUE-001(F043) | L2 |
 | `loop.convergence_rounds` | int | `3` | 1-10 | 连续 N 轮无新信息提前终止(F007) | L2 |
-| `loop.tool_concurrency` | int | `1` | 1-3 | 同轮 tool_calls 并发;默认串行(F022) | L2+ |
-| `loop.thread_pool_size` | int | `4` | 1-32 | 同步 handler 线程池(PRD §2.5) | L2 |
+| `loop.tool_concurrency` | int | `1` | 1-3 | 同轮 tool_calls 并发;默认串行(F022) | L2+ **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
+| `loop.thread_pool_size` | int | `4` | 1-32 | 同步 handler 线程池(PRD §2.5) | L2 **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
 | `loop.max_arg_failures_per_round` | int | `2` | 1-5 | 同工具连续 N 次校验败→终止该轮(F026) | L2 |
 | `loop.max_context_tokens` | int | `65536` | 1024-1048576 | 派生历史窗口 64k tokens(F010/N3),超窗头部截断 | L2+ |
 | `loop.compact.trigger_ratio` | float | `0.75` | 0.5-0.95 | 历史≥窗口 75% 触发压缩(F058) | L2 |
@@ -139,7 +164,7 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 |---|---|---|---|---|---|
 | `security.sandbox.level` | enum | `strict` | strict/basic/off | strict=独立根+allowlist 空+高危入 deny+subprocess 禁;basic=g-exec 需授权;off=会话 workspace(SEC §7)。**下调须显式人类确认+`sandbox.opened` 事件** | L2(文件+确认) |
 | `security.sandbox.proc_wallclock_s` | int | `60` | 1-3600 | 子进程墙钟限额,超时杀树(F052) | L2 |
-| `security.sandbox.proc_mem_limit_mb` | int | `0` | 0=不限;≥1=MB | 子进程内存限额;Windows 尽力而为(F054) | L2 |
+| `security.sandbox.proc_mem_limit_mb` | int | `0` | 0=不限;≥1=MB | 子进程内存限额;Windows 尽力而为(F054) | L2 **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
 | `security.network.allowed_domains` | list[str] | `[]` | 域名列表 | 外发 allowlist,空=禁一切外发 POL-NET-1(F023/N13);域名归一 | L2 |
 | `security.network.web_search_per_session` | int | `20` | 0-1000 | 搜索次数闸,0=禁用(F037) | L2 |
 | `security.network.search_backend` | enum | `bing` | disabled/bing/duckduckgo | 内置搜索后端;`bing`=Bing RSS 无 key,`duckduckgo`=HTML 后端,`disabled`=关闭(F037) | L2 |
@@ -152,7 +177,7 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 | `security.approval.merge_window_s` | int | `60` | 0-600 | 同工具同参合并窗防轰炸;0=不合并(F015) | L2 |
 | `security.trustlist.enabled` | bool | `false` | true/false | 信任名单默认关;仅交互会话可开;headless 永不生效;不随 fork 继承;全留事件;critical 不在名单(SEC §5) | L2(文件+确认) |
 | `security.credentials.file` | str | `~/.pyharness/credentials.yaml` | 路径 | 凭据文件 600+gitignore(F016/SEC §6),内容同走 env 引用 | L2 |
-| `security.credentials.cache_ttl_s` | int | `300` | 0-3600 | 秘密 TTL≤5min,轮换至多 5min 生效(SEC §6) | L2 |
+| `security.credentials.cache_ttl_s` | int | `300` | 0-3600 | 秘密 TTL≤5min,轮换至多 5min 生效(SEC §6) | L2 **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
 | `security.attachment.max_bytes` | int | `10485760` | 1-104857600 | 附件≤10MB/张(F061) | L2 |
 | `security.attachment.max_per_message` | int | `5` | 1-20 | ≤5 张/消息(F061) | L2 |
 | `security.attachment.mime_whitelist` | list[str] | `[image/jpeg,image/png,image/webp,image/gif]` | MIME | 类型白名单+魔数校验(F061) | L2 |
@@ -183,7 +208,7 @@ Skill 安装流程:`search → download → SHA-256 → quarantine → safe extr
 | `log.jsonl.flush_interval_s` | float | `0.5` | 0.05-10 | 普通事件攒批 flush≤0.5s(PRD §3.6) | L2 |
 | `log.jsonl.flush_batch` | int | `64` | 1-1024 | ≥64 条即 flush(PRD §3.6) | L2 |
 
-**强同步三类固定**:`user.message`/`guard.rejected`/`approval.*` 立即写+flush 成功才返回(F009);崩溃最多丢 ≤0.5s 攒批事件,repair(F060)声明。
+**强同步事件(`SYNC_TYPES`)固定**:`user.message`/`guard.rejected`/`approval.*` 立即写+flush 成功才返回(F009);崩溃最多丢 ≤0.5s 攒批事件,repair(F060)声明。
 
 ## 3.5 成本域(F032/N5;F029)
 
@@ -225,8 +250,8 @@ Skill 安装流程:`search → download → SHA-256 → quarantine → safe extr
 | `plugins.enabled` | list[str] | 内置能力(空=只装内置) | 插件/能力 id | 启用名单;名单外不装载;脊柱 8 模块不可配(BUS-002) | L2+ |
 | `plugins.dir` | str | `~/.pyharness/plugins` | 路径 | 第三方插件包目录(含 manifest);不存在=忽略 | L2+ |
 | `plugins.mcp_servers` | list[object] | `[]` | `{name, command:[argv], enabled, timeout_s}` | MCP stdio server 列表;不走 shell,工具以 `mcp.<name>.<tool>` 注册并强制审批 | L2+ |
-| `plugins.ctx_lazy` | bool | `true` | true/false | ctx 服务惰性装载(DIS-SEAM §3.3);false=启动期全量 enter | L2 |
-| `plugins.pre_activate` | list[str] | `[storage.spill, credentials, storage.kv]` | 基础能力 id | 预激活:启动第⑤步先行 enter(DIS-SEAM §3.4) | L2 |
+| `plugins.ctx_lazy` | bool | `true` | true/false | ctx 服务惰性装载(DIS-SEAM §3.3);false=启动期全量 enter | L2 **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
+| `plugins.pre_activate` | list[str] | `[storage.spill, credentials, storage.kv]` | 基础能力 id | 预激活:启动第⑤步先行 enter(DIS-SEAM §3.4) | L2 **（未生效：L-20 KNOWN_UNIMPLEMENTED）** |
 | `plugins.priority` | dict | `{}` | `{插件id: int}` | 同层无依赖插件次序,小者先;默认 0 按注册序 | L2 |
 | `plugins.backpressure_limit` | int | `1000` | 1-100000 | 总线背压阈值,满=拒新不丢旧(F005) | L2 |
 | `plugins.deadletter_samples` | int | `100` | 0-10000 | 死信保留最近样本数(F005) | L2 |
@@ -449,12 +474,31 @@ shell:
 ```text
 ~/.pyharness/tenants/<tenant>/
 ├── models.json          # provider/model/base_url/temperature/max_tokens,不含明文 Key
-└── model-secrets.bin    # Windows DPAPI 加密；其他平台 0600 文件
+├── model-secrets.bin    # Windows DPAPI 加密；其他平台 0600 文件
+└── token                # 该租户的 API 令牌（R31-2 鉴权用；仅非 `default` 租户）
 ```
 
 - Web 请求使用 `X-PyHarness-Tenant: <tenant>`；SSE 使用 `?tenant=<tenant>`。
+- **租户鉴权（ADR-023 / R31-2）**：`default` 沿用全局 `shell.web.token`（兼容口）；
+  **其他租户**必须同时出示该租户的令牌 —— 请求头 `X-PyHarness-Tenant-Token`、
+  同名 HttpOnly cookie，或引导页 `GET /?tenant=<tenant>&token=<令牌>` 换 cookie。
+  缺失/错误 ⇒ **401**；已授权但与会话权威归属不符 ⇒ **403**（分两层，见下）。
+- 引导页 `/` **不发无凭证的令牌 cookie**（此前任何本机进程 GET / 即得全局令牌）。
+- **租户令牌从哪来（唯一生产创建路径）**：持**操作者令牌**访问
+  `GET /?tenant=<tenant>&token=<全局令牌>` ⇒ 服务端**铸/取**该租户令牌并下发其 cookie。
+  租户令牌**换不到**别的租户，故可安全外发给单个客户端作最小凭证。
+- **权限说明（2026-09-21 实测更正）**：写入时调用 `chmod 0600`，**POSIX 上生效**；
+  **Windows 上不生效**（NTFS 不存 POSIX 位，实测 `S_IMODE=0o666`），实际可读面由
+  **父目录 ACL 继承**决定 —— 默认限当前用户，但若 `.pyharness` 被额外授权给别的组，
+  本文件会继承该授权。**Windows 上不要当作「0600」**。
+- **操作者令牌的取用**：`shell.web.token` 未配置时，令牌是**进程随机**且不打印，故壳启动时把它落盘到
+  `<storage.root>/web.token`（**不写日志**，只记路径；权限同上条）。浏览器访问即用
+  `http://127.0.0.1:<port>/?token=<该文件内容>`。已配置 `shell.web.token` 时**不落盘**（用户已知该值）。
 - 每个租户使用独立 `sessions/`、`skills/`、`plugins/` 目录。
 - `llm.api_key` 使用内部引用 `tenant:<tenant>:<profile>`；适配器在请求发送前才解密。
 - Key 为只写字段，查询接口只返回 `has_api_key`，不回显明文。
 - 同一进程内同名模型会生成带哈希的独立适配器键，避免租户间复用凭据。
-- 该隔离是应用级逻辑租户，不是针对同一 Windows 用户的强安全边界。
+- **边界（2026-09-21 升级）**：租户是**经凭证绑定的访问边界**，而非"声明即可用"的逻辑分区。
+  但该边界**止于文件系统**：服务仅绑 `127.0.0.1`，且同一 Windows 用户**能读文件**的进程
+  本来就可直接读取 `~/.pyharness/tenants/<t>/`（含 `token`）⇒ 本机制**不防**此类进程，
+  只挡"能连回环端口但读不到该用户文件"者（见 ADR-023 §威胁模型）。

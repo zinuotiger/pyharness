@@ -129,7 +129,7 @@ def unsubscribe_all(self, owner: str) -> int:
 |---|---|---|---|
 | type_ | str | 是 | 事件名,必须已 register_type |
 | payload | dict | 是 | 事件负载 |
-| mode | str | 否 | sequential(默认)/waterfall/parallel,强同步三类恒 sequential |
+| mode | str | 否 | sequential(默认)/waterfall/parallel,强同步事件(`SYNC_TYPES`)恒 sequential |
 **伪代码**:
 ```python
 async def emit(self, type_: str, payload: dict, mode: str = "sequential") -> dict:

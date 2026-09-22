@@ -34,7 +34,7 @@ from pyharness.errors import raise_code
 from pyharness.bus.registry import Registry
 
 if TYPE_CHECKING:
-    from pyharness.bus.event_bus import EventBus, Subscription
+    from pyharness.bus.event_bus import EventBus
 
 log = logging.getLogger("pyharness.bus.plugin")
 
@@ -124,12 +124,39 @@ class PluginHost:
             raise
 
     async def detach(self, cap: Any, ctx: Any) -> None:
-        """能力摘除:摘订阅 → 注销工具 → 注销能力(detach 内含 unsubscribe_all)。"""
+        """能力摘除:摘订阅 → 注销工具 → 注销能力(detach 内含 unsubscribe_all)。
+
+        2026-09-21 补:随工具一起**注销其声明的插件 guard 钩子**。此前只有
+        ``register_guard_hook`` 没有注销面 ⇒ ①卸载后陈旧 Guard 仍在表里,新声明
+        仍会解析到它;②含钩子的插件重装时撞 TLB-801"名全库唯一",与
+        ``PluginManager.uninstall`` docstring 的"支持重装(F004)"矛盾。
+        钩子名取自工具定义的 ``guard_hooks``(须在注销工具**之前**读)。
+        """
         cap = _coerce_cap(cap)
         self._bus.unsubscribe_all(self.owner)
+        hooks: list[str] = []
         for name in cap.tool_keys:
+            try:
+                defn = self.registry.lookup("tool", name)
+            except Exception:                        # noqa: BLE001 已摘/不存在:跳过
+                defn = None
+            if defn is not None:
+                for h in tuple(getattr(defn, "guard_hooks", ()) or ()):
+                    if str(h) not in hooks:
+                        hooks.append(str(h))
             self.registry.unregister("tool", name)
         self.registry.unregister("capability", cap.id)
+        if hooks:
+            try:
+                from pyharness.core.tools_guard import unregister_guard_hook
+            except Exception:                        # noqa: BLE001 依赖缺失不阻断摘除
+                unregister_guard_hook = None
+            for h in hooks:
+                try:
+                    if unregister_guard_hook is not None:
+                        unregister_guard_hook(h)
+                except Exception as exc:             # noqa: BLE001 摘钩失败不阻断
+                    log.warning("detach 注销 guard 钩子失败 hook=%s: %s", h, exc)
 
 
 @dataclass

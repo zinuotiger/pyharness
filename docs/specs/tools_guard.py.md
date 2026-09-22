@@ -7,7 +7,7 @@
 ## 模块职责
 
 1. **三值决策与单调终局(原则 3)**:决策枚举 `{allow, reject, approval}`,无 bypass 值——不存在"跳过 guard 的标记位";任一 guard 返回非 allow 即短路(waterfall),reject = 终局,同 call 后续全部 guard 不再求值、Provider 零执行(INV-05),**无任何 API 能把 reject 翻回 allow**;插件 guard 只加拒绝面(只增链尾,不可移除/重排内置节)。
-2. **审计事件(INV-04/R4)**:每次求值必写 `guard.evaluated`(tool/decision/guard_ids/policy_ref)——执行前缺该事件 = 非法执行;每次 reject 必写 `guard.rejected`(tool/guard_id/reason/call_id/policy_ref,**强同步三类之一**,§3.6),两事件是"单调性证明"的审计素材。
+2. **审计事件(INV-04/R4)**:每次求值必写 `guard.evaluated`(tool/decision/guard_ids/policy_ref)——执行前缺该事件 = 非法执行;每次 reject 必写 `guard.rejected`(tool/guard_id/reason/call_id/policy_ref,**原始三类族之一**,§3.6),两事件是"单调性证明"的审计素材。
 3. **danger 分级默认策略(SECURITY §4.2/L0-L4)**:策略分层 L0 系统配置 → L1 会话 scope(deny_tools/allowlist/workspace,只紧不松)→ L2 工具契约(Definition.danger,不可变)→ L3 调用裁决(本文件 GuardChain)→ L4 人类审批(approval.py);guard 求值只服从已定策略,`g-danger` 按 danger 输出:high→approval、critical→reject(POL-DGR-1,不可审批,强制把 approval 转 reject)、none/low→allow;critical 无审批通道是刻意设计(人类真想删须下调沙箱留事件,而非弹窗点同意)。
 4. **内置 g1-g7(F023)**:g1-g5 恒在(g-schema/g-danger/g-fs-path/g-credential-read/g-net-outbound),g6/g7(g-exec/g-overwrite)与插件 guard 按注册序追加链尾;五内置 guard 不可整体关闭——单个关闭须 config 显式声明并写 `guard.disabled` 事件(SECURITY §4.1);按**动作形态**兜底(match 按名前缀/Definition 结构),不信任描述文本(防"低危声明+高危实现"伪装工具)。
 5. **审批重入支持(PRD §6.7)**:evaluate 只返回决策;approval 的裁决与"granted 后重入链起点"由 executor/approval 编排(本文件提供可重复调用的 evaluate,单调性高于人类即时意志——批准期间策略收紧则重入 reject,GRD-403 语义)。
@@ -109,7 +109,7 @@ async def _append_rejected(self, call, guard_id, policy_ref):
     await self._session.append("guard.rejected",
         {"tool": call.name, "guard_id": guard_id, "reason": policy_ref,
          "call_id": call.call_id, "policy_ref": policy_ref},
-        actor="tool", sync=True)        # 强同步三类之一:崩溃不丢拦截事实
+        actor="tool", sync=True)        # 原始三类族之一:崩溃不丢拦截事实
 ```
 
 **参数表**:见上。**异常表**:PERS-202(落盘失败,抛错——拒绝事实必须落地)。**关联测试**:T-SEC-01/05(事件含 guard_id+policy_ref,回放逐条可查)。

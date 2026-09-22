@@ -33,7 +33,7 @@ import pytest
 from pyharness import repair as R
 from pyharness.errors import PyHError
 from pyharness.events import Envelope
-from pyharness.persistence import detect_truncation, open_store
+from pyharness.persistence import detect_truncation
 
 SID = "s-repair01"
 TS = "2026-09-07T06:00:00.000000Z"
@@ -423,7 +423,7 @@ class TestRepairSession:
 
     async def test_index_stale_triggers_views_rebuild(self, tmp_path):
         """索引落后(日志末 3 > 视图末 1)→ 派生视图整体重建 + 审计词条。"""
-        path = _write(tmp_path, SID, _session_events(3))
+        _write(tmp_path, SID, _session_events(3))
         view = _ViewStub(max_seq=1)
         ctx = _ctx(tmp_path, session_query=view)
         report = await R.repair_session(ctx, SID)
@@ -582,6 +582,46 @@ class TestRebuildViews:
             await R.rebuild_derived_views(_ctx(tmp_path, session_query=view), SID)
         assert e.value.code == "PERS-201"
 
+    async def test_owned_handle_reconcile_reads_inside_lifetime(self, tmp_path):
+        """R14-1 二阶回归:自建句柄(CLI/桌面外壳 ctx 无 ``session_query``)重建后,
+        对账读数必须在句柄**有效期内**取 —— 否则 ``finally`` 里 detach 关库后
+        ``max_seq`` 恒返 0,而日志水位 > 0 ⇒ **假 PERS-201**(修复自身引出的缺陷)。
+
+        真 ``SessionQueryIndex`` + 真 JSONL,走 ``owned=True`` 路径:修复后应返回
+        True 且不抛;索引水位与内容日志一致。
+        """
+        from pyharness.core.session_query import read_max_seq
+        _write(tmp_path, SID, _session_events(3))       # created + user.message×2
+        db = tmp_path / "index.db"
+        cfg = SimpleNamespace(storage=SimpleNamespace(sessions_dir=tmp_path,
+                                                      db_path=str(db)))
+        ctx = _ctx(tmp_path, settings=cfg, config=cfg)  # 外壳形态:无 session_query
+        ok = await R.rebuild_derived_views(ctx, SID)
+        assert ok is True, "自建句柄重建应成功(不因 detach 后读数而假报 PERS-201)"
+        assert read_max_seq(db, SID) == 3, "重建后索引应追平内容日志水位"
+
+    async def test_rotated_session_watermark_is_session_level(self, tmp_path):
+        """R14-1 二阶:轮转会话的水位是**会话级**的(replay 合并读段+主文件)。
+
+        复现路径:轮转段持全部内容(seq 1..3);主文件只剩一条被截断的半行 ⇒ repair
+        截到空 ⇒ rebuild 重放"段+主文件"→ 索引水位 3。若对账按**主文件单文件**算
+        内容水位 → 0 != 3 ⇒ **假 PERS-201**(repair 已成功却被判失败,违反 R14-1
+        "repair 后 healthy/stale 收敛")。判据须与 ``scan_session`` 的会话级水位单源
+        (CND-06/08)。
+        """
+        from pyharness.core.session_query import read_max_seq
+        seg = tmp_path / f"{SID}.1.jsonl"                # 轮转段:真源的一部分
+        seg.write_bytes("".join(_line(e) for e in _session_events(3)).encode())
+        (tmp_path / f"{SID}.jsonl").write_bytes(       # 主文件:整文件半行(崩溃现场)
+            b'{"seq": 4, "ts": "2026-09-07T0')
+        db = tmp_path / "index.db"
+        cfg = SimpleNamespace(storage=SimpleNamespace(sessions_dir=tmp_path,
+                                                      db_path=str(db)))
+        ctx = _ctx(tmp_path, settings=cfg, config=cfg)
+        rep = await R.repair_session(ctx, SID)          # 不得假报 PERS-201
+        assert "tail-truncated" in rep.fixed
+        assert read_max_seq(db, SID) == 3, "索引应含轮转段内容(会话级水位 3)"
+
     async def test_kv_rebuild_duck_called(self, tmp_path):
         """storage.kv_rebuild 鸭子面(装配后有 KV 派生缓存 → 一并重建)。"""
         calls = []
@@ -632,3 +672,511 @@ class TestViewQuarantine:
         assert entries[0].line_no == 3
         assert entries[0].raw == "bad" and entries[0].reason == "parse-fail"
         assert entries[0].archived is True
+
+
+# ============ CND-06 保真:隔离重写后**未被隔离的字节逐字节不变**(2026-09-21)
+async def test_quarantine_rewrite_preserves_kept_bytes_exactly(tmp_path):
+    """隔离重写 = 只删坏行:**其余字节原样往返**(含 CRLF、末行无换行、CRLF 混合)。
+
+    代码注释声明"好行原样保留(含原行尾,字节往返)",此前**无测试锁定** ⇒ 未来
+    若把读改写改成文本模式(universal newlines)会把 CRLF 静默归一为 LF(丢 \r),
+    属 CND-06"未改动数据字节级保真"违约。本用例以**字节相等**断言钉死。
+    """
+    path = tmp_path / f"{SID}.jsonl"
+    good1 = _env(1, "session.created", "system").model_dump_json().encode() + b"\r\n"
+    bad = b'{"seq": 2, "broken": \n'                     # 半行 JSON(坏行)
+    good2 = _env(3, "user.message", "user").model_dump_json().encode() + b"\n"
+    good3 = _env(4, "agent.message").model_dump_json().encode()   # 末行**无换行**
+    path.write_bytes(good1 + bad + good2 + good3)
+
+    pol = R.RepairPolicy(mode="auto", keep_quarantine=True)
+    entries = await R.quarantine_lines(path, [2], pol)
+
+    assert [e.line_no for e in entries] == [2] and entries[0].archived is True
+    assert path.read_bytes() == good1 + good2 + good3, \
+        "未隔离字节必须逐字节不变(CRLF/无尾换行/顺序全保真)"
+    # 隔离档含坏行原文(≤8KB 截断),行号可查
+    view = R.view_quarantine(SID, tmp_path)
+    assert any(e.line_no == 2 for e in view)
+
+
+async def test_quarantine_line_judgement_single_source(tmp_path):
+    """**判据单源**:`_iter_text` 判定的坏行集合 == 重写时被摘除的行集合。
+
+    两处若各用一套行切分(文本模式 vs 字节模式)会出现"判坏第 N 行、删掉另一行";
+    现共用 `enumerate(fh, 1)` 同一基座,本用例以"逐行重放后字节全等"验证。
+    """
+    path = tmp_path / f"{SID}.jsonl"
+    lines = []
+    for seq in range(1, 7):
+        if seq in (2, 5):
+            lines.append(b'{"seq": %d, "oops"\n' % seq)     # 坏行
+        else:
+            lines.append(_env(seq, "user.message", "user").model_dump_json()
+                         .encode() + b"\n")
+    original = b"".join(lines)
+    path.write_bytes(original)
+
+    bad = [no for no, text in R._iter_text(path) if R._parse_or_none(text) is None]
+    assert bad == [2, 5], bad
+    pol = R.RepairPolicy(mode="auto", keep_quarantine=True)
+    await R.quarantine_lines(path, bad, pol)
+
+    expect = lines[0] + lines[2] + lines[3] + lines[5]
+    assert path.read_bytes() == expect, "删掉的行必须与判坏集合完全一致"
+
+
+# ============ R11-2:索引落后对账**真正可达**(db_path 兜底 + ctx-less 入口)
+def _mk_index_db(path: Path, rows: list[tuple[str, int]]) -> None:
+    """按**契约表结构**直建最小索引库(fts_rows(session_id,seq) 主键)——只测"读数口"。"""
+    import sqlite3
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE IF NOT EXISTS fts_rows("
+                 "session_id TEXT NOT NULL, seq INTEGER NOT NULL, "
+                 "PRIMARY KEY (session_id, seq)) WITHOUT ROWID")
+    conn.executemany("INSERT OR REPLACE INTO fts_rows VALUES(?,?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_read_max_seq_handles_missing_db_and_rows(tmp_path):
+    """`read_max_seq`:库不存在 → 0(未索引);有行 → 该会话最大 seq;无表 → 0。"""
+    from pyharness.core.session_query import read_max_seq
+
+    missing = tmp_path / "nope.db"
+    assert read_max_seq(missing, SID) == 0
+
+    db = tmp_path / "index.db"
+    _mk_index_db(db, [(SID, 1), (SID, 2), ("s-other-000002", 9)])
+    assert read_max_seq(db, SID) == 2, "只数本会话(跨会话隔离)"
+    assert read_max_seq(db, "s-other-000002") == 9
+    assert read_max_seq(db, "s-none-000003") == 0   # 无行
+
+    empty = tmp_path / "empty.db"                   # 库在但无表 ⇒ 未索引
+    import sqlite3
+    sqlite3.connect(str(empty)).close()
+    assert read_max_seq(empty, SID) == 0
+
+
+def test_fts_provider_falls_back_to_cfg_db_path(tmp_path):
+    """**修复前失败**:provider 只认 ctx.session_query/fts_last_seq ⇒ 从未启用。
+
+    现补第三兜底:由 ``cfg.storage.db_path`` 构造只读读数口 —— repair 只需"库在哪"。
+    """
+    from types import SimpleNamespace as _SN
+
+    cfg = _SN(storage=_SN(db_path=str(tmp_path / "index.db")))
+    ctx = _SN(settings=cfg)
+    fn = R._fts_last_seq_provider(ctx)
+    assert callable(fn), "有 db_path 时必须能给出读数口(否则对账永不启用)"
+    assert fn(SID) == 0                              # 库未建:未索引
+    # 显式注入优先(不因兜底而改变既有语义)
+    explicit = R._fts_last_seq_provider(_SN(fts_last_seq=lambda sid: 7,
+                                            settings=cfg))
+    assert explicit(SID) == 7
+    # 什么都没有 → None(保守:不算落后)
+    assert R._fts_last_seq_provider(_SN()) is None
+
+
+async def test_auto_scan_reconciles_index_when_given_db_path(tmp_path):
+    """**ctx-less 入口**(CLI 启动自检)**修复前失败**:`auto_scan` 不收 db_path ⇒ 对账无从启用。"""
+    evs = _session_events(3)
+    _write(tmp_path, SID, evs)                       # 日志到 seq=3(内容事件)
+    db = tmp_path / "index.db"
+    _mk_index_db(db, [(SID, 1)])                     # 索引只到 1 ⇒ 落后
+
+    hits = await R.auto_scan(tmp_path, db_path=str(db))
+    stale = [h for h in hits if h.sid == SID]
+    assert stale and stale[0].index_stale is True, "应检出索引落后"
+    assert stale[0].healthy is False
+
+    # 索引追平 → 不报
+    _mk_index_db(db, [(SID, 3)])
+    hits2 = await R.auto_scan(tmp_path, db_path=str(db))
+    assert all(not h.index_stale for h in hits2 if h.sid == SID)
+
+
+async def test_auto_scan_without_db_path_keeps_legacy_semantics(tmp_path):
+    """负空间:不给 db_path ⇒ 行为与修复前一致(不判落后),不误报。"""
+    _write(tmp_path, SID, _session_events(3))
+    hits = await R.auto_scan(tmp_path)
+    assert all(not h.index_stale for h in hits if h.sid == SID)
+
+
+# ============ R13-1:失败恢复闭环 —— 幽灵索引行 → 检出 → 重建 → 干净
+async def test_ghost_index_row_detected_and_rebuilt_end_to_end(tmp_path):
+    """崩溃后"索引超前日志"(dispatch 先于 flush)必须**可检出且可自愈**。
+
+    链路(全真):真 JSONL(repair 测试既有 `_write` 直落盘)+ 真 `SessionQueryIndex`
+    建索引 → 注入"索引超前"行(等价崩溃现场)→ 经 **R11-2 的 ctx-less 读数口**
+    `auto_scan(db_path=…)` 检出 `index_stale` → `rebuild`(派生服从真源)清除 → 复扫干净。
+    """
+    from types import SimpleNamespace as _SN
+
+    from pyharness.core.session import SessionLog
+    from pyharness.core.session_query import SessionQueryIndex, read_max_seq
+
+    evs = _session_events(3)                       # created + user.message ×2
+    path = _write(tmp_path, SID, evs)              # 真文件(磁盘真源)
+    db = tmp_path / "index.db"
+    log_ = SessionLog(sid=SID)                     # rebuild 的回放源(内存同源事件)
+    for e in evs:
+        await log_.append(e.type, e.payload, actor=e.actor)
+
+    ix = SessionQueryIndex(db_path=db, sources={SID: log_}, batch_ms=60_000)
+    await ix.enter(_SN())
+    for e in evs:
+        await ix.on_event(e.type, e)
+    await ix.flush()
+    assert read_max_seq(db, SID) == 3, "前置:索引追平日志内容水位"
+
+    # ---- 崩溃现场:索引里多出一行(seq=9),日志没有(dispatch 先于 flush 后崩溃)
+    _mk_index_db(db, [(SID, 9)])
+    cfg = _SN(settings=_SN(storage=_SN(db_path=str(db))))
+    h = await R.scan_session(path, fts_last_seq=R._fts_last_seq_provider(cfg))
+    assert h.index_stale is True and h.healthy is False,         "索引超前(幽灵行)必须被检出(R11-2 的读数口使其可达)"
+
+    # ---- 恢复:重建派生索引(服从真源)⇒ 复扫干净
+    await ix.rebuild(session_id=SID)
+    assert read_max_seq(db, SID) == 3, "重建后索引末 seq 应回到日志水位"
+    h2 = await R.scan_session(path, fts_last_seq=R._fts_last_seq_provider(cfg))
+    assert h2.index_stale is False and h2.healthy is True, "自愈后应健康"
+    await ix.detach(None)
+
+
+# ============ R13-4:中部坏行 三面一体(不自动删 / 追加不破结构 / repair 恰隔离)
+async def test_middle_bad_line_append_then_repair_quarantines_only_bad_line(tmp_path):
+    """① 坏行**不被自动删** ② 运行期追加落在其后、行结构完好
+    ③ repair 恰隔离坏行且**其余行逐字节不变** ④ 可解析事件集**不丢** ⑤ 对账水位不受影响。
+    """
+    from pyharness.bus import EventBus
+    from pyharness.desktop.sessions import DesktopSessionManager
+
+    evs = _session_events(3)                       # seq 1/2/3
+    path = _write(tmp_path, SID, evs)
+    raw = path.read_bytes()
+    garbage = b'{"broken": nope-not-json}\n'
+    lines = raw.split(b"\n")
+    # 把坏行插到**中部**(最后一条完整行之前)
+    path.write_bytes(b"\n".join(lines[:-2]) + b"\n" + garbage + lines[-2] + b"\n")
+    assert _seqs_of(path) == [1, 2, 3], "前置:坏行是**新增**第 3 物理行,不顶掉原行"
+
+    # ---- ② 运行期追加(生产形态:经管理器装配落盘订阅):坏行由 replay 记跳
+    mgr = DesktopSessionManager(dir=tmp_path, bus=EventBus())
+    log_ = await mgr.open_session(SID)
+    env = await log_.append("user.message", {"content": "after-bad"}, actor="user",
+                            sync=True)
+    assert env.seq == 4, "seq 续在可解析水位(max=3)之后"
+    await mgr.shutdown_all()
+
+    after = path.read_bytes()
+    # ① 坏行原样还在(不自动删 ⇒ 数据优先)
+    assert garbage in after, "坏行被自动删除:违反'坏行不自动删'约定"
+    # ② 行结构完好:除坏行外每行都可解析,且新事件是**独立完整**的一行
+    parsed = []
+    for ln in after.split(b"\n"):
+        if not ln:
+            continue
+        try:
+            parsed.append(Envelope.model_validate_json(ln))
+        except Exception:                         # noqa: BLE001 坏行
+            parsed.append(None)
+    good = [e for e in parsed if e is not None]
+    assert sorted(e.seq for e in good) == [1, 2, 3, 4], f"行结构被破坏:{parsed}"
+    assert sum(1 for e in parsed if e is None) == 1, "坏行不得影响其他行的可解析性"
+
+    # ---- ③ repair:恰隔离坏行;其余行**逐字节**不变
+    before_bytes_lines = after.split(b"\n")
+    report = await R.repair_session(_ctx(tmp_path), SID)
+    assert report.quarantined, "中部坏行应被隔离"
+    assert [e.line_no for e in report.quarantined] == [3], report.quarantined
+    assert garbage.rstrip(b"\n") in report.quarantined[0].raw.encode("utf-8"), \
+        "隔离档须留坏行原文(证据)"
+    fixed_lines = path.read_bytes().split(b"\n")
+    # ④ 可解析事件集不丢(repair 只动坏行)
+    posted = []
+    for ln in fixed_lines:
+        if not ln:
+            continue
+        try:
+            posted.append(Envelope.model_validate_json(ln))
+        except Exception:                         # noqa: BLE001
+            posted.append(None)
+    good_post = [e for e in posted if e is not None]
+    assert sorted(e.seq for e in good_post) == [1, 2, 3, 4, 5], good_post
+    assert good_post[-1].type == "session.recovered", "repair 应追加 recovered 声明"
+    # 序号连续无洞(可续跑;坏行不占 seq)
+    assert _seqs_of(path) == [1, 2, 3, 4, 5]
+    # 其余行字节保真:去掉坏行后,与修复前"去掉坏行"的字节序列一致
+    keep_before = [ln for ln in before_bytes_lines if ln and ln != garbage.rstrip(b"\n")]
+    keep_after = [ln for ln in fixed_lines if ln and ln != garbage.rstrip(b"\n")]
+    assert keep_after[: len(keep_before)] == keep_before,         "未改动的行必须字节保真(repair 只在尾部追加 recovered 声明)"
+    # ⑤ 对账水位:坏行不影响内容水位
+    assert R._log_last_seq(path) >= 5
+
+
+# ============ R13-5:轮转段(真源的一部分)损坏必须**可见且可修**
+async def _rotated_damaged(tmp_path):
+    """构造:一次轮转产生 .1.jsonl,并把其中的**整行**换成垃圾。返回 (sid, seg)。"""
+    from pyharness.bus import EventBus
+    from pyharness.desktop.sessions import DesktopSessionManager
+
+    mgr = DesktopSessionManager(dir=tmp_path, bus=EventBus())
+    sid = await mgr.create()
+    log_ = await mgr.open_session(sid)
+    await log_.append("user.message", {"content": "a"}, actor="user", sync=True)
+    mgr._stores[sid].rotate_bytes = 1                # 强制下一次写触发轮转
+    await log_.append("user.message", {"content": "b"}, actor="user", sync=True)
+    await mgr.shutdown_all()
+    seg = sorted(tmp_path.glob(f"{sid}.*.jsonl"))[0]
+    assert seg.name.endswith(".1.jsonl"), seg.name
+    lines = seg.read_bytes().split(b"\n")
+    seg.write_bytes(b"\n".join([lines[0], b'{"corrupted": true}', lines[2], b'']))
+    return sid, seg
+
+
+def _repair_ctx(tmp_path):
+    from types import SimpleNamespace as _SN
+    return _SN(storage=_SN(sessions_dir=str(tmp_path)))
+
+
+async def test_rotated_segment_damage_is_repaired_and_reported(tmp_path):
+    """**修复前失败(静默丢事件)**:轮转段内整行损坏此前**零告警零修复**
+    (replay 少一条、`repair`/`auto_scan` 都不报)。
+
+    修后:段级**备份** → 坏行**隔离**(不删,留证)→ 报告出现 `seg1-quarantine-N`
+    → `session.recovered` 落盘声明 → 其余段行**字节保真**;二次 repair 幂等。
+    """
+    sid, seg = await _rotated_damaged(tmp_path)
+    keep_before = [ln for ln in seg.read_bytes().split(b"\n") if ln and b"corrupt" not in ln]
+
+    report = await R.repair_session(_repair_ctx(tmp_path), sid)
+    assert "seg1-quarantine-2" in report.fixed, report.fixed
+    assert [(e.line_no, e.archived) for e in report.quarantined] == [(2, True)]
+    # 段内坏行已移出主序列(不删字节:隔离档留原文)
+    assert b'{"corrupted": true}' not in seg.read_bytes()
+    q = sorted(tmp_path.glob(f"{sid}.1.quarantine-*"))
+    assert q and b"corrupted" in q[0].read_bytes(), "隔离档须留坏行原文(证据)"
+    # 段级**备份**(修复前强制)
+    assert sorted(tmp_path.glob(f"{sid}.1.corrupt-*")), "轮转段修复同样必须先备份"
+    # 其余段行字节保真
+    keep_after = [ln for ln in seg.read_bytes().split(b"\n") if ln]
+    assert keep_after == keep_before
+
+    # 主文件侧:recovered 声明已落(丢失事实**显式**记录,而非静默)
+    from pyharness.events import Envelope as _Env
+    main_lines = (tmp_path / f"{sid}.jsonl").read_text(encoding="utf-8").splitlines()
+    rec = _Env.model_validate_json(main_lines[-1])
+    assert rec.type == "session.recovered"
+    assert any("seg1-quarantine-2" == f for f in rec.payload["fixed"])
+
+    # 幂等:二次 repair 无动作
+    again = await R.repair_session(_repair_ctx(tmp_path), sid)
+    assert again.fixed == [] and again.quarantined == []
+
+
+async def test_auto_scan_discovers_damage_via_segment_aware_holes(tmp_path):
+    """**R13-6**:空洞判定跨段(会话级)⇒ 段内**真实丢失**能被启动自检发现。
+
+    两个方向都钉住:
+      ① 干净的轮转会话**不再**被误判(此前主文件从 seq N+1 起 ⇒ 假空洞
+         `1..N` ⇒ 每次 repair 都报假空洞并追加一条 session.recovered);
+      ② 段内**整行损坏导致真实缺 seq** ⇒ 自检报 `holes=[该 seq]` + 不健康。
+    """
+    from pyharness.bus import EventBus
+    from pyharness.desktop.sessions import DesktopSessionManager
+
+    # ① 干净轮转会话:healthy(修复前为假空洞 ⇒ unhealthy)
+    mgr = DesktopSessionManager(dir=tmp_path, bus=EventBus())
+    sid = await mgr.create()
+    log_ = await mgr.open_session(sid)
+    await log_.append("user.message", {"content": "a"}, actor="user", sync=True)
+    mgr._stores[sid].rotate_bytes = 1
+    await log_.append("user.message", {"content": "b"}, actor="user", sync=True)
+    await mgr.shutdown_all()
+    hits = await R.auto_scan(tmp_path)
+    assert hits == [], f"干净的轮转会话不得被判不健康:{hits}"
+
+    # ② 段内真实损坏(整行替换 ⇒ 缺 seq)⇒ 自检必须报出来
+    seg = sorted(tmp_path.glob(f"{sid}.*.jsonl"))[0]
+    lines = seg.read_bytes().split(bytes([10]))
+    seg.write_bytes(bytes([10]).join(
+        [lines[0], b'{"corrupted": true}', lines[2], b'']))
+    hits2 = await R.auto_scan(tmp_path)
+    assert hits2 and hits2[0].sid == sid and hits2[0].healthy is False, hits2
+    assert hits2[0].holes, f"应报出缺失的 seq:{hits2}"
+
+
+# ============ R14-1:repair × 派生视图重建 × replay/index/watermark 一致性
+def _idx_ctx(tmp_path: Path, db: Path):
+    """外壳形态 ctx:真 sessions_dir + 真 ``db_path`` ⇒ 走 ``owned`` 句柄的真实重建路径。
+
+    刻意**不给** ``session_query`` —— 这正是 CLI/桌面传进来的形态(修前 rebuild 不可达),
+    也是 R14-1 两处二阶缺陷(读数在 detach 后 / 水位只算主文件)唯一能被触发的形态。
+    """
+    cfg = SimpleNamespace(storage=SimpleNamespace(sessions_dir=tmp_path,
+                                                  db_path=str(db)))
+    return SimpleNamespace(storage=SimpleNamespace(sessions_dir=Path(tmp_path)),
+                           session=None, session_query=None,
+                           settings=cfg, config=cfg)
+
+
+def _fts_seqs(db: Path, sid: str) -> set:
+    """索引里该会话已有的行键 seq 集合(fts_rows 契约表)。"""
+    import sqlite3
+    if not db.exists():
+        return set()
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute("SELECT seq FROM fts_rows WHERE session_id=?",
+                            (sid,)).fetchall()
+    except sqlite3.Error:
+        return set()
+    finally:
+        conn.close()
+    return {int(r[0]) for r in rows}
+
+
+def _state_of(tmp_path: Path, sid: str, db: Path) -> dict:
+    """不变量快照:声明条数 / 隔离档数 / 索引行 / 水位(二次修复不得改动)。"""
+    from pyharness.core.session_query import read_max_seq
+    main = tmp_path / f"{sid}.jsonl"
+    body = main.read_text(encoding="utf-8") if main.exists() else ""
+    segs = sorted(tmp_path.glob(f"{sid}.[0-9]*.jsonl"))
+    seg_body = "".join(s.read_text(encoding="utf-8") for s in segs)
+    return {
+        "recovered": (body + seg_body).count("session.recovered"),
+        "quarantine": len(list(tmp_path.glob(f"{sid}*.quarantine-*.jsonl"))),
+        "fts_rows": _fts_seqs(db, sid),
+        "watermark": read_max_seq(db, sid),
+    }
+
+
+async def test_case_a_segment_bad_line_never_enters_index(tmp_path):
+    """**R14-1 Case A**:被隔离的段级坏行 → repair → rebuild → **不进入 FTS** →
+    replay/index 一致(复扫健康);且二次 repair 幂等(无声明/隔离/索引/水位变更)。
+    """
+    sid, seg = await _rotated_damaged(tmp_path)     # 段:created(1) / 坏行(原 seq2) / user.message(3)
+    db = tmp_path / "index.db"
+    ctx = _idx_ctx(tmp_path, db)
+
+    rep = await R.repair_session(ctx, sid)
+    assert "seg1-quarantine-2" in rep.fixed, rep.fixed
+    assert _fts_seqs(db, sid) == {3}, \
+        "索引只能含幸存的**可索引**事件(user.message seq=3);坏行不得进入 FTS"
+    h = await R.scan_session(tmp_path / f"{sid}.jsonl",
+                             fts_last_seq=R._fts_last_seq_provider(ctx))
+    assert h.healthy is True and h.index_stale is False, \
+        f"repair 后应收敛为健康:stale={h.index_stale} holes={h.holes}"
+
+    before = _state_of(tmp_path, sid, db)
+    again = await R.repair_session(ctx, sid)         # 二次 repair
+    assert again.fixed == [] and again.quarantined == []
+    assert _state_of(tmp_path, sid, db) == before, \
+        "二次 repair 不得重复产生 recovered/隔离/索引行/水位变更"
+
+
+async def test_case_b_truncated_tail_no_ghost_watermark_consistent(tmp_path):
+    """**R14-1 Case B**:被截断的尾部(轮转会话,主文件整文件半行)→ repair →
+    rebuild → **不产生幽灵索引** → 会话级水位一致(段内容在,主文件空)。
+    """
+    sid = "s-repair01"
+    (tmp_path / f"{sid}.1.jsonl").write_bytes(      # 段:真源的一部分
+        "".join(_line(e) for e in _session_events(3)).encode())
+    (tmp_path / f"{sid}.jsonl").write_bytes(b'{"seq": 4, "ts": "2026-09-07T0')
+    db = tmp_path / "index.db"
+    ctx = _idx_ctx(tmp_path, db)
+
+    await R.repair_session(ctx, sid)
+    assert _fts_seqs(db, sid) == {2, 3}, \
+        "索引 = 段内可索引事件(session.created 不索引);无幽灵行"
+    h = await R.scan_session(tmp_path / f"{sid}.jsonl",
+                             fts_last_seq=R._fts_last_seq_provider(ctx))
+    assert h.healthy is True and h.index_stale is False, \
+        f"水位应一致(会话级):stale={h.index_stale}"
+
+    before = _state_of(tmp_path, sid, db)
+    await R.repair_session(ctx, sid)
+    assert _state_of(tmp_path, sid, db) == before
+
+
+async def test_case_c_ghost_row_purged_and_index_matches_replay(tmp_path):
+    """**R14-1 Case C**:幽灵行(索引里有、真日志里没有)→ repair/rebuild →
+    索引**不保留**不存在于真日志的记录 → replay/index 一致。
+    """
+    sid = "s-repair01"
+    _write(tmp_path, sid, _session_events(3))       # 真日志:可索引到 seq 3
+    db = tmp_path / "index.db"
+    _mk_index_db(db, [(sid, 2), (sid, 3), (sid, 99)])   # 99 = 幽灵行(日志无此 seq)
+    ctx = _idx_ctx(tmp_path, db)
+
+    h0 = await R.scan_session(tmp_path / f"{sid}.jsonl",
+                              fts_last_seq=R._fts_last_seq_provider(ctx))
+    assert h0.index_stale is True, "前置:幽灵行必须被判 stale"
+
+    await R.repair_session(ctx, sid)
+    assert _fts_seqs(db, sid) == {2, 3}, "幽灵行 99 必须被清除,且不多不少"
+    h1 = await R.scan_session(tmp_path / f"{sid}.jsonl",
+                              fts_last_seq=R._fts_last_seq_provider(ctx))
+    assert h1.healthy is True and h1.index_stale is False, \
+        f"重建后 replay/index 必须一致:stale={h1.index_stale}"
+
+    before = _state_of(tmp_path, sid, db)
+    await R.repair_session(ctx, sid)
+    assert _state_of(tmp_path, sid, db) == before
+
+
+async def test_owned_handle_is_released_no_leak_no_double_close(tmp_path):
+    """**R14-1 二阶(句柄生命周期)**:自建句柄必须在 ``finally`` 里如实摘除关库——
+    既不泄漏(库文件仍被占用)也不 double-close。
+
+    Windows 上未关闭的 sqlite 连接会**占住库文件**(unlink 报 PermissionError),
+    故"重建后能删除 index.db"是确定性的泄漏探针;重复调用亦不得累积句柄。
+    """
+    sid = "s-repair01"
+    _write(tmp_path, sid, _session_events(3))
+    db = tmp_path / "index.db"
+    ctx = _idx_ctx(tmp_path, db)
+
+    assert await R.rebuild_derived_views(ctx, sid) is True
+    assert await R.rebuild_derived_views(ctx, sid) is True     # 二次:新句柄,旧句柄已摘
+    try:
+        db.unlink()                                            # 泄漏则 PermissionError
+    except PermissionError as e:                               # pragma: no cover
+        pytest.fail(f"自建 FTS 句柄未释放(库文件仍被占用):{e}")
+
+
+# ============ R14-9:声明的空洞在回放里不得被重报(判据唯一 + 判定时机)
+async def test_repaired_seq_hole_is_not_rewarned_on_open(tmp_path):
+    """**R14-9 回归**:repair 已声明的空洞,在随后回放里**不得**再报"未声明空洞"。
+
+    根因两层:① ``SessionLog`` 只把 ``context.compacted.ranges`` 当合法声明,**不认**
+    ``session.recovered``(``lost`` / ``seq-holes:[…]``);② 空洞**边读边判**,而
+    ``session.recovered`` 由 repair **追加在流尾** ⇒ 判定时声明尚未吸收。
+    实测:一次合法修复被 ``open_store`` + ``open_session`` 各报一次"疑丢事件"(假 F031)。
+    """
+    from pyharness.core.session import open_session
+    from pyharness.persistence import open_store
+
+    # seq 3 的**真实事件**被替换为垃圾 ⇒ 修复隔离后形成真实的 seq 空洞 3
+    body = (_line(_env(1, "session.created", "system",
+                       {"title": "", "model": "m"}))
+            + _line(_env(2))
+            + '{"garbage": true}\n'
+            + _line(_env(4)))
+    (tmp_path / f"{SID}.jsonl").write_text(body, encoding="utf-8")
+
+    ctx = _ctx(tmp_path)
+    rep = await R.repair_session(ctx, SID)
+    assert "seq-holes:[3]" in rep.fixed, rep.fixed
+    assert rep.holes_alert == [3]
+
+    log_ = await open_session(SID, open_store(SID, dir=tmp_path))
+    stats = log_.stats()
+    assert stats["holes_declared"] == [[3, 3]], "声明区间必须被吸收(含 recovered)"
+    assert stats["holes_warned"] == [], \
+        "已声明的修复空洞不得再报为未声明空洞(假 F031 线索 + 日志噪声)"
+    # 负空间:真未声明的空洞仍必须报出来(不是把告警整个关掉)
+    assert R._declared_ranges(_env(2)) == [] and R._declared_ranges(
+        Envelope(seq=2, ts=TS, type="session.recovered", session_id=SID,
+                 actor="system", payload={"lost": [7]})) == [(7, 7)]

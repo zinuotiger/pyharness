@@ -7,8 +7,8 @@
 | # | 约束 | 说明 |
 |---|------|------|
 | H-01 | 全程 Python 3.11+ | 禁止 TypeScript/Node.js/npm/pnpm |
-| H-02 | 依赖最小化 | 核心脊柱阶段仅允许: openai/pydantic/pytest;编排阶段+asyncio;查询阶段+SQLite(标准库 sqlite3);外壳阶段+FastAPI/pywebview/pyinstaller(打包) |
-| H-03 | 虚拟环境管理 | uv 创建 .venv,依赖锁 requirements.lock |
+| H-02 | 依赖最小化 | **实际运行时依赖（`pyproject.toml` 为唯一真源）**：核心＝`pydantic`·`PyYAML`(配置)·`httpx`(LLM 传输)；外壳 extra＝`fastapi`·`uvicorn`·`pywebview`；工具链＝`pytest`/`pyinstaller`。**`openai` SDK 刻意不用**——本仓库自研传输协议(见 `llm.py` 偏离 2)，故原「仅允许 openai/pydantic/pytest」的列举**与实现相反**(它列了未用的、漏了在用的)。禁用项(H-08/H-10)不变 |
+| H-03 | 虚拟环境管理 | `uv` 创建 `.venv`，依赖锁＝**`uv.lock`**(仓库根，uv 原生锁) —— 原写 `requirements.lock` **不是**本仓库采用的工件名 |
 
 ## 2. 架构约束
 | # | 约束 | 说明 |

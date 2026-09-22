@@ -57,7 +57,7 @@ async def test_jobs_runner_executes_real_agent_loop(tmp_path):
     ctx = None
     try:
         ctx = await assemble_real_engine(cfg, sid="s-job-run-000001",
-                                         sessions_dir=Path(tmp_path) / "sessions")
+                                         sessions_dir=Path(tmp_path) / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)
@@ -88,7 +88,7 @@ async def test_subagent_runner_executes_persisted_child(tmp_path):
     try:
         sessions = Path(tmp_path) / "sessions"
         ctx = await assemble_real_engine(cfg, sid="s-sub-run-000001",
-                                         sessions_dir=sessions)
+                                         sessions_dir=sessions, channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)
@@ -208,7 +208,7 @@ async def test_runtime_ctx_propagates_governance_singleton(tmp_path):
 
     cfg = _cfg(tmp_path)
     ctx = await assemble_real_engine(cfg, sid="s-rtgov-struct-01",
-                                     sessions_dir=tmp_path / "sessions")
+                                     sessions_dir=tmp_path / "sessions", channel="cli")
     try:
         spine = ctx.engine_spine
         assert spine.governance is not None, "真实装配必须产出治理实例"
@@ -239,7 +239,7 @@ async def test_child_agent_tool_execution_reaches_governance(tmp_path):
     try:
         sessions = tmp_path / "sessions"
         ctx = await assemble_real_engine(cfg, sid="s-rtgov-child-01",
-                                         sessions_dir=sessions)
+                                         sessions_dir=sessions, channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)
@@ -283,7 +283,7 @@ async def test_orchestration_fallback_tool_execution_reaches_governance(tmp_path
     ctx = None
     try:
         ctx = await assemble_real_engine(cfg, sid="s-rtgov-intent-01",
-                                         sessions_dir=tmp_path / "sessions")
+                                         sessions_dir=tmp_path / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)
@@ -324,7 +324,7 @@ async def test_main_agent_tool_execution_reaches_governance(tmp_path):
     ctx = None
     try:
         ctx = await assemble_real_engine(cfg, sid="s-rtgov-main-01",
-                                         sessions_dir=tmp_path / "sessions")
+                                         sessions_dir=tmp_path / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)
@@ -358,7 +358,7 @@ async def test_runtime_ctx_still_fails_closed_without_governance(tmp_path):
     ctx = None
     try:
         ctx = await assemble_real_engine(cfg, sid="s-rtgov-nogov-01",
-                                         sessions_dir=tmp_path / "sessions")
+                                         sessions_dir=tmp_path / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)

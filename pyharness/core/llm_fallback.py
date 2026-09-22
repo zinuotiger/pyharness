@@ -42,7 +42,6 @@ CFG.md §3.1/§3.5(llm.retry/llm.degrade/llm.probe/budget.task.* 配置键)。
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import random
 from dataclasses import dataclass, field
@@ -325,18 +324,28 @@ class FallbackChain:
     # ====================================================== 周期健康探针(F033)
     async def probe_loop(self, adapters: Optional[dict[str, Any]] = None,
                          interval_s: float = 60.0) -> None:
-        """进程生命周期协程:每 interval_s 对全部适配器 ping()(5s 超时),结果 mark()。
+        """进程生命周期协程:每 interval_s 对**链内**适配器 ping()(5s 超时),结果 mark()。
 
         探针成功不计 F029 用量、失败不落 llm.retry——只判可达性,真实请求仍按错误码
         走降级(ADI §3.5);主模型 down→healthy(2 好回切)时 idx 归零自动回切主模型
         (偏离 4)。取消即退出(不吞 CancelledError,F025)。
+
+        偏离(相对 spec 伪码"对全部适配器 ping"):探针**只走 ``self.health`` 的键**
+        (= 本链成员),注册表里存在但不在链内的模型不探。理由:①``health`` 在
+        ``__post_init__`` 里按 ``chain`` 初始化,按注册表遍历会在"注册了链外模型"时
+        ``self.health[name]`` 直接 KeyError —— 该异常在 try 之外,会**打死整个探针
+        任务**(等于静默关掉回切);②回切判据 ``pick()`` 只读链内成员的健康位。
+        链成员尚未注册时跳过(不判失败),等其注册后自然纳入。
         """
         reg = self.adapters if adapters is None else adapters
         if not reg:
             log.warning("probe_loop: 无适配器注册表,探针空转退出")
             return
         while True:
-            for name, adp in reg.items():
+            for name in list(self.health):           # 只探**链内**适配器(见下注)
+                adp = reg.get(name)
+                if adp is None:                      # 链成员尚未注册:跳过,不算失败
+                    continue
                 prev = self.health[name].state
                 try:
                     await asyncio.wait_for(adp.ping(), timeout=5.0)

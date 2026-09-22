@@ -5,14 +5,15 @@ import logging
 import sys
 import threading
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
-from pyharness.errors import PyHError
+from pyharness.errors import PyHError, raise_code
 
 from .app import DesktopApp
 from .bridge import DesktopBridge
 from .constants import HOST, WINDOW_HEIGHT, WINDOW_TITLE, WINDOW_WIDTH
-from .net import pick_free_port, run_uvicorn, wait_listening_async, wait_until_listening
+from .net import (pick_free_port, resolve_bind, run_uvicorn,
+                  wait_listening_async, wait_until_listening)
 
 log = logging.getLogger("pyharness.desktop.launcher")
 
@@ -59,16 +60,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         ctx = _bootstrap_desktop(None)
     except PyHError as e:                               # CFG-601 等装配错
         advice = e.ctx.get("advice") or e.ctx.get("hint") or e.spec.advice
-        print(f"{e.code}:{advice}", file=__import__("sys").stderr)
+        print(f"{e.code}:{advice}", file=sys.stderr)
         return 1
     app = DesktopApp(ctx=ctx)
     try:
-        port = pick_free_port()
+        host, port = resolve_bind(getattr(ctx, "settings", None)
+                              or getattr(ctx, "config", None))
     except OSError:
         log.exception("pick_free_port 失败")
         return 1
-    app.url = f"http://{HOST}:{port}"
-    threading.Thread(target=run_uvicorn, args=(app, port),
+    tok_path = app.publish_operator_token()   # R31-2:随机令牌须可查,否则浏览器入口关闭
+    if tok_path:
+        log.info("操作者令牌已落盘(浏览器访问用 ?token=<该文件内容>):%s", tok_path)
+    app.url = app.bootstrap_url(host, port)   # R31-2:带操作者令牌
+    threading.Thread(target=run_uvicorn, args=(app, port, host),
                      name="desktop-uvicorn", daemon=True).start()
     if not wait_until_listening(port):
         log.error("uvicorn 就绪超时 port=%s(不弹空窗,退出 1)", port)
@@ -77,7 +82,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     wv = _load_webview()
     if wv is None:                                      # WebView2/环境缺失:退 1
         print("pywebview 不可用:请安装 Microsoft Edge WebView2 Runtime 后重试",
-              file=__import__("sys").stderr)
+              file=sys.stderr)
         app.shutdown_gracefully()
         return 1
     bridge = DesktopBridge(app)
@@ -99,9 +104,13 @@ async def run_desktop(ctx: Any) -> int:
     等价入口:`uv run pyharness desktop`;桌面必须主线程启动(RuntimeError 域外)。
     """
     app = DesktopApp(ctx=ctx)
-    port = pick_free_port()
-    app.url = f"http://{HOST}:{port}"
-    threading.Thread(target=run_uvicorn, args=(app, port),
+    host, port = resolve_bind(getattr(ctx, "settings", None)
+                              or getattr(ctx, "config", None))
+    tok_path = app.publish_operator_token()   # R31-2:随机令牌须可查,否则浏览器入口关闭
+    if tok_path:
+        log.info("操作者令牌已落盘(浏览器访问用 ?token=<该文件内容>):%s", tok_path)
+    app.url = app.bootstrap_url(host, port)   # R31-2:带操作者令牌
+    threading.Thread(target=run_uvicorn, args=(app, port, host),
                      name="desktop-uvicorn", daemon=True).start()
     await wait_listening_async(app, port)
     wv = _load_webview()
@@ -121,13 +130,11 @@ async def run_desktop(ctx: Any) -> int:
 __all__ = [
     # 常量
     "WINDOW_TITLE", "WINDOW_WIDTH", "WINDOW_HEIGHT", "HOST",
-    "TIMELINE_KINDS", "CHANNEL", "WARN_RATIO",
     # 数据结构
-    "TimelineNode", "StreamClient", "EventStreamHub", "DesktopBridge",
-    "DesktopApp", "DesktopSessionManager",
+    "DesktopBridge",
+    "DesktopApp",
     # 纯函数/核心
-    "render_timeline_node", "derive_timeline", "approval_node", "redact_args",
-    "redact", "pick_free_port", "run_uvicorn", "wait_until_listening",
+    "pick_free_port", "run_uvicorn", "wait_until_listening",
     "wait_listening_async",
     # 入口
     "main", "run_desktop", "assemble_desktop_ctx",

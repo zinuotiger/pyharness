@@ -146,10 +146,21 @@ class PyHError(Exception):
                             "ctx": self.ctx}}
 
     def to_model_message(self) -> str:
-        """给 LLM 的可行动文本:≤2000 字符,含 [code]+name+advice。"""
-        msg = f"错误[{self.code}]:{self.message}。建议:{self.spec.advice}"
+        """给 LLM 的可行动文本:≤2000 字符,含 [code]+name+建议。
+
+        建议的**取值优先级**(2026-09-21 修,O-2):
+          ``ctx["advice"]``(调用点现场最贴切的指引)→ ``ctx["hint"]``(调用点自查提示)
+          → ``spec.advice``(错误码表的"处置"列)。
+        此前恒用 ``spec.advice``,而该列是**运维处置话术**(如 TLB-802 的
+        "tool.error 回喂 LLM 自查,不静默"),对模型毫无可行动性,且把调用点已经
+        写好的正确指引(如"目录不存在…先 list_dir 父目录侦查")整条丢弃 ——
+        实测:``fs.list_dir`` 读不存在目录时 LLM 收到的是那句运维话术。
+        """
+        advice = str(self.ctx.get("advice") or self.ctx.get("hint")
+                     or self.spec.advice)
+        msg = f"错误[{self.code}]:{self.message}。建议:{advice}"
         tip = self.ctx.get("detail") or self.ctx.get("hint")
-        if tip:
+        if tip and str(tip) != advice:               # 已作建议的不重复进明细
             msg += f"明细:{str(tip)[:200]}"
         return msg[:2000]
 

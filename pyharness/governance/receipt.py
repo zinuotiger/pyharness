@@ -38,7 +38,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from pyharness.errors import raise_code
 from pyharness.governance.decision import Decision, Principal, Verdict
 
 # 凭证类别:decision = ALLOW/REJECT 结论;approval = 审批后重新授权(D2)
@@ -315,7 +314,6 @@ def rebuild_from_log(sess: Any) -> tuple[DecisionReceipt, ...]:
         if not d:
             continue                                 # 无对应决策:跳过(不臆造)
         kind = str(p.get("kind") or "")
-        pk = str(d.get("principal_kind") or "")
         pid = str(d.get("principal_id") or "")
         pch = d.get("principal_channel")
         principal = Principal.from_legacy_by(

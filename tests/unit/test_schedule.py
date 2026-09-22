@@ -39,7 +39,7 @@ import pytest
 
 import pyharness.core.schedule as S
 from pyharness.core.schedule import (CronSpec, JobInfo, ScheduleJob, Scheduler,
-                                     iso, parse_iso)
+                                     parse_iso)
 from pyharness.core.session import SessionLog
 from pyharness.core.task_queue import TaskQueue
 from pyharness.errors import PyHError

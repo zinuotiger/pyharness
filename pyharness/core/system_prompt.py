@@ -145,6 +145,7 @@ def default_template() -> PromptTemplate:
         TemplatePart("var", name="sandbox_level"),
         TemplatePart("var", name="window_tokens"),
         TemplatePart("var", name="title"),
+        TemplatePart("var", name="turn_source"),
     ]
     return PromptTemplate(parts=parts, name="builtin-default")
 
@@ -215,6 +216,8 @@ def render_template(tpl: PromptTemplate, *, vars: dict) -> str:
             if val is None:                         # 缺变量 → 渲染失败(不静默空串)
                 raise_code("CFG-602", part=part.name,
                            advice="提示词装配缺少变量;查 scope/config 派生变量表")
+            if str(val).strip() == "":           # 空变量段不产空段(A4:turn_source
+                continue                          # 未设置时为 "",不该多出分隔)
             segs.append(_escape_control(part.render(str(val))))   # 转义防段间注入
         else:                                       # 未知 kind = 模板配置错误
             raise_code("CFG-603", part=part.name, kind=part.kind,
@@ -444,7 +447,21 @@ class SystemPromptAssembler:
             "sandbox_level": f"[沙箱级别] {level or '未指定'}",
             "window_tokens": f"[上下文窗口] {self._window(ctx)} tokens",
             "title": f"[会话主题] {title}" if title else "[会话主题] 无",
+            # KF-C(A4):本轮**框架侧**来源(受控:engine 从 task.meta.source 取,
+            # 非模型/工具文本)。到点触发轮 ⇒ 明确告知"这是定时触发",否则模型
+            # 只会复述任务状态而不产出提醒本身。空串 = 普通轮(渲染时跳过)。
+            "turn_source": self._turn_source_line(ctx),
         }
+
+    @staticmethod
+    def _turn_source_line(ctx: Any) -> str:
+        """受控渲染本轮来源;未设置 → ""(空段被 render_template 跳过)。"""
+        src = getattr(ctx, "turn_source", None)
+        if not src:
+            return ""
+        token = str(src)[:120]                 # 截断:来源标识本身即受控短串
+        return ("[本轮来源] " + token + "(系统/定时触发的一轮。请直接产出该触发"
+                "要求的内容本身——例如提醒正文;不要复述任务状态或确认设置)")
 
     # ------------------------------------------------------- 压缩触发判定
     def _needs_compaction(self, ctx: Any, hist: list[dict]) -> bool:

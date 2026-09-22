@@ -16,7 +16,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -396,6 +396,29 @@ def redact(text: str) -> str:
     text = re.sub(r"(sk-[A-Za-z0-9]{6})[A-Za-z0-9]+", r"\1***", text)  # sk-abc***
     text = re.sub(r"\b([A-Za-z0-9]{28})[A-Za-z0-9]{4,}\b", r"\1****", text)  # ≥32 位
     return text
+
+
+def redactor_of(cfg: Any) -> "Callable[[str], str]":
+    """出口脱敏单口工厂(F016/INV-09):**装配层唯一注入源**。
+
+    2026-09-21 R10 修:``ctx.redact`` 被 tool_fs / tool_web / spill 三处读取
+    (F016 单口),但**全库从未有装配点注入它** ⇒ 生产上恒缺失,fs/web 出口
+    **静默降级为不打码**(实测 ``fs.read_file`` 输出的 ``API_KEY=sk-AAAA…``
+    原文进入事件与 LLM 上下文,违反 SECURITY §6.4"全出口覆盖=事件 payload/
+    错误消息/tool.result summary/spill/PTY/日志")。
+
+    语义:``log.redact_enabled=False`` ⇒ 恒等(配置层承诺的出口策略);否则 ``redact``。
+    """
+    try:
+        disabled = getattr(getattr(cfg, "log", None),
+                           "redact_enabled", True) is False
+    except Exception:                                  # noqa: BLE001 配置形态异常
+        disabled = False
+    if disabled:
+        def _identity(text: str) -> str:
+            return text
+        return _identity
+    return redact
 
 
 def looks_like_secret(key: str, value: Any) -> bool:

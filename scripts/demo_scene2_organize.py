@@ -49,7 +49,10 @@ async def main() -> int:
                              {"title": "场景二 整理文件夹", "model": cfg.llm.model},
                              actor="system", sync=True)
 
-    prompt = (f"帮我整理文件夹 {sid} 里的笔记,按主题归类:先列出目录,逐个读文件内容,"
+    # 会话 workspace 根 = {workspaces_dir}/{sid}(F055),即 agent 的 fs 根;
+    # 2026-09-21 前 engine 把根装配成**裸** workspaces_dir,故 prompt 里要写
+    # "{sid}/…" 才能命中;修后根即会话目录,路径直接用相对当前根。
+    prompt = (f"帮我整理当前工作目录(.)里的笔记,按主题归类:先列出目录,逐个读文件内容,"
               f"把文件复制到对应的主题子文件夹里(文件名前面加主题前缀即可),"
               f"最后汇报你整理了几个文件、分了几类。")
     env = await ctx.session.append("user.message", {"content": prompt},

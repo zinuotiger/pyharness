@@ -18,7 +18,6 @@
 注:guard/executor 全管道拒绝语义已在 test_tools_guard/test_tools_executor 覆盖,
 本文件专注 Provider 侧纵深与工具自身契约;集成测试以最小替身走真实 executor 关3。
 """
-import asyncio
 import os
 import subprocess
 from datetime import datetime
@@ -101,15 +100,22 @@ class MaskRedact:
 
 
 def make_ctx(root: Path, *, spill=None, cfg: Settings | None = None,
-             scope=None, redact=None, session=None, guard=None) -> SimpleNamespace:
-    """工具 handler 的 ctx 替身(注入面 = scope/cfg/storage/redact/session/guard)。"""
+             scope=None, redact=None, session=None, guard=None,
+             channel="cli") -> SimpleNamespace:
+    """工具 handler 的 ctx 替身(注入面 = scope/cfg/storage/redact/session/guard)。
+
+    ``channel``(GAP-11):治理层 ``principal_of`` 要求 ctx **显式声明**通道——
+    属性缺失即 ``APR-503`` fail-closed(禁止静默降级为 system)。替身默认按
+    CLI 通道声明;需要 headless 语义的用例显式传 ``channel=None``。
+    """
     return SimpleNamespace(
         scope=scope if scope is not None else FakeScope(root),
         cfg=cfg if cfg is not None else Settings(),
         storage=SimpleNamespace(spill=spill) if spill is not None else None,
         redact=redact,
         session=session if session is not None else FakeSession(),
-        guard=guard if guard is not None else AllowGuard())
+        guard=guard if guard is not None else AllowGuard(),
+        channel=channel)
 
 
 # 工具面直调:先写后读的小工具(单测内重复使用)
@@ -669,7 +675,8 @@ def _exec_ctx(ws: Path, scope: FakeScope, session: FakeSession) -> SimpleNamespa
         storage=SimpleNamespace(spill=FakeSpill()),
         redact=None,
         session=session, guard=chain,
-        governance=GovernanceContext(policy=eng, decisions=DecisionEngine()))
+        governance=GovernanceContext(policy=eng, decisions=DecisionEngine()),
+        channel="cli")     # GAP-11:治理主体需 ctx 显式声明通道(缺失即 APR-503)
 
 
 async def test_executor_pipeline_write_then_read(tmp_path: Path):

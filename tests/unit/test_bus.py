@@ -755,3 +755,51 @@ def test_bus_exports_and_stop_sentinel():
         assert hasattr(B, name), name
     assert repr(STOP) == "<STOP>"
     assert STOP is STOP
+
+
+# ============================== 插件 guard 钩子随能力摘除一起注销(2026-09-21)
+async def test_plugin_detach_unregisters_declared_guard_hooks():
+    """能力摘除必须注销其工具声明的 guard 钩子 ⇒ 插件可重装、无陈旧 Guard。
+
+    修复前实测:``register_guard_hook`` **只有注册没有注销** ⇒ 卸载后陈旧 Guard
+    仍留在 ``_PLUGIN_HOOKS``(新声明仍会解析到它),且重装同名钩子直接被 TLB-801
+    "名全库唯一"拒 —— 与 ``PluginManager.uninstall`` docstring 的"支持重装(F004)"
+    对含钩子的插件**矛盾**。
+    """
+    from types import SimpleNamespace
+
+    from pyharness.core.tools_guard import (Guard, _PLUGIN_HOOKS,
+                                            register_guard_hook)
+
+    class _Hook(Guard):
+        def __init__(self, gid: str) -> None:
+            self.id = gid
+
+        def match(self, call):                       # noqa: ARG002
+            return False
+
+        def check(self, call, scope):                # noqa: ARG002
+            return "allow", "POL-HOOK"
+
+    hook_name = "hook:test-detach"
+    _PLUGIN_HOOKS.pop(hook_name, None)
+    bus, reg, pm = _pm()
+    ctx = _FakeCtx()
+    try:
+        register_guard_hook(hook_name, _Hook("g-hook-test"))
+        tool = SimpleNamespace(guard_hooks=[hook_name])
+        cap = Capability(id="cap:hooked.tool", tool_keys=["hooked.tool"],
+                         tool=tool)
+        await pm.install(_mk_manifest("hooked", capabilities=[cap]), ctx)
+        await pm.activate("hooked", ctx)
+        assert hook_name in _PLUGIN_HOOKS, "前置:钩子已登记"
+
+        await pm.deactivate("hooked", ctx)
+        assert hook_name not in _PLUGIN_HOOKS, \
+            "能力摘除必须同时注销其声明的 guard 钩子"
+
+        # 可重装:同名钩子不再撞 TLB-801
+        register_guard_hook(hook_name, _Hook("g-hook-test2"))
+        assert hook_name in _PLUGIN_HOOKS
+    finally:
+        _PLUGIN_HOOKS.pop(hook_name, None)

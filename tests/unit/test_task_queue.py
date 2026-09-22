@@ -561,6 +561,29 @@ async def test_runner_failure_classification():
     assert rc.ok is False and rc.code == "CYC-999"
 
 
+async def test_budget_exhausted_keeps_budget_terminal_code():
+    """F032/O-3:预算硬闸到队列侧时终态必须是 budget + LLM-305,不是 CYC-999。
+
+    ``BudgetExhausted`` 不是 ``PyHError`` 子类(有意:不被域捕获逻辑吞掉),若无
+    显式分支就会落入 ``except Exception`` 兜底 → 持久化记录变成 ``error:CYC-999``,
+    **丢失预算语义**(ERR.md 已登记 LLM-305、scope.py 亦声明该映射)。
+    """
+    from pyharness.core.scope import BudgetExhausted
+
+    s = await _new_session()
+    q = TaskQueue(s, runner=FakeRunner(s, exc=BudgetExhausted(), exc_once=True))
+    a = await q.submit("烧预算")
+    ra = await asyncio.wait_for(q.wait_for(a), timeout=3.0)
+    assert ra.ok is False and ra.code == "LLM-305"
+    ev = [e for e in _events(s)
+          if e.type == "task.failed" and e.payload["task_id"] == a][0]
+    assert ev.payload["reason"] == "budget", ev.payload
+    assert ev.payload["error"] == "LLM-305", ev.payload
+    # 队列继续(预算失败已事件化,不中断队列)
+    b = await q.submit("下一个")
+    assert (await asyncio.wait_for(q.wait_for(b), timeout=3.0)).ok is True
+
+
 async def test_status_consistent_with_events():
     """GWT-F043-03:status.running/waiting/paused/depth 与事件流一致(派生口径)。"""
     s = await _new_session()
@@ -605,3 +628,108 @@ async def test_waiting_cancel_wakes_waiter():
     assert res.ok is False and res.code == "cancelled"
     await q.resume("test-hold")                          # 泵唤醒退场
     assert q.status().waiting == []
+
+
+# ============ 会话收尾 × 在途任务:终态/段锚不得丢,等待者不得悬挂(2026-09-21)
+async def _submit_slow(s):
+    """起一个"在途"任务:runner 阻塞在 gate 上,返回 (queue, gate, tid, waiter)。"""
+    gate = asyncio.Event()
+    q = TaskQueue(s, runner=FakeRunner(s, gate=gate))
+    tid = await q.submit("慢任务")
+    waiter = asyncio.create_task(q.wait_for(tid))
+    for _ in range(300):
+        if q.status().running == tid:
+            break
+        await asyncio.sleep(0.01)
+    return q, gate, tid, waiter
+
+
+async def test_queue_shutdown_before_session_finish_keeps_terminal_and_segment():
+    """**收尾前置排空**:先 `queue.shutdown()` 再落 `session.finished` ⇒
+    终态事件(`failed(cancelled)`)与 `segment.end` 都在终态会话之前落盘。
+
+    修复前实测(不排空):`task.*=0`、`segment.end=0`、`wait_for` 3s 未返回
+    —— 终态与段锚被 EVT-104 拒写,等待者悬挂,证据生产者永不触发。
+    """
+    s = await _new_session()
+    q, _gate, tid, waiter = await _submit_slow(s)
+    await q.shutdown(reason="session-close")
+    await s.append("session.finished", {"reason": "close"}, actor="system",
+                   sync=True)
+    s.close_marker()
+
+    r = await asyncio.wait_for(waiter, timeout=3.0)      # 不得悬挂
+    assert r.ok is False and r.code == "cancelled"
+    types = [e.type for e in s.events_after(0)]
+    assert types.count("task.failed") == 1, types
+    assert types.count("segment.start") == types.count("segment.end") == 1, types
+    assert types.index("segment.end") < types.index("session.finished"), \
+        "段锚必须先于会话终态闭合(证据生产者挂 segment.end)"
+    # 幂等:二次 shutdown 无害
+    await q.shutdown(reason="again")
+    assert types.count("task.failed") == 1
+
+
+async def test_inflight_task_never_hangs_when_session_already_terminal():
+    """**坏次序兜底**:会话先终态、任务后完成 ⇒ 事件写不进去(设计如此),但
+    `_settle` 必须发生(**绝不悬挂**),且泵不得因 finally 抛错而"崩溃"。
+
+    修复前:`task.started`/段锚在 try 之外 + `close_segment` 直调 append ⇒
+    EVT-104 直接从 `_run_task` 抛出 → 泵记 crash、`_settle` 被跳过 → 永久悬挂。
+    """
+    s = await _new_session()
+    q, gate, tid, waiter = await _submit_slow(s)
+    await s.append("session.finished", {"reason": "close"}, actor="system",
+                   sync=True)
+    s.close_marker()
+    gate.set()                                            # 放行在途任务
+
+    r = await asyncio.wait_for(waiter, timeout=3.0)       # 不得悬挂
+    assert r.ok is False and r.code == "EVT-104"
+    # 会话已终态:事件写不进去是**预期**(日志不可伪造终态后的历史)
+    types = [e.type for e in s.events_after(0)]
+    assert types.count("task.completed") == 0 and types.count("task.failed") == 0
+    assert q.status().running is None
+
+
+# ============ R12-3 二阶:挂起态下收尾必须**即时**退场(不得走 5s 超时兜底)
+async def test_shutdown_while_paused_returns_promptly():
+    """队列挂起(等审批)时 `shutdown` 必须立刻完成并结算等待者。
+
+    修复前:`shutdown` 直接 await 泵,而泵阻塞在 `_resume_evt.wait()` ⇒ 走 5s 超时
+    兜底(会话收尾平白多等 5 秒);R12-3 起"审批真挂起"使该路径成为常态。
+    """
+    import time as _t
+
+    s = await _new_session()
+    gate = asyncio.Event()
+    q = TaskQueue(s, runner=FakeRunner(s, gate=gate))
+    await q.pause("approval")                    # 模拟审批挂起
+    tid = await q.submit("排队任务")
+    waiter = asyncio.create_task(q.wait_for(tid))
+    for _ in range(60):
+        await asyncio.sleep(0.005)
+
+    t0 = _t.perf_counter()
+    await q.shutdown(reason="session-close")
+    elapsed = _t.perf_counter() - t0
+    assert elapsed < 1.0, f"挂起态收尾应即时(<1s),实际 {elapsed:.2f}s(疑走 5s 超时)"
+
+    r = await asyncio.wait_for(waiter, timeout=2.0)   # 等待者不得悬挂
+    assert r.ok is False and r.code == "cancelled"
+    assert q.status().running is None and q.status().depth == 0
+
+
+async def test_submit_after_shutdown_is_rejected_not_hanging():
+    """**三阶**:收尾后 `submit` 必须**显式拒新**(QUE-001),不得入队悬挂。
+
+    收尾后泵已退场(挂起态也直接退场)⇒ 若仍接新任务,其等待者**永不释放**。
+    """
+    s = await _new_session()
+    q = TaskQueue(s, runner=FakeRunner(s))
+    await q.shutdown(reason="session-close")
+    with pytest.raises(PyHError) as ei:
+        await q.submit("收尾后提交")
+    assert ei.value.code == "QUE-001"
+    assert ei.value.ctx.get("reason") == "closed"
+    assert q.status().depth == 0

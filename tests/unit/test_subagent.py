@@ -513,7 +513,11 @@ async def test_budget_inheritance_quarter_and_scope_snapshot():
     assert child_scope.limits.max_in_tokens == 500_000
     assert "fs.delete_file" in child_scope.policy.deny_tools   # deny_extra 并入
     assert child_scope.policy.allowed_domains == parent_scope.policy.allowed_domains
-    assert sub_id in child_scope.policy.workspace_root          # F055 独立根
+    # F055 独立根:**{workspaces_dir}/{sub_id}**(作业根同族,不得越出 workspaces 树)。
+    # 2026-09-21:此前只断言 ``sub_id in path``——对"越出树"的错误形态同样为真,
+    # 属断言过弱(N10 因此漏检),现钉死落点。
+    assert child_scope.policy.workspace_root.replace("\\", "/").endswith(
+        f"/workspaces/{sub_id}"), child_scope.policy.workspace_root
     assert child_scope.session_id == sub_id
     await mgr.join(sub_id)
 
@@ -565,7 +569,7 @@ async def test_cancel_releases_slot_and_child_not_completed():
     assert await mgr.cancel(sub_id) is True
     assert mgr._active == 0
     # 释放后可再派(闸正确归还)
-    sub2 = await _spawn_ok(mgr)              # 会阻塞在 gate;清理掉
+    await _spawn_ok(mgr)                  # 会阻塞在 gate;清理掉
     await _drain_children(mgr, reason="cleanup")
     assert mgr.status().running == 0 and mgr._active == 0
 
@@ -609,7 +613,7 @@ async def test_detach_is_child_first_and_idempotent():
     mgr = SubagentManager(session=sess, runner=runner)
     await mgr.enter(ctx)
     await mgr.announce(ctx)
-    ids = [await _spawn_ok(mgr) for _ in range(2)]
+    [await _spawn_ok(mgr) for _ in range(2)]
     await runner.started.wait()
     await mgr.detach(ctx)
     # 工具/订阅/mount 全部摘除

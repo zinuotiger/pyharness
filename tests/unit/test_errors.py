@@ -45,3 +45,44 @@ def test_to_user_message_no_leak():
         m = e.to_user_message()
         assert "Traceback" not in m
         assert m, "用户消息非空"
+
+
+# ============================================ 模型面文本(O-2:回喂可行动性)
+def test_model_message_prefers_call_site_advice():
+    """**调用点 advice 优先于错误码表的"处置"话术**(O-2)。
+
+    背景:``spec.advice`` 是**运维处置**列(如 "tool.error 回喂 LLM 自查,不静默"),
+    对模型无可行动性;而调用点写好的现场指引此前被整条丢弃。
+    """
+    try:
+        raise_code("TLB-802", path="no-such-dir",
+                   advice="目录不存在或路径不是目录,先 list_dir 父目录侦查")
+    except PyHError as e:
+        m = e.to_model_message()
+        assert "目录不存在或路径不是目录" in m, m
+        assert "回喂 LLM 自查" not in m, f"不得回喂运维话术:{m}"
+
+
+def test_model_message_falls_back_to_call_site_hint():
+    """无 advice 时用调用点 hint 作建议(仍优先于错误码表的处置话术)。"""
+    try:
+        raise_code("TLB-802", tool="nope", hint="查工具名拼写与注册表")
+    except PyHError as e:
+        m = e.to_model_message()
+        assert "查工具名拼写与注册表" in m, m
+        assert "回喂 LLM 自查" not in m, m
+
+
+def test_model_message_fallback_and_no_duplicate_detail():
+    """无任何调用点指引时回落错误码表;且已作建议的文本不再重复进"明细"。"""
+    try:
+        raise_code("TLB-802", tool="nope")
+    except PyHError as e:
+        m = e.to_model_message()
+        assert "工具未注册" in m and "建议:" in m, m
+
+    try:
+        raise_code("TLB-803", hint="字段 a 应为 int")
+    except PyHError as e:
+        m = e.to_model_message()
+        assert m.count("字段 a 应为 int") == 1, f"建议/明细重复:{m}"

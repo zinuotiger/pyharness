@@ -13,16 +13,19 @@ from typing import Any, Optional
 
 from pyharness.application.models import SHELL_CAPABILITIES
 from pyharness.core.approval import ApprovalProvider
+from pyharness.core.channel import normalize_channel
 from pyharness.core.skill import SkillManager
-from pyharness.core.task_queue import TaskQueue
+from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 from pyharness.core.tenant_settings import (
     TenantSettingsStore,
     normalize_tenant_id,
     register_session_tenant,
     register_tenant_store,
+    tenants_dir,
     unregister_session_tenant,
 )
 from pyharness.errors import raise_code
+from pyharness.events import call_id_of
 from pyharness.events.vocab import validate_payload
 
 log = logging.getLogger("pyharness.application.service")
@@ -109,7 +112,17 @@ class ApplicationService:
     def __init__(self, ctx: Any, *, channel: str = "desktop",
                  tenant_id: str = "default") -> None:
         self.ctx = ctx
-        self.channel = str(channel or "desktop")
+        # N5:通道经**同一契约**归一化并 fail-closed。修复前 ``str(channel or
+        # "desktop")`` 会把显式 ``None``(headless 意图)与空串**静默提升为
+        # desktop**(人类通道)—— falsy 回退改写声明语义。现:非法/未知 ⇒ APR-503;
+        # ``"acp:<id>"`` ⇒ 归一为 ``"acp"``(保留 ACP 身份)。
+        st = normalize_channel(channel)
+        if not st.is_interactive:
+            raise_code("APR-503", module="application.service", field="channel",
+                       got=repr(channel),
+                       why="ApplicationService 需要明确的交互通道名"
+                           "(HEADLESS/非法/未知均不适用于桌面服务门面)")
+        self.channel = str(st.name)
         self.tenant_id = normalize_tenant_id(tenant_id)
         self._surface: Any = None
         self._logs: dict[str, Any] = {}
@@ -119,7 +132,7 @@ class ApplicationService:
         self._approvals: dict[str, ApprovalProvider] = {}
         self._engines: dict[str, Any] = {}
         self._settings_store = TenantSettingsStore(
-            self._storage_root() / "tenants")
+            tenants_dir(self._storage_root()))     # R31-2:派生点收口到 tenants_dir
         register_tenant_store(self.tenant_id, self._settings_store)
 
     def _storage_root(self) -> Path:
@@ -130,23 +143,55 @@ class ApplicationService:
     def tenant_root(self) -> Path:
         return self._storage_root() / "tenants" / self.tenant_id
 
+    def _tenant_sessions_dir(self, ctx: Any = None) -> Path:
+        """本租户的**会话目录**—— 唯一派生点(R24 收口)。
+
+        `default` 租户沿用装配 ctx 的 `storage.sessions_dir`(L1 锚点);其余租户落在
+        自己的租户根下,与 `effective_settings()` 里 `storage.db_path` 的租户分域
+        **配套**(索引库与会话目录同域,见 R14-8)。此前该分支在**三处**各写一遍
+        (三份相同且正确,但"同源规则多份实现"必然漂移 —— 见 R14-3 方法论)。
+        """
+        c = ctx if ctx is not None else self.ctx
+        if self.tenant_id == "default":
+            return _session_module()._sessions_dir_of(c)
+        return self.tenant_root() / "sessions"
+
     def effective_settings(self) -> Any:
-        """Settings overridden by this tenant's active model profile."""
+        """Settings overridden by this tenant's active model profile **and storage scope**.
+
+        ``2026-09-21 R14-8``:非 ``default`` 租户的**会话目录**本就按租户分
+        （调用点一律用 ``tenant_root()/sessions``），但其**派生索引库**
+        （``storage.db_path``）仍是**全局**的 ⇒ 两个租户共用一个 FTS 库：
+        ① ``query`` 没有任何租户维度 ⇒ A 的 agent 能检索到 B 的会话内容
+           （实测：A 侧不带 ``session_id`` 查询直接命中 B 的条目，`session.fts_query`
+           的 ``session_id`` 又取自 LLM 自报参数）；
+        ② 同名 sid 跨租户在 ``fts_rows`` 主键 ``(session_id, seq)`` 上**碰撞**
+           ⇒ 后写者被 ``INSERT OR IGNORE`` 静默丢弃、其内容根本不入索引（实测）。
+        **派生视图必须与真源同域**：索引库随会话目录一起按租户分。
+        """
         cfg = _session_module()._cfg_of(self.ctx)
         profile = self._settings_store.active_profile(self.tenant_id)
-        if profile is None or not hasattr(cfg, "model_dump"):
-            return cfg
+        scoped = self.tenant_id != "default"
+        if (profile is None and not scoped) or not hasattr(cfg, "model_dump"):
+            return cfg                      # 无改动:原样返回（保持既有语义/对象）
         raw = cfg.model_dump()
-        llm = dict(raw.get("llm") or {})
-        llm.update({
-            "model": profile["model"],
-            "base_url": profile["base_url"],
-            "api_key": f"tenant:{self.tenant_id}:{profile['id']}",
-            "temperature": profile.get("temperature", llm.get("temperature", 0.7)),
-            "max_tokens": profile.get("max_tokens", llm.get("max_tokens", 4096)),
-            "fallback_models": list(profile.get("fallback_models") or []),
-        })
-        raw["llm"] = llm
+        if scoped:                          # 索引库随会话目录同域（R14-8）
+            storage = dict(raw.get("storage") or {})
+            storage["db_path"] = str(self.tenant_root() / "index.db")
+            raw["storage"] = storage
+        if profile is not None:
+            llm = dict(raw.get("llm") or {})
+            llm.update({
+                "model": profile["model"],
+                "base_url": profile["base_url"],
+                "api_key": f"tenant:{self.tenant_id}:{profile['id']}",
+                "temperature": profile.get("temperature",
+                                           llm.get("temperature", 0.7)),
+                "max_tokens": profile.get("max_tokens",
+                                          llm.get("max_tokens", 4096)),
+                "fallback_models": list(profile.get("fallback_models") or []),
+            })
+            raw["llm"] = llm
         from pyharness.config import Settings
         return Settings.model_validate(raw)
 
@@ -195,13 +240,12 @@ class ApplicationService:
         if self._surface is None:
             ctx = self._surface_ctx()
             sm = _session_module()
-            sessions_dir = (sm._sessions_dir_of(ctx)
-                            if self.tenant_id == "default"
-                            else self.tenant_root() / "sessions")
+            sessions_dir = self._tenant_sessions_dir(ctx)
             self._surface = sm._surface_of(
                 ctx, bus=getattr(ctx, "bus", None),
                 config=self.effective_settings(),
-                sessions_dir=sessions_dir)
+                sessions_dir=sessions_dir,
+                tenant_id=self.tenant_id)      # GAP-10:租户随会话落盘
             if isinstance(self._surface, sm.DesktopSessionManager):
                 self._surface._ctx_repair = getattr(ctx, "repair", None)
         return self._surface
@@ -227,7 +271,8 @@ class ApplicationService:
             q = self._queues.get(sid)
             if q is None:
                 runner = await self._engine_runner_for(sid, log_)
-                q = TaskQueue(session=log_, runner=runner)
+                q = TaskQueue(session=log_, runner=runner,
+                              **queue_kwargs_of(getattr(self.ctx, "settings", None)))
                 self._queues[sid] = q
                 spine = self._engines.get(sid)
                 if spine is not None:
@@ -243,13 +288,14 @@ class ApplicationService:
         _eng.register_default_llm(cfg)
         if spine is None:
             store = getattr(self.surface_mgr(), "_stores", {}).get(sid)
-            sessions_dir = (_session_module()._sessions_dir_of(self.ctx)
-                            if self.tenant_id == "default"
-                            else self.tenant_root() / "sessions")
+            sessions_dir = self._tenant_sessions_dir()
             spine = _eng.build_runner_components(
                 cfg, log_=log_, bus=getattr(self.ctx, "bus", None),
                 sessions_dir=sessions_dir, store=store,
-                attach_persistence=False)
+                attach_persistence=False,
+                # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
+                # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
+                channel=self.channel)
             self._engines[sid] = spine
         if not getattr(spine, "_plugins_ready", False):
             await _eng._preload_plugins(spine)
@@ -281,14 +327,13 @@ class ApplicationService:
         if spine is None:
             from pyharness import engine as _eng
             store = getattr(self.surface_mgr(), "_stores", {}).get(sid)
-            sessions_dir = (_session_module()._sessions_dir_of(self.ctx)
-                            if self.tenant_id == "default"
-                            else self.tenant_root() / "sessions")
+            sessions_dir = self._tenant_sessions_dir()
             spine = _eng.build_runner_components(
                 self.effective_settings(), log_=log_,
                 bus=getattr(self.ctx, "bus", None),
                 sessions_dir=sessions_dir, store=store,
-                attach_persistence=False)
+                attach_persistence=False,
+                channel=self.channel)          # GAP-11:同 _engine_runner_for
             self._engines[sid] = spine
             # 队列注入必须先于 ticker 启动:activate_orchestration 会 recover 并起
             # scheduler 分钟泵,而泵到点经 _SpineCtx.task_queue 读 spine.task_queue。
@@ -309,8 +354,12 @@ class ApplicationService:
             # 注入)才复用;否则建 per-session——防第二会话拿到第一会话的审批通道。
             if ctx_approval is not None and owner in (None, sid):
                 return ctx_approval
-            provider = ApprovalProvider(session=log_, bus=None,
-                                        config=_session_module()._cfg_of(self.ctx))
+            provider = ApprovalProvider(
+                session=log_, bus=None,
+                config=_session_module()._cfg_of(self.ctx),
+                # R12-3:队列联动接线(惰性取值 ⇒ 与构造序无关)——挂起审批时真挂起
+                # 本会话队列(队列是 queue.suspended/resumed 的唯一写者)。
+                queue_getter=lambda: self._queues.get(sid))
             self._approvals[sid] = provider
         return provider
 
@@ -343,10 +392,28 @@ class ApplicationService:
         if queue is not None:
             status = queue.status()
             if status.running or status.waiting or status.paused:
-                raise_code("BUSY", session_id=sid,
-                           advice="会话仍有运行/等待任务,完成或取消后再删除")
+                # BUSY 是 ERR.md 已登记的**命名状态字面量**、`errors.py` **故意不登记**
+                # (同 QUE-001/ATT-001 先例:acp.py / core/agent.py / task_queue.py 三处
+                # 均**直接构造**保字面码)。此处曾用 ``raise_code("BUSY")`` ⇒ 被静默改写为
+                # CYC-999(R19):同一"会话忙"条件在 ACP 报 BUSY、在本路径报"未知内部错误",
+                # 且 HTTP 落 500 而非 409。
+                from pyharness.errors import PyHError
+                raise PyHError("BUSY", ctx={
+                    "session_id": sid,
+                    "advice": "会话仍有运行/等待任务,完成或取消后再删除"})
         spine = self._engines.get(sid)
         if spine is not None:
+            # FTS 派生索引级联清理(2026-09-21 R8):`SessionQueryIndex.delete_session`
+            # 此前**无生产调用者** ⇒ 删除会话后其索引行仍在 ⇒ **已删内容仍可被搜索**
+            # (且搜索结果指向不存在的会话)。必须在 `spine.close()`(会 detach 关库)
+            # **之前**清;索引未激活(无 fts)则无索引行,跳过即可。
+            fts = getattr(spine, "fts", None)
+            if fts is not None and callable(getattr(fts, "delete_session", None)):
+                try:
+                    await fts.delete_session(sid)
+                except Exception:                      # noqa: BLE001 清理失败不阻断删除
+                    log.warning("fts delete_session 失败 sid=%s(索引残留,"
+                                "可由 rebuild 自愈)", sid, exc_info=True)
             await spine.close()
             self._engines.pop(sid, None)
         self._approvals.pop(sid, None)
@@ -355,20 +422,63 @@ class ApplicationService:
         self._logs.pop(sid, None)
         result = await self.surface_mgr().delete_session(sid)
         self._session_locks.pop(sid, None)
-        unregister_session_tenant(sid)
+        unregister_session_tenant(sid, self.tenant_id)   # 只撤本租户认领
         return {"ok": True, **result}
 
-    @staticmethod
-    def attachment_payloads(attachments: Any) -> list[dict]:
+    def _attachment_limits(self) -> tuple[int, int, tuple]:
+        """附件上限(F061)取自 ``security.attachment.*``;缺省回落模块 L1 锚点。
+
+        2026-09-21:**这三个配置键此前零读取者**(死配置,见 LIMITATIONS L-20),
+        接线后运维改它们即生效。
+        """
+        from pyharness.core import attachment as att_mod
+        att = getattr(getattr(getattr(self.ctx, "settings", None),
+                              "security", None), "attachment", None)
+        n = getattr(att, "max_per_message", None)
+        b = getattr(att, "max_bytes", None)
+        mimes = getattr(att, "mime_whitelist", None)
+        return (int(n) if n else att_mod.DEFAULT_MAX_PER_MESSAGE,
+                int(b) if b else att_mod.DEFAULT_MAX_BYTES,
+                tuple(mimes) if mimes else att_mod.DEFAULT_MIME_WHITELIST)
+
+    def _session_workspace(self, sid: str) -> str:
+        """会话工作区(F061 附件落点):引擎 scope 权威值,缺位则**同单点**派生。"""
+        spine = self._engines.get(str(sid))
+        ws = getattr(getattr(getattr(spine, "scope", None), "policy", None),
+                     "workspace_root", "")
+        if ws:
+            return str(ws)
+        from pyharness.core.scope import session_workspace
+        cfg = getattr(self.ctx, "settings", None)
+        root = getattr(getattr(cfg, "storage", None), "workspaces_dir",
+                       "~/.pyharness/workspaces")
+        return session_workspace(str(root), str(sid))
+
+    def attachment_payloads(self, attachments: Any, *, sid: str = "") -> list[dict]:
+        """附件入站**单点校验**(F061):数量 → 魔数/大小 → 内容寻址落盘。
+
+        2026-09-21 修(L-22):此前只做 schema 形状组装(客户端自报 mime、缺省回落
+        `image/png`;无魔数/大小/数量校验;`sha256` 可省略回落全零占位)⇒ **伪装图片的
+        恶意文件可进事件流**,且同内容不去重。现按 PRD-Core F061 规格:魔数定类型
+        (不信扩展名/自报 mime)→ 单张 ≤`max_bytes` → 单消息 ≤`max_per_message`
+        → `sha256(raw)[:16]` 内容寻址去重落盘到**会话工作区内**;任一不满足 →
+        `ATT-001` 零写盘。schema 校验保留为第二道(形状)。
+        """
+        from pyharness.core import attachment as att_mod
+        refs = list(attachments or [])
+        if not refs:
+            return []
+        n_max, b_max, mimes = self._attachment_limits()
+        if len(refs) > n_max:
+            att_mod.reject_attachment("too-many", count=len(refs), limit=n_max)
+        workspace = self._session_workspace(sid)
         payloads: list[dict] = []
-        for ref in (attachments or []):
+        for ref in refs:
             if not isinstance(ref, dict):
                 raise_code("EVT-100", field="attachments", advice="附件须 dict 引用")
-            payload = {"file_path": str(ref.get("file_path") or ref.get("ref") or ""),
-                       "mime": ref.get("mime") or "image/png",
-                       "sha256": ref.get("sha256") or "0" * 64,
-                       "w": ref.get("w") or 1, "h": ref.get("h") or 1,
-                       "size_bytes": ref.get("size_bytes")}
+            payload = att_mod.ingest_image_path(
+                ref.get("file_path") or ref.get("ref") or "", workspace=workspace,
+                mime_whitelist=mimes, max_bytes=b_max)
             payloads.append(validate_payload("user.attachment.image", payload))
         return payloads
 
@@ -378,7 +488,7 @@ class ApplicationService:
         if not text:
             raise_code("EVT-100", advice="消息不能为空")
         log_ = await self.require_session(sid)
-        payloads = self.attachment_payloads(attachments)
+        payloads = self.attachment_payloads(attachments, sid=sid)
         queue = await self.queue_for(sid, log_)
         env = await log_.append("user.message", {"content": text},
                                 actor="user", origin=self.channel, sync=True)
@@ -486,6 +596,16 @@ class ApplicationService:
         return bool(await spine.subagent.cancel(sub_id, by=self.owner_for(sid)))
 
     async def shutdown(self) -> None:
+        # ① 队列排空**最先**(2026-09-21):本服务持有的 per-session 队列先排空(取消
+        #    在途/摘除排队 + 终态与段锚落盘),再关会话与引擎 —— 否则 `session.finished`
+        #    先落盘会让任务终态/段锚被 EVT-104 拒写(等待者悬挂,已实测复现)。
+        for sid, q in list(self._queues.items()):
+            if callable(getattr(q, "shutdown", None)):
+                try:
+                    await q.shutdown(reason="service-shutdown")
+                except Exception:                      # noqa: BLE001 收尾尽力
+                    log.warning("queue shutdown failed sid=%s", sid,
+                                exc_info=True)
         surface = self._surface
         if isinstance(surface, _session_module().DesktopSessionManager):
             try:
@@ -566,6 +686,7 @@ class ApplicationService:
         return {"event": _env_dict(env)}
 
     async def telemetry_report(self, sid: str) -> dict:
+        """旧遥测面:按事件类型计数聚合(与治理因果无关,保留兼容)。"""
         log_ = await self.require_session(sid)
         from pyharness.core import telemetry as _tel
         try:
@@ -574,6 +695,128 @@ class ApplicationService:
         except Exception as e:                         # noqa: BLE001
             return {"sid": str(sid), "ok": False,
                     "error": f"{type(e).__name__}:{e}"[:200]}
+
+    # ------------------------------------------------------------ 治理审计(GAP-7)
+    async def governance_audit(self, sid: str, *, decision_id: str = "",
+                               since_seq: int = 0, reconcile: bool = False,
+                               limit: int = 100) -> dict:
+        """治理审计查询面:把 ``governance.audit.AuditSystem`` 接成**产品入口**。
+
+        GAP-7 修复点:此前 ``AuditSystem`` 已构造并注入 ``GovernanceContext``,但
+        ``causal_chain`` / ``denied_report`` / ``reconcile`` / ``legacy_session_audit``
+        在 ``pyharness/`` 内**零调用点** ⇒ 治理数据在盘上、查询面不可达,桌面
+        "审计"页只能用旧遥测(类型计数,无决策因果)顶上。
+
+        读侧纪律(**replay-only**):每条结论都由**重放会话日志**现算得出,不读
+        任何内存缓存、不订阅事件 ⇒ 重启后同一日志得同一结果(可复现)。
+
+        返回:``decisions``(最近 N 条 decision.issued,倒序)·
+        ``denied``(被拒清单,含 ``executed`` 证据位:该 call_id 是否有配对
+        tool.result)· ``findings``(``reconcile=True`` 时的三类一致性对账)·
+        ``chain``(给定 ``decision_id`` 的因果链还原)。
+        """
+        log_, spine = await self.public_spine_for(sid)
+        audit = getattr(getattr(spine, "governance", None), "audit", None)
+        if audit is None:
+            raise_code("CYC-999", module="application.service",
+                       field="governance.audit",
+                       why="治理审计面未接线(AuditSystem 未注入 GovernanceContext)")
+        from pyharness.governance import verify_receipt
+        events = list(log_.events_after(0))
+        decisions = []
+        tenant = getattr(log_, "tenant_id", None)
+        for e in events:
+            if e.type != "decision.issued":
+                continue
+            p = getattr(e, "payload", None) or {}
+            decisions.append({
+                "decision_id": str(p.get("decision_id") or ""),
+                "verdict": str(p.get("verdict") or ""),
+                "tool": str(p.get("tool") or ""),
+                "guard_ids": list(p.get("guard_ids") or []),
+                "policy_refs": list(p.get("policy_refs") or []),
+                "principal_kind": p.get("principal_kind"),
+                "principal_id": p.get("principal_id"),
+                "principal_channel": p.get("principal_channel"),
+                "approval_ref": p.get("approval_ref"),
+                "supersedes": p.get("supersedes"),
+                "seq": getattr(e, "seq", None),
+                "call_id": call_id_of(e),
+                # 租户归属(GAP-10):取自**事件信封**(框架侧落盘的事实),
+                # 不是从服务实例的 self.tenant_id 反推 —— 后者是"当前请求"的租户,
+                # 前者是"该事件属于谁"的事实。
+                "tenant_id": getattr(e, "tenant_id", None),
+            })
+        n = max(1, int(limit or 100))
+        # 凭证核验面(离线可验):README 曾自陈 ``verify_receipt`` "未接 CLI/HTTP
+        # /工具外壳"—— 库级可达而产品不可达。此处接上:**从事件日志重建**全部凭证
+        # (``rebuild_from_log``,INV-G2/R2:不依赖任何内存缓存,重启后同样成立),
+        # 逐条重算哈希(篡改任一受保护字段即 False),再校验 prev_hash 链单调。
+        from pyharness.governance import verify_chain
+        from pyharness.governance.receipt import rebuild_from_log
+        all_rec = rebuild_from_log(log_)
+        receipts: dict = {
+            "count": len(all_rec),
+            "verified": sum(1 for r in all_rec if verify_receipt(r)),
+            "chain_valid": verify_chain(all_rec) if all_rec else True,
+            "items": [{"receipt_id": r.receipt_id,
+                       "decision_id": r.decision_id, "kind": r.kind,
+                       "verified": verify_receipt(r),
+                       "approval_ref": r.approval_ref,
+                       "content_hash": r.content_hash,
+                       "prev_hash": r.prev_hash} for r in all_rec],
+        }
+        return {
+            "sid": str(sid), "ok": True,
+            "tenant_id": tenant,
+            "decisions": decisions[-n:][::-1],
+            "denied": audit.denied_report(since_seq=int(since_seq or 0)),
+            "findings": (await audit.reconcile()) if reconcile else [],
+            "chain": audit.causal_chain(str(decision_id)) if decision_id else None,
+            "receipts": receipts,
+        }
+
+    # ------------------------------------------------------------ 治理证据(GAP-8)
+    async def governance_evidence(self, sid: str, *, task_id: str = "") -> dict:
+        """证据查询面:按任务段聚合的治理证据工件。
+
+        GAP-8 修复点:此前 ``EvidenceCollector`` 只有订阅者、没有生产者
+        (``archive()`` 零调用) ⇒ ``evidence.archived`` 永不产生、索引恒空、
+        ``collect_for_task()`` 恒返回 ``()``。现由 ``engine.archive_task_evidence``
+        在任务段结束后按冻结规则产出。
+
+        **INV-E3 可核验**:回答**不取自订阅态内存索引**,而是由 ``from_log`` 从
+        append-only 日志**现场重建**——故重启后同一日志得同一答案。``indexed`` 与
+        ``rebuilt`` 两数并列展示,二者不一致即说明派生缓存与真源脱节(可观测)。
+        """
+        log_, spine = await self.public_spine_for(sid)
+        coll = getattr(getattr(spine, "governance", None), "evidence", None)
+        if coll is None:
+            raise_code("CYC-999", module="application.service",
+                       field="governance.evidence",
+                       why="证据面未接线(EvidenceCollector 未注入 GovernanceContext)")
+        from pyharness.governance import EvidenceCollector
+        rebuilt = await EvidenceCollector.from_log(log_)     # INV-E3:由日志重建
+        out: dict = {
+            "sid": str(sid), "ok": True, "task_id": str(task_id),
+            "indexed": coll.evidence_count(),
+            "rebuilt": rebuilt.evidence_count(),
+            "artifacts": [
+                {"evidence_id": str((getattr(e, "payload", None) or {})
+                                    .get("evidence_id") or ""),
+                 "claim": str((getattr(e, "payload", None) or {}).get("claim") or ""),
+                 "refs": list((getattr(e, "payload", None) or {}).get("refs") or []),
+                 "seq": getattr(e, "seq", None)}
+                for e in log_.events_after(0)
+                if getattr(e, "type", None) == "evidence.archived"],
+        }
+        if task_id:
+            out["for_task"] = [
+                {"evidence_id": ev.evidence_id, "claim": ev.claim,
+                 "refs": [{"kind": r.kind, "locator": r.locator}
+                          for r in ev.refs]}
+                for ev in rebuilt.collect_for_task(str(task_id))]
+        return out
 
     # ------------------------------------------------------------ edit / feedback
     @staticmethod
@@ -778,7 +1021,7 @@ class ApplicationService:
     # ------------------------------------------------------------ attachments / workflow / budget
     async def upload_attachment(self, sid: str, attachment: dict) -> dict:
         log_ = await self.require_session(sid)
-        for payload in self.attachment_payloads([attachment]):
+        for payload in self.attachment_payloads([attachment], sid=sid):
             await log_.append("user.attachment.image", payload, actor="user")
         return {"ok": True, "sid": str(sid)}
 
@@ -1075,7 +1318,7 @@ class ApplicationService:
             mgr = getattr(spine, "skills", None)
             if mgr is not None:
                 counts.append({"session": str(getattr(
-                    getattr(spine, "session", None), "session_id", "?")),
+                    getattr(spine, "session", None), "sid", "?")),
                     "count": mgr.scan()})
         if not counts:
             counts.append({"direct": True, "count": self.skills_mgr().scan()})

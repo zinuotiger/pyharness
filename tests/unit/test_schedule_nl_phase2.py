@@ -117,7 +117,7 @@ async def _boot(cfg, sid: str, text: str):
     """装配真实引擎 + 落 session.created/user.message(不建队列、不 submit)。"""
     ctx = await assemble_real_engine(cfg, sid=sid,
                                      sessions_dir=pathlib.Path(
-                                         cfg.storage.sessions_dir))
+                                         cfg.storage.sessions_dir), channel="cli")
     await ctx.session.append("session.created",
                              {"title": "", "model": cfg.llm.model},
                              actor="system", sync=True)

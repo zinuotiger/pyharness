@@ -53,12 +53,16 @@ from typing import TYPE_CHECKING, Any, Optional
 from pyharness.errors import PyHError, raise_code
 
 if TYPE_CHECKING:  # 仅类型标注;装配对象一律鸭子注入,不硬 import 阶段后模块
-    from pyharness.bus import EventBus, Registry
-    from pyharness.config import Settings
-    from pyharness.core.session import SessionLog
     from pyharness.events import Envelope
 
 log = logging.getLogger("pyharness.agent")
+
+# 通道身份未声明哨兵(GAP-11)。**三态**:具体字符串 = 人类通道;``None`` = 外壳
+# 已显式声明 headless(无人类通道,合法 SYSTEM 主体);本哨兵 = 装配层从未声明
+# ⇒ ``create_agent``/``_runtime_ctx`` **不写** ``ctx.channel`` 属性 ⇒ 治理层
+# ``principal_of`` 见属性缺失即 ``APR-503`` fail-closed。三种情形互不等价,
+# 故不能用 ``None`` 兼任"未声明"——那正是修复前静默降级为 system 的根因。
+CHANNEL_UNDECLARED: Any = object()
 
 # 生命周期合法取值(§状态机;类型标注 + 文档锚,不引入运行时枚举开销)
 AGENT_STATES = ("init", "ready", "busy", "stopping", "closed")
@@ -101,7 +105,12 @@ class Ctx:
         self.loop = loop                # 三态机循环驱动器(wake/cancel/resume)
         self.sys = sys                  # 系统边界能力命名空间占位
         self.storage = storage          # 域存储(spill/kv)占位
-        self.persistence = persistence  # JSONL 真源存储(SessionStore)
+        # JSONL 真源存储(SessionStore)。**当前无 in-repo 读取方**(L-14):
+        # spec `desktop.py.md:266` 曾规定 `self.ctx.persistence.flush_sync()` 作兜底
+        # flush,但实现已由 `DesktopApp._flush_persistence_async` + `Manager.shutdown_all`
+        # 取代(R14-13)。**保留为可用门面**(插件/未来消费方可直达 store);
+        # 会话内的真源读写正路仍是 `SessionLog._persistence`。
+        self.persistence = persistence
         # 装配期后补(create_agent 接线;None 哨兵 = 尚未注入)
         self.bus: Any = None            # EventBus:注册表/能力留痕出口
         self.registry: Any = None       # Registry:plugin/tool/capability 索引
@@ -468,6 +477,19 @@ def create_agent(session_id: str, spine: Any, cfg: Any) -> Agent:
     ag.ctx.bus = spine.bus                       # 事件总线(留痕/订阅出口)
     ag.ctx.registry = spine.registry             # 注册表(F003 寻址)
     ag.ctx.config = cfg
+    # 出口脱敏单口(F016/INV-09):tool_fs / tool_web / spill 三处读 ``ctx.redact``,
+    # 但 2026-09-21 R10 前**全库无注入点** ⇒ 生产恒缺失 ⇒ fs/web 出口静默降级为
+    # 不打码(实测 read_file 输出的 `API_KEY=sk-AAAA…` 原文进事件与 LLM 上下文)。
+    # 唯一注入源 = `config.redactor_of(cfg)`(含 log.redact_enabled 开关语义)。
+    from pyharness.config import redactor_of
+    ag.ctx.redact = redactor_of(cfg)
+    # 通道身份(GAP-11):外壳在装配期经 ``EngineSpine.channel`` 声明,此处落到
+    # agent ctx——治理层 ``authorize()`` 收到的是**本 ctx**,不是外壳自己的 ctx,
+    # 故该跳缺失会让每次决策静默降级为 SYSTEM 主体。未声明(= 哨兵)时**不写属性**,
+    # 由 ``principal_of`` 见属性缺失即 APR-503 fail-closed(绝不静默降级)。
+    _chan = getattr(spine, "channel", CHANNEL_UNDECLARED)
+    if _chan is not CHANNEL_UNDECLARED:
+        ag.ctx.channel = _chan
     ag.ctx.guard = getattr(spine, "guard", None)      # guard 链(executor 关3,F031 兜底)
     ag.ctx.governance = getattr(spine, "governance", None)  # 治理层单实例(ADR-018;S2-3)
     ag.ctx.approval = getattr(spine, "approval", None)  # 审批(executor 转审批 F015)
@@ -493,4 +515,4 @@ def create_agent(session_id: str, spine: Any, cfg: Any) -> Agent:
     return ag
 
 
-__all__ = ["Agent", "Ctx", "create_agent"]
+__all__ = ["Agent", "Ctx", "create_agent", "CHANNEL_UNDECLARED"]

@@ -15,9 +15,12 @@
 3. **先校验后写入**:坏事件在 `session.append` 入口被拒(§2.2),拒绝 = 不进内存/总线/日志(PRD §3.1-3)。
 4. **seq/ts 由框架打**:只由 `session.append` 生成分配(`_seq+1`,[DIS-§3.3.1]);LLM/工具/插件无权自报——防伪造乱序(PRD §3.1-5)。
 
-## 1.2 强同步三类(崩溃一致性锚点)
+## 1.2 强同步事件(`SYNC_TYPES`)(崩溃一致性锚点)
 
-以下三类事件**立即写盘 + flush,成功才返回**(`sync=True` / `SYNC_TYPES`,[DIS-§3.3.1][DIS-§8.2]):
+以下**原始三类族**事件**立即写盘 + flush,成功才返回**(`sync=True` / `SYNC_TYPES`,[DIS-§3.3.1][DIS-§8.2]);
+**此后为崩溃一致性追加了治理/编排型强同步事件** ⇒ 现共 **14 型**,唯一真源＝`events.vocab.SYNC_TYPES`（`approval.denied/granted/requested/timeout`·`context.compacted`·`decision.issued`·`fork.created`·`guard.rejected`·`policy.updated`·`receipt.emitted`·`segment.start`·`session.finished`·`session.recovered`·`user.message`）。
+
+原始三类族:
 
 | 事件族 | 语义 | 为何强同步 |
 |---|---|---|
@@ -603,7 +606,7 @@ repair 幂等:同日志重复修复结果一致;修复前强制备份 `.jsonl.ba
 
 1. **事件类型只增不改**:既有 type 语义与必填字段**冻结**;破坏性变更 = 新增类型(如 `user.message_v2`),旧类型永不改写(旧会话回放不中断)。
 2. **payload 演进**:只许加**可选**字段(带默认值);新必填字段 = 新类型或随大版本协商;字段类型/枚举收缩一律视为破坏性。
-3. **schema 版本**:每个事件模型登记 `since_version`;未知类型回放 → 跳过 + 警告,绝不中断(§5.3 同纪律)。
+3. **schema 版本**:未知类型回放 → 跳过 + 警告,绝不中断(§5.3 同纪律)——**该行为已实现**(写侧未注册类型 → `EVT-102` 拒写;读侧未知行记跳)。**元数据 `since_version` 逐模型登记未实现**(无消费者;已在 `tests/invariants/test_inv_config_reachability.py::KNOWN_UNIMPLEMENTED` 的口径内按「无外部读者属预期」类登记),如需版本回溯再补。
 4. **错误码**:一经发布不改含义;可新增码(码 = 语义契约,F019)。
 5. **词表登记制**:框架内新增类型须过 §3 词表与本文件登记(含 §1.3 通道二选一、字段表、消费方);插件事件经注册表动态登记(命名空间 `plugin.<id>.<name>` 防冲突),登记即受 §2.2 校验链约束。
 6. **迁移实例**:E 组事件在阶段实现前属"冻结待激活"——schema 已定义可先冻结;激活时只许加可选字段,不许改 §3 已列语义。
@@ -616,7 +619,7 @@ repair 幂等:同日志重复修复结果一致;修复前强制备份 `.jsonl.ba
 
 | 类别 | 事件 | 落盘 | 理由 |
 |---|---|---|---|
-| 强同步(立即 write+flush) | `user.message`、`guard.rejected`、`approval.*`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted` | ✓ 持久 | §1.2 三类核心 + 终态/锚点/空洞声明(声明不持久则重放语义崩坏) |
+| 强同步(立即 write+flush) | **全 14 型,唯一真源＝`events.vocab.SYNC_TYPES`**：`user.message`、`guard.rejected`、`approval.denied/granted/requested/timeout`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted`、`decision.issued`、`receipt.emitted`、`policy.updated` | ✓ 持久 | §1.2 原始三类族 + 终态/锚点/空洞声明/**治理证据**(声明或裁决不持久则重放与审计语义崩坏) |
 | 普通(攒批 ≤0.5s/64 条) | §3 其余持久事件(created/renamed/llm.*/tool.*/task.*/plan.*/goal.*/job.*/subagent.*/queue.*/plugin.*/system.*/todo.*/bus.backpressure 等) | ✓ 持久 | 事实留痕;崩溃丢 ≤0.5s 窗由 recovered 声明 |
 | 仅内存(仅总线) | `llm.chunk`(明示)、`registry.updated`(F003 广播) | ✗ 不落 | 高频可重算/碎片无审计价值(§1.3 准则) |
 

@@ -24,7 +24,7 @@ import ast
 import hashlib
 import pathlib
 import types
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -269,7 +269,10 @@ _WRITE_ALLOWLIST = {
     "core/spill.py": "工具大结果 spill 落盘(非会话消息历史)",
     "core/tool_fs.py": "文件工具 Provider(受 guard;非会话日志)",
     "core/skill_registry.py": "技能包缓存元数据(非会话日志)",
-    "core/tenant_settings.py": "租户设置原子写(非会话日志)",
+    "core/tenant_settings.py": "租户设置原子写 + **租户令牌**落盘(R31-2;非会话日志)",
+    "core/attachment.py": "F061 附件内容寻址落盘(临时文件+rename;非会话日志)",
+    "desktop/app.py": "**操作者令牌**落盘 web.token(R31-2:0600 原子写;非会话日志"
+                      "——引导页不再无凭证发令牌,随机态令牌须可查)",
 }
 
 _WRITE_MODES = {"w", "a", "wb", "ab", "w+", "a+", "x", "xb", "r+", "r+b", "w+b"}
@@ -1508,3 +1511,144 @@ async def test_f34_T4b_apr501_executor_emits_tool_error(tmp_path):
     assert len(errs) == 1, f"应恰一条 tool.error,实际事件={sess.types()}"
     assert errs[0]["payload"]["code"] == "APR-501"
     assert errs[0]["payload"]["call_id"] == "c-apr501", "call_id 必须可配对"
+
+
+# ===================== 会话收尾:后台子进程必须随会话终止(F052/F053 生命周期)
+async def test_session_close_ends_background_procs(e2e_factory):
+    """``proc.start`` 起的进程树**必须**随会话收尾一起终止。
+
+    修复前实测(2026-09-21):``proc.close_session`` 的 docstring 与 ``_SESSIONS``
+    的注释都写着"会话关闭即清",但该函数**零生产调用者** —— 关闭会话后进程仍在
+    运行(registry 项、泵线程、定时器一并泄漏),进程树还可能占着工作区文件句柄。
+    """
+    from pyharness.core import proc
+
+    s = await e2e_factory(None, sid="s-inv-proc-0001")
+    await s.boot()
+    sandbox = pathlib.Path(s.ctx.scope.policy.workspace_root) / "sandbox"
+    sess = proc.start_session(s.ctx.session.sid, sandbox,
+                              'python -c "import time; time.sleep(30)"',
+                              timeout_total_s=30)
+    try:
+        assert sess.status()["running"] is True, "前置:后台进程应已启动"
+        assert proc._table().get(s.ctx.session.sid), "前置:应已登记"
+        await s.close()
+        assert proc._table().get(s.ctx.session.sid) is None, \
+            "会话收尾后不得残留进程登记项"
+        assert sess.status()["running"] is False, \
+            "会话收尾后进程树必须已终止(不得泄漏到会话之外)"
+    finally:                       # 兜底:断言失败时也不留孤儿进程
+        try:
+            proc.close_session(s.ctx.session.sid)
+        except Exception:          # noqa: BLE001 清理尽力
+            pass
+
+
+# ============ 会话收尾:总线订阅按属主摘除(共享总线多会话必须互不误伤)
+def _subs_of_owner(bus: Any, owner: str) -> int:
+    """按属主统计总线订阅数(测试内省:EventBus 无公开 owner 列举面)。"""
+    n = 0
+    for lst in bus._by_type.values():
+        n += sum(1 for s in lst if s.owner == owner)
+    n += sum(1 for s in bus._wild if s.owner == owner)
+    return n
+
+
+async def _mk_spine(tmp_path, sid: str, bus: Any):
+    from pyharness.config import load_settings
+    from pyharness.engine import build_spine
+    cfg = load_settings()
+    cfg.storage.root = str(tmp_path)
+    cfg.storage.sessions_dir = str(tmp_path / "sessions")
+    cfg.storage.workspaces_dir = str(tmp_path / "workspaces")
+    cfg.storage.spill_dir = str(tmp_path / "spill")
+    cfg.storage.db_path = str(tmp_path / "index.db")
+    cfg.llm.fallback_models = []                # 不启探针(本用例不测探针)
+    return await build_spine(cfg, sid=sid, sessions_dir=tmp_path / "sessions",
+                             bus=bus)
+
+
+async def test_session_close_unsubscribes_own_bus_owners(tmp_path):
+    """会话收尾必须摘掉**本会话**在总线上挂的订阅(落盘/证据/证据生产者)。
+
+    修复前实测(共享总线):关闭会话后遗留 **83 条**订阅 —— 证据生产者继续对后续
+    会话的 ``segment.end`` 反应、落盘记录器向已关闭 store 写入、内存随会话数增长。
+    """
+    from pyharness.bus import EventBus
+
+    shared = EventBus()                          # 模拟桌面壳:一条总线多会话
+    spine = await _mk_spine(tmp_path, "s-inv-bus-0001", shared)
+    owners = list(spine.bus_owners)
+    assert owners, "装配期应登记本会话的订阅属主"
+    assert any(o.endswith(":s-inv-bus-0001") for o in owners), \
+        f"属主串必须含 sid(修前恒为 ':?'):{owners}"
+    assert sum(_subs_of_owner(shared, o) for o in owners) > 0
+
+    await spine.close()
+    for o in owners:
+        assert _subs_of_owner(shared, o) == 0, f"关闭后仍遗留订阅:{o}"
+
+
+async def test_shared_bus_close_does_not_affect_other_session(tmp_path):
+    """**对抗用例(CND-01 隔离面)**:共享总线上关闭 A **不得**摘掉 B 的订阅。
+
+    这正是"属主串不含 sid"会踩的坑:修前两会话属主同为 ``engine:?``,按属主摘除
+    会连坐另一个**仍在运行**的会话(其落盘/证据订阅被静默摘除)。
+    """
+    from pyharness.bus import EventBus
+
+    shared = EventBus()
+    a = await _mk_spine(tmp_path, "s-inv-bus-iso-a", shared)
+    b = await _mk_spine(tmp_path, "s-inv-bus-iso-b", shared)
+    b_owners = list(b.bus_owners)
+    assert not set(a.bus_owners) & set(b_owners), "两会话属主不得重合"
+    before = {o: _subs_of_owner(shared, o) for o in b_owners}
+    assert all(v > 0 for v in before.values()), before
+
+    await a.close()
+    for o in b_owners:
+        assert _subs_of_owner(shared, o) == before[o], \
+            f"关闭 A 误伤 B 的订阅:{o}"
+
+    # B 仍可用:落盘订阅在岗(追加事件经总线分发到 store)
+    await b.session.append("session.created", {"title": "", "model": "m"},
+                           actor="system", sync=True)
+    assert b.session.events_after(0) is not None
+    await b.close()
+
+
+async def test_session_close_clears_pending_approvals(e2e_factory):
+    """未决审批在会话收尾必须**全置 denied**(不得悬挂)。
+
+    修复前实测:``ApprovalProvider.detach``(docstring 写"随 ctx.close()")**零生产
+    调用者** ⇒ 关闭后 ``_pending`` 仍挂着、``_detached=False``、等待裁决的任务悬挂。
+    """
+    import asyncio
+    import pathlib
+
+    s = await e2e_factory(
+        [{"id": "c1", "name": "fs.write_file",
+          "args": {"path": "note.txt", "content": "NEW"}}],
+        sid="s-inv-appr-0001")
+    ws = pathlib.Path(s.ctx.scope.policy.workspace_root)
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "note.txt").write_text("ORIGINAL", encoding="utf-8")
+    await s.boot()
+    await s.ctx.session.append("user.message", {"content": "overwrite"},
+                               actor="user", sync=True)
+    from pyharness.core.task_queue import TaskQueue
+    q = TaskQueue(s.ctx.session, runner=s.ctx.task_runner, max_queue=8)
+    tid = await q.submit("overwrite")
+    wait_task = asyncio.create_task(q.wait_for(tid))
+    try:
+        for _ in range(300):
+            if s.ctx.approval._pending:
+                break
+            await asyncio.sleep(0.02)
+        assert s.ctx.approval._pending, "前置:应有未决审批(g7 覆写)"
+        await s.close()
+        assert not s.ctx.approval._pending, "收尾后不得残留未决审批"
+        assert s.ctx.approval._detached is True, "收尾必须 detach(摘订阅+清信任)"
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()

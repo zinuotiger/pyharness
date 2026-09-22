@@ -340,7 +340,7 @@ class TestEvidenceWiring:
         from pyharness.engine import assemble_real_engine
         ctx = await assemble_real_engine(
             self._cfg(tmp_path), sid="s-eng-ev-000003",
-            sessions_dir=tmp_path / "sessions")
+            sessions_dir=tmp_path / "sessions", channel="cli")
         gov = ctx.engine_spine.governance
         assert isinstance(gov.evidence, EvidenceCollector)
         assert ctx.governance is gov                    # 单实例挂载
@@ -350,7 +350,7 @@ class TestEvidenceWiring:
         from pyharness.engine import assemble_real_engine
         ctx = await assemble_real_engine(
             self._cfg(tmp_path), sid="s-eng-ev-000004",
-            sessions_dir=tmp_path / "sessions")
+            sessions_dir=tmp_path / "sessions", channel="cli")
         gov = ctx.engine_spine.governance
         await ctx.session.append("session.created",
                                  {"title": "", "model": "m"}, actor="system")
@@ -364,3 +364,33 @@ class TestEvidenceWiring:
         assert gov.evidence.evidence_count() == 1
         assert [e.evidence_id for e in gov.evidence.collect_for_task("t-1")] \
             == ["E1"]
+
+
+async def test_unclosed_segment_does_not_swallow_later_tasks_evidence():
+    """**R14-10 回归**:崩溃留下的**未闭合段**不得吞掉其后任务的证据。
+
+    进程被杀 → ``_run_task`` 的 ``finally`` 未执行 → 日志里**只有** ``segment.start``
+    没有 ``segment.end``。修复前 ``_task_at`` 把未闭合段的右界当作**无穷**、又按插入序
+    返回首个命中 ⇒ 该段吞掉其后所有 seq:实测 ``collect_for_task("taskB")`` 返回空,
+    而 taskB 的证据被算到 taskA 上(**崩溃重启后治理证据按任务查错**)。
+
+    判据已改为"起点 ≤ seq 的**最近**一段"(段在时间轴上互不重叠,未闭合段的右界因此
+    天然止于下一段起点之前)。
+    """
+    log = _Log()
+    log.events.append(_Ev(1, "segment.start", {"task_id": "taskA"}))   # 崩溃现场:无 end
+    log.events.append(_Ev(2, "evidence.archived",
+                          {"evidence_id": "evA", "claim": "A",
+                           "refs": [{"kind": "seq", "locator": "s-abc12345:2"}]}))
+    log.events.append(_Ev(10, "segment.start", {"task_id": "taskB"}))
+    log.events.append(_Ev(11, "evidence.archived",
+                          {"evidence_id": "evB", "claim": "B",
+                           "refs": [{"kind": "seq", "locator": "s-abc12345:11"}]}))
+    log.events.append(_Ev(12, "segment.end",
+                          {"task_id": "taskB", "start_seq": 10}))
+
+    col = await EvidenceCollector.from_log(log)
+    assert [e.evidence_id for e in col.collect_for_task("taskA")] == ["evA"], \
+        "未闭合段不得越界吞掉后续任务的证据"
+    assert [e.evidence_id for e in col.collect_for_task("taskB")] == ["evB"], \
+        "后续任务必须看到自己的证据"

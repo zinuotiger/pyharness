@@ -32,7 +32,7 @@ import pytest
 from pyharness import events as EV
 from pyharness.bus import EventBus
 from pyharness.core.plan_mode import (MAX_RETRY, MAX_STEPS, PLAN_TTL_HOURS,
-                                      Plan, PlanManager, Step, selfcheck_plan)
+                                      Plan, PlanManager, selfcheck_plan)
 from pyharness.core.session import SessionLog
 from pyharness.errors import PyHError
 
@@ -666,7 +666,7 @@ async def test_sweep_expired_plans():
 
 def _deadline_plus(p: Plan, *, hours: int):
     """测试时钟:方案过期截止后 hours 时刻(aware UTC)。"""
-    from datetime import datetime, timezone
+    from datetime import timezone
     base = p.created_at or p.expires_at
     return (base + timedelta(hours=hours)).astimezone(timezone.utc)
 

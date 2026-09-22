@@ -56,8 +56,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from pyharness.errors import raise_code
 
 if TYPE_CHECKING:  # 仅类型标注;装配对象鸭子注入(session/bus 经 ctx)
-    from pyharness.config import Settings
-    from pyharness.events import Envelope
+    pass
 
 log = logging.getLogger("pyharness.llm")
 
@@ -144,7 +143,10 @@ class UsageCounters:
     """F029 token 计量计数器(report_usage 唯一写入;scope/agent-loop 只读,F032 硬闸)。
 
     会话级总量 + by_model 模型细分二维(任务维可经事件日志按 task_id 重建,INV-01);
-    cost_est 只进事件/报表,不打预算硬闸(N14)。"""
+    ``cost_est`` **是**预算硬闸判据之一(与 token 并列):``Scope.budget_state`` 与
+    ``BudgetGate._compute_state`` 均按 ``used.cost_est >= limits.max_cost_yuan`` 判
+    exhausted。原注释称其"只进事件/报表、不打硬闸(N14)"**与实现相反**(实测:纯成本
+    超限即拦),已在 R21 更正。"""
 
     in_tokens: int = 0
     out_tokens: int = 0
@@ -539,8 +541,10 @@ async def report_usage(usage: Any, model: str, *, ctx: Any,
                        counters: Optional[UsageCounters] = None) -> Any:
     """F029 token 计量:每成功请求落 llm.usage 事件 + 更新 UsageCounters(F029 唯一写入)。
 
-    usage 事件即事实,计数器可整体重建(INV-01);预算硬闸只读 token 数(F032);cost_est
-    价格表缺模型 → None 照常记账(偏离 4);缺失缓存字段按 0,不做厂商猜。
+    usage 事件即事实,计数器可整体重建(INV-01);预算硬闸判据 = **token 与 cost 并列**
+    (out/in/cost_est 任一 ≥ 上限即 exhausted;cost 由**软约束**单价表估算,上限见 CFG §3.1
+    `budget.task.max_cost_yuan` —— 实测「纯成本超限」即拦,R21 更正了旧措辞「只读 token 数」);
+    价格表缺模型 → cost_est 记 0 照常记账(偏离 4);缺失缓存字段按 0,不做厂商猜。
     """
     llm_cfg = _llm_cfg_from_ctx(ctx)
     unit_price = getattr(getattr(llm_cfg, "usage", None), "unit_price", None) or {}
@@ -786,7 +790,17 @@ def register_adapter(name: str, factory: Any) -> LLMAdapter:
 
 
 def require_adapter(name: str) -> LLMAdapter:
-    """注册表查询;未注册模型 → LLM-304(advice=核对模型名 F030;不重试)。"""
+    """注册表查询;未注册模型 → LLM-304(advice=核对模型名 F030;不重试)。
+
+    **N8 登记(2026-09-20 M5 复核)**:本函数当前**无生产调用者** —— 全库唯一命中
+    是 ``__all__`` 导出与本文件的单元测试;``docs/`` 与规格中**零引用**,故
+    **无兼容性承诺**。
+
+    **处置:保留并加注,不删除。** 理由:它在 ``__all__`` 里,属**公共导出面**;
+    删除是 H-4(API 契约变更),收益(少一个辅助函数)小于成本。LLM 门面自身的
+    等价查询是 ``LLMClient.require()``(生产在用)。若将来确认要删,须走一次显式
+    契约变更。
+    """
     inst = adapters.get(name)
     if inst is None:
         raise_code("LLM-304", model=name,
@@ -809,6 +823,19 @@ def resolve_secret_ref(ref: str) -> str:
         val = os.environ.get(ref[4:].strip())
     elif ref.startswith("file:"):
         path = os.path.expanduser(ref[5:].strip())
+        # CRED-702(2026-09-21 R27 接线):凭据文件**权限过宽** ⇒ 拒载,不静默读。
+        # 该码此前**已登记但全库从不抛出**(TS-06 实测:43 码中唯一无测试者)——
+        # 文档承诺的"权限过宽(>600)→ 启动拒载"在实现里根本不存在。POSIX 查 mode
+        # 的 group/other 位;Windows 的 mode 位是合成的、无安全含义(仓库既有口径:
+        # ACL 尽力而为),故 Windows 上跳过该检查。
+        if os.name != "nt":
+            try:
+                mode = os.stat(path).st_mode & 0o777
+            except OSError:
+                mode = None
+            if mode is not None and mode & 0o077:
+                raise_code("CRED-702", ref=ref, path=path, mode=oct(mode),
+                           hint="凭据文件权限过宽(>600):chmod 600 后重试")
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 val = (fh.readline().strip() or None)   # 首行;空文件 = 缺失
@@ -943,6 +970,15 @@ class LLMClient:
         self.registry: dict = registry if registry is not None else adapters
         self._chain: Any = chain                 # FallbackChain(F013/F028;可 None)
 
+    @property
+    def chain(self) -> Any:
+        """降级链只读别名(F013/F028/F033 观测面;None = 未装配链)。
+
+        装配层需要它来启动健康探针(``probe_loop``)并观测 ``idx``/健康状态;
+        直接读 ``_chain`` 属跨模块私名依赖,故给只读别名。
+        """
+        return self._chain
+
     def require(self) -> LLMAdapter:
         """解析当前模型适配器(未注册 → LLM-304)。"""
         inst = self.registry.get(self.model)
@@ -955,11 +991,61 @@ class LLMClient:
                         tools: Optional[list], ctx: Any) -> LLMResponse:
         """统一路由:chain 在岗(engine 装配)走降级编排;否则直连适配器。"""
         ch = self._chain
+        self._egress_guard(method, ctx)
         if ch is not None and callable(getattr(ch, "chat_with_fallback", None)):
             return await ch.chat_with_fallback(messages, tools, ctx=ctx,
                                                method=method)
         inst = self.require()
         return await getattr(inst, method)(messages, tools, ctx=ctx)
+
+    def _egress_guard(self, method: str, ctx: Any) -> None:
+        """LLM 出网治理闸——**统一边界 + 显式 Negative Space**(GAP-1)。
+
+        ``_chat_any`` 是 LLM 出网的**唯一汇点**:``chat`` / ``chat_stream`` /
+        ``mini`` / ``summarize`` / ``json_chat`` 五个公开出口全部经它,故治理只
+        需在此**一处**加闸——不需要在 8 个出口复制 ``authorize()``(那会造成
+        架构碎片化,且多份副本迟早漂移)。
+
+        **为什么边界不是 ``governance.authorize()``**
+
+        ``governance`` 包是**工具调用**授权层:g1–g7 按**工具名**前缀匹配
+        (``fs.*`` / ``web.*`` / ``exec.*``),``authorize()`` 收 ``ToolCall``,产出的
+        ``decision.issued`` / ``receipt.emitted`` 经 ``call_id`` 串联 ``tool.call`` /
+        ``tool.result``。**LLM 请求不是工具调用**:无工具名、无参数集合、无
+        Provider 副作用。把它塞进 ``authorize()`` 只能靠伪造 ``ToolCall``,会污染
+        工具治理链语义。故**不这么做**(P1:决策权与执行权分离,不因凑指标而破坏)。
+
+        **LLM 出网实际适用的治理面 = 会话级预算硬闸**,本闸把它下沉到唯一汇点:
+        ``ctx.scope.check_budget()``(超限抛 ``BudgetExhausted``,与 ``agent_loop``
+        轮起点**同源同信号**)。修复前该闸只在轮起点调用,``mini``(自动标题)/
+        ``summarize``(压缩)/``json_chat``(计划)三条**轮内**系统出口可绕过。
+
+        **三态语义**
+
+        1. scope 在位且预算 ok ⇒ 放行(正常落 ``llm.request`` / usage);
+        2. scope 在位且 paused/exhausted ⇒ **拒**(抛 ``BudgetExhausted``,
+           **零出网**:不产生 ``llm.request``);
+        3. scope 缺失(纯内存/轻装配/单测替身)⇒ **降级放行**。理由:预算闸是
+           **配额面**而非**授权面**,缺配额不等于越权;而事件落点/守卫缺失会让
+           审计不成立,那些才必须 fail-closed(见 executor ``_require_wiring``)。
+
+        **Negative Space(显式声明哪些 LLM 出口不经本闸,及理由)**
+
+        - ``OpenAICompatAdapter.chat`` / ``.chat_stream``:适配器层,位于本类之后。
+          已核验**全库无生产代码直接调用**(CI 静态闸扫此),唯一路径 = 本类
+          ``_chat_any`` ⇒ 已被本闸覆盖。
+        - ``OpenAICompatAdapter.ping`` / 降级链健康探针:``ping`` 不产生 tokens、不落
+          F029 计量、不进 ``llm.request``;让其受会话预算约束会使"探测可用性"被预算
+          拒,语义颠倒。**明确不治理**,并登记于 ``LIMITATIONS.md``。
+        - 出网**之后**的审计面(``llm.request`` / ``llm.response`` / ``llm.usage``)
+          不属本闸:那是**观测**面,由适配器落事件(唯一真源仍是 append-only 日志)。
+        """
+        scope = getattr(ctx, "scope", None) if ctx is not None else None
+        if scope is None:
+            return                                   # 三态 ③:未装配配额面
+        check = getattr(scope, "check_budget", None)
+        if callable(check):
+            check()                                  # 三态 ②:超限即抛,零出网
 
     async def chat(self, messages: list[dict], tools: Optional[list] = None, *,
                    ctx: Any) -> LLMResponse:

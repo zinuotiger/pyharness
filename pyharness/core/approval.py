@@ -74,11 +74,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from pyharness.core.channel import (default_channel_of, require_channel)
 from pyharness.errors import raise_code
 from pyharness.events.vocab import is_registered  # 词表注册判定(trust_* 未入 77 词表,见偏离 5)
 
 if TYPE_CHECKING:  # 仅类型标注:executor 传入的 ToolCall 鸭子契约,运行期不依赖
-    from pyharness.core.tools_guard import ToolCall
+    pass
 
 logger = logging.getLogger("pyharness.approval")
 
@@ -199,11 +200,27 @@ class ApprovalProvider:
 
     def __init__(self, *, session: Any = None, bus: Any = None,
                  config: Any = None, channel: Optional[str] = None,
-                 headless: bool = False, trust_max: int = DEFAULT_TRUST_MAX) -> None:
+                 headless: bool = False, trust_max: int = DEFAULT_TRUST_MAX,
+                 queue_getter: Any = None) -> None:
         self._session: Any = session            # 默认会话日志(可 None;未接线事件降级)
         self._bus: Any = bus                    # EventBus(可 None = 纯内存模式)
         self._config: Any = config              # Settings(只读 TTL/合并窗)
-        self._channel: Optional[str] = channel  # 缺省通道(交互 cli/web/acp;None=无)
+        # 队列联动(R12-3):**惰性取值**而非构造期绑定 —— provider 常先于队列构造
+        # (装配序不定),取值函数保证"用的时候才找队列"。给定时,本 provider 只**驱动**
+        # `queue.pause/resume`(它俩是 queue.suspended/resumed 事件的唯一写者),
+        # 不再自行 append,避免双写。
+        self._queue_getter: Any = queue_getter
+        self._queue_driven: bool = False        # 本次挂起是否由队列驱动(决定谁来恢复)
+        self._channel: Optional[str] = default_channel_of(channel)
+        """本 provider 服务的**交互外壳**归一化名(N5)。
+
+        ``"acp:<id>"`` → ``"acp"``;**非法/未知/None** → ``None``。
+
+        **纪律(N5 修复点)**:这是**provider 级缺省**,用于 ``user_choice`` 与信任
+        名单判定,**不得**作为"ctx 未声明通道"时的回退源 —— 那正是修复前的缺陷
+        (缺失通道被硬编码 ``"desktop"`` 劫持成人类通道,与治理层 fail-closed 矛盾)。
+        ctx 的声明是唯一权威;缺失即 fail-closed(见 ``_ensure_channel``)。
+        """
         self._headless: bool = bool(headless)   # 缺省 headless 标志(装配上下文)
         self._pending: dict[int, ApprovalRequest] = {}
         self._merge: dict[tuple[str, str], list[ApprovalRequest]] = {}
@@ -313,7 +330,8 @@ class ApprovalProvider:
             if not self._suspended:              # 首请挂起(F043;重复挂起合并)
                 self._suspended = True
                 self._suspend_log = sess
-                await self._soft_append(sess, "queue.suspended", {"reason": "approval"})
+                # R12-3:有队列则**真挂起**(队列写 queue.suspended);否则仅落事件
+                await self._pause_queue_or_record(sess)
             return await self._wait_any(req)
         except asyncio.CancelledError:
             # F025/APR-502:取消可能落在 soft_append 与等待之间的任意 await 点
@@ -463,8 +481,7 @@ class ApprovalProvider:
         self._settle(req, verdict, by)           # 终态迁移 + 批内级联 + 唤醒
         if self._suspended and not self._pending:  # 末决清空 → 恢复队列(F043)
             self._suspended = False
-            await self._soft_append(self._suspend_log or sess,
-                                    "queue.resumed", {"reason": "approval"})
+            await self._resume_queue_or_record_async(sess)
 
     def _cross_session(self, payload: Any, req: ApprovalRequest) -> bool:
         """信封会话与本请求会话不符 → 异会话串扰过滤(偏离 6;无信封视为同会话)。"""
@@ -593,26 +610,103 @@ class ApprovalProvider:
         self._maybe_resume_soft()
 
     def _maybe_resume_soft(self) -> None:
-        """同步上下文恢复队列(取消/批量否认路径;尽力而为落 queue.resumed)。"""
+        """同步上下文恢复队列(取消/批量否认路径;尽力而为)。"""
         if self._suspended and not self._pending:
             self._suspended = False
-            self._record(self._suspend_log, "queue.resumed", {"reason": "approval"})
+            self._resume_queue_or_record_sync()
+
+    # ------------------------------------------------- 队列联动(R12-3)
+    def _queue(self) -> Any:
+        """惰性取本会话队列(未装配/取值异常 → None)。"""
+        getter = self._queue_getter
+        if getter is None:
+            return None
+        try:
+            q = getter() if callable(getter) else getter
+        except Exception as exc:                 # noqa: BLE001 取值失败不阻断审批
+            logger.warning("approval 取队列失败(队列联动降级为仅事件): %s", exc)
+            return None
+        return q
+
+    async def _pause_queue_or_record(self, sess: Any) -> None:
+        """首请挂起:有队列 ⇒ **驱动它挂起**(队列是 queue.suspended 唯一写者);
+
+        无队列(单测/轻装配)⇒ 保持原语义:只落 `queue.suspended` 事件(尽力而为)。
+        2026-09-21 R12-3 修:此前**只落事件、从不驱动队列** ⇒ 日志宣称"队列已挂起"
+        而 `queue.status().paused` 恒 False(状态与事件不一致;`delete_session` 的
+        BUSY 守卫在等审批期间失效)。
+        """
+        q = self._queue()
+        pause = getattr(q, "pause", None)
+        if callable(pause):
+            try:
+                await pause("approval", by="system")
+                self._queue_driven = True
+                return
+            except Exception as exc:             # noqa: BLE001 驱动失败退化为仅事件
+                logger.warning("approval 驱动 queue.pause 失败(退化为仅事件): %s", exc)
+        self._queue_driven = False
+        await self._soft_append(sess, "queue.suspended", {"reason": "approval"})
+
+    async def _resume_queue_or_record_async(self, sess: Any) -> None:
+        """末决恢复(异步上下文):队列驱动过 → 由队列写 `queue.resumed`;否则自行落事件。"""
+        if self._queue_driven:
+            self._queue_driven = False
+            q = self._queue()
+            resume = getattr(q, "resume", None)
+            if callable(resume):
+                try:
+                    await resume("approval", by="system")
+                    return
+                except Exception as exc:         # noqa: BLE001 恢复失败退化为仅事件
+                    logger.warning("approval 驱动 queue.resume 失败: %s", exc)
+        await self._soft_append(self._suspend_log or sess, "queue.resumed",
+                                {"reason": "approval"})
+
+    def _resume_queue_or_record_sync(self) -> None:
+        """末决恢复(同步上下文):同上,但用 `_spawn` 投递队列的异步 resume。"""
+        if self._queue_driven:
+            self._queue_driven = False
+            q = self._queue()
+            resume = getattr(q, "resume", None)
+            if callable(resume):
+                try:
+                    self._spawn(resume("approval", by="system"))
+                    return
+                except Exception as exc:         # noqa: BLE001 无事件循环等
+                    logger.warning("approval 投递 queue.resume 失败: %s", exc)
+        self._record(self._suspend_log, "queue.resumed", {"reason": "approval"})
 
     # ================================================== 通道与指纹
-    def _ensure_channel(self, ctx: Any) -> Optional[str]:
-        """通道判定:交互 cli/web/acp 返回通道名;headless/无 → None(APR-501 入口)。
+    def set_default_channel(self, value: Any) -> None:
+        """装配期覆写 provider 缺省通道(N5):与构造期**同一归一化**,避免直写
+        ``_channel`` 绕过契约(``"acp:<id>"`` 必须归一为 ``"acp"``)。"""
+        self._channel = default_channel_of(value)
 
-        优先 ctx 显式注入(ctx.channel/ctx.headless,外壳装配);回落构造缺省
-        (self._channel/self._headless)。headless 标志压过通道名(永不生效)。
+    def _ensure_channel(self, ctx: Any) -> Optional[str]:
+        """通道判定(**唯一实现 = ``core.channel`` 契约**;N5)。
+
+        返回:交互通道的**归一化名**(``"acp:<id>"`` → ``"acp"``,保留 ACP 身份);
+        显式 headless → ``None``(``APR-501`` 入口,既有语义不变)。
+        抛:``MISSING`` / ``INVALID`` / ``UNKNOWN`` ⇒ ``APR-503`` fail-closed。
+
+        **与治理层 ``GovernanceContext.principal_of`` 同契约**(逐状态一致性由
+        ``tests/invariants`` 的真值表断言钉死)。
+
+        **修复点(N5-b/N6)**:
+        - 判据由"精确名 ``ch in CHANNELS``"改为**前缀归一** ⇒ ``"acp:<id>"`` 不再
+          被误判为 headless;
+        - **删除 ``self._channel`` 回退** ⇒ 硬编码的 ``"desktop"`` 不再劫持
+          "ctx 未声明通道"的情形(那会让审批层以为有 desktop 人类通道,而治理层
+          对同一输入 fail-closed —— 同一状态两个相反判定)。
+
+        headless 标志(构造期或 ctx 注入)优先且压过通道名(既有语义,不变)。
         """
         headless = self._headless_of(ctx)
         if headless:
             return None
-        ch = getattr(ctx, "channel", None)
-        if isinstance(ch, str) and ch in CHANNELS:
-            return ch
-        dc = self._channel
-        return dc if isinstance(dc, str) and dc in CHANNELS else None
+        st = require_channel(ctx, module="approval", field="channel")
+        return None if st.is_headless else st.name
 
     def _headless_of(self, ctx: Any) -> bool:
         """headless 解析:ctx 显式注入优先,回落构造缺省(agent.py 同款两级解析)。"""

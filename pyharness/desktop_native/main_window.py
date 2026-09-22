@@ -858,10 +858,18 @@ class MainWindow(QMainWindow):
         await self.refresh_plugins()
 
     async def refresh_audit(self) -> None:
+        """审计页(GAP-7):治理因果审计为主,旧遥测计数并列展示。
+
+        修复前本页只调 ``telemetry``(事件类型计数),``AuditSystem`` 虽已构造
+        注入却零调用 ⇒ 治理数据在盘上而产品内无入口。
+        """
         if not self.sid:
             return
-        data = await self.controller.telemetry(self.sid)
-        self.audit_view.setPlainText(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        gov = await self.controller.governance_audit(self.sid, reconcile=True)
+        tel = await self.controller.telemetry(self.sid)
+        data = {"governance": gov, "telemetry": tel}
+        self.audit_view.setPlainText(
+            json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
     def _poll_interactions(self) -> None:
         if self.sid:

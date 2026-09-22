@@ -64,6 +64,11 @@
 | PIT-12 | **大结果直接进上下文**(工具输出超限不截断;违反 N3/F039) | "整理 3MB 大文件夹"一次读入打爆上下文与预算;分不清工具没截断还是循环没预算闸 | 输出 >64KB 转 spill(原文落私有区,上下文只放 ≤2KB 摘要+引用);spill 读取计入已读量 |
 | PIT-13 | **同步插件阻塞事件循环**(同步 handler 直接跑在循环里;风险 R9) | 一个同步工具卡 10s,对话/审批/心跳全卡 | 同步 handler 一律 `asyncio.to_thread` 线程池(默认 4);循环延迟 >1s 告警 |
 | PIT-14 | **headless 下危险操作静默执行**(无审批通道仍放行;违反 R8/F015) | 脚本驱动任务,delete_file 无人审批直接执行——"自动化事故" | 无审批通道=直接拒绝(headless 安全默认);ACP 桥可下发 approve 但仍过 guard/预算,桥无特权 |
+| PIT-15 | **同一个"横切值"被多层各自派生**(会话 workspace 根曾有 **4 处**各自实现:`engine` 赋裸 `workspaces_dir`、`tool_exec` 再拼 `/<sid>`、`subagent` 取 `.parent`、`build_scope` 走 helper;2026-09-21 实测) | 静默分裂:①所有会话共用同一 fs 根(**跨会话隔离失效**)②子代理根越出 `workspaces` 树且**无人创建** ⇒ 子代理文件类工具恒 `TLB-802`;而 6 份权威文档(PRD/CFG/OPS/DEP/2 份 spec)早已写明"每会话专属根" | 横切值(路径/域分类/通道/证据触发点)**只允许一个派生点**,装配层一律引用(`scope.session_workspace`);配 **AST/契约不变量**钉死唯一性;每次改动问三句:**"配置声明了≠生效""事件存在≠发出""已构造注入≠生产可达"** |
+| PIT-16 | **`getattr(obj, "错名", 默认值)` 静默取默认**(`SessionLog` 只有 `.sid`,代码却取 `"session_id"`;**首轮 5 处、第四轮又扫出 3 处订阅属主串**;2026-09-21 实测) | 不抛错、不崩、不告警:`scope.session_id` / `BudgetGate.session_id` / CLI workflow 会话号**恒为空串**,只在外部产物里露馅;订阅属主恒为 `engine:?` ⇒ 多会话共享总线时"按属主摘除"会**连坐其他仍在运行的会话**;两处还被 `or` 短路掩盖成"永远走不到" | 关键标识符**直取属性**(缺了就该 AttributeError),或取后**断言非空**;横切标识符(会话/租户/请求)抽**单一取值函数**(如 `engine._sid_of`)+ 传播不变量;排查手法:枚举全库 `getattr(x,"字面量",…)`,与"全库已定义名"取差集(982 处 → 56 候选 → 逐项核验)|
+| PIT-17 | **测试脚手架写死实现细节,把错误行为锁成"基绿"**(e2e 硬编码 `tmp/"workspaces"` 当 fs 根;subagent 单测只断言 `sub_id in workspace_root`;2026-09-21 实测) | 越界+未创建的真缺陷**长期全绿**:断言对"错误形态"同样为真(`sub_id in "…/workspaces/../sub_id"`);子会话只数 `decision/receipt/segment` 事件、不看 `tool.error` ⇒ "事件存在 ≠ 能力可用" | 测试从**实际装配值**取路径(`scope.policy.workspace_root`)而非猜目录;断言**落点/包含关系/终局事件类型**(`tool.result` 而非只有 `tool.error`)而非子串;新增能力时补**"消费者真跑一次"**的端到端断言 |
+| PIT-18 | **共享注册表用"扁平键"承载"分层唯一"的标识**(`_SESSION_TENANTS` 以裸 sid 为键,而会话目录**按租户分目录** ⇒ sid 只在租户内唯一;2026-09-21 R6/R7 两轮才收敛) | 撞名时给出**错误的确定答案**:请求租户派生/SSE 过滤/原生壳事件落点全部按错租户判定 ⇒ **跨租户事件误投或漏投**;且修法若选"先写者胜",进程内残留认领会**挡住**新租户的合法登记(把"夺走"换成"占位") | 归属模型必须匹配真实唯一性:此处用 **sid → 认领集合**,**单认领才给确定答案、多认领 ⇒ 未知**;消费方对"未知"一律 **fail-closed**(`event_tenant_allowed`);并**优先取已落盘事实**(信封 `tenant_id`,GAP-10)而非易失映射。**通用判据:任何"按 X 查唯一 Y"的注册表,先问 X 在 Y 的哪一层唯一** |
+| PIT-19 | **"约定被读 ≠ 被注入"——注入面只有读取方、没有装配方**(`ctx.redact` 被 tool_fs/tool_web/spill 三处读取,全库**无赋值点**;2026-09-21 R10 实测) | 所有读取方**静默走 fallback**;若 fallback 恰好是"原样返回",就是**安全洞**:实测 `fs.read_file` 读含 `API_KEY=sk-AAAA…` 的文件时,`tool.result` 与整条事件流(→JSONL/FTS/LLM 上下文)均含**密钥原文**,而代码注释写着"出口脱敏后再落盘(INV-09)"、SECURITY §6.4 宣称"全出口覆盖" | 对**每个** `getattr(ctx, "X", …)` 式注入面,必须在装配层找到**赋值点**(可用静态扫描:收集 `getattr(…,"字面量",…)` 与全库赋值名做差集);注入面与消费方**同一次改动内补齐**,并配**端到端**用例(真实链路 + 断言外部产物无原文)。与 PIT-16/零调用者互补:**前者查函数有没有人调,后者查属性有没有人写** |
 
 **跨坑主线**:PIT-01/02 是"登记册 vs 代码"锚定;PIT-03/04/05 是六原则被捷径绕过;PIT-06/12/13 是单进程代价兜底;PIT-10 是测试与文档诚实性。
 
@@ -180,3 +185,91 @@
 | **关联** | `S6-2_COVERAGE_MATRIX.md` §12 · `pyharness/core/llm.py:957,974` · `pyharness/core/agent_loop.py:197-199` |
 
 **登记口径声明**:本附录仅登记**事实、证据、影响与裁定**,**不包含任何修复动作**;两条 Finding 的修复均**需另行人工授权**,且**不得在测试阶段(S6-2)内实施生产代码改动**。
+
+---
+---
+
+# 附录 B — Scheduler 用户能力阶段沉淀(2026-09-19 · Phase 0–3 Closure)
+
+> **本附录为新增记录**,**不修改 §1~§6 与附录 A 任何既有条目**。编号 `KF-C` / `KF-D`,与 §1 的 ADR 系列、§3 的 PIT 系列、附录 A 的 KF-A/KF-B **均不重叠**。
+> 登记范围:Phase 0–3(commits `ff6df8a` / `e0c3eaa`)交付的 Scheduler 用户能力。
+> **本附录只登记事实、证据、边界与决策,不含任何修复动作**;两条边界均**需另行人工授权**方可改动。
+> 裁定依据:Phase 0–3 Closure Report(`Final Finding Count = 0 confirmed defects`)。
+
+## B.1 能力与端到端链路(只读核对所得)
+
+**现在能做什么**:会话内以**自然语言**创建定时任务(Agent 经 `schedule` 工具调 `ctx.schedule`);三种触发方式 `cron`(5 字段)/`interval`(秒,≥60)/`at`(ISO8601 一次性);管理面 `list`/`pause`/`resume`/`remove`;到点把 intent 作为新任务入队 → 由 Agent 真实执行 → 在**同一会话**产生 `agent.message`;会话窗口可区分「定时触发」与「用户自己说的」。
+
+| 层 | 代码位置 | 职责 |
+|---|---|---|
+| Tool | `core/tool_schedule.py:91,114` | 参数完整性检查 + 委托;**零调度逻辑** |
+| Registration | `core/schedule.py:430` `register` | 校验表达式/名字/重名 → 落 `schedule.registered`(含 `template.intent`/`is_risky`/`next_fire_at` 快照) |
+| Event Persistence | `core/session.py` `append`(唯一写入口) | `schedule.*` 为**普通落盘**(非强同步;符合 spec 声明的 §8.1 口径) |
+| Recovery | `core/schedule.py:643` `recover` | 回放重建 → 核算 `missed` → 重臂 → 启泵 |
+| Ticker | `core/schedule.py:772,781` | 分钟边界对齐的单协程泵(INV-07 单写者) |
+| Trigger | `core/schedule.py:540` `_fire` | 写 `schedule.trigger` → 写 `user.message`(`actor=user`,`origin=schedule:<name>`)→ `task_queue.submit` |
+| Task Queue | `core/task_queue.py` | 单飞 FIFO;`task.enqueued{task_id,pos}` —— **不含 intent 文本** |
+| Engine | `engine.py:778` `run_for_task`(+ `:741` `_owned_task_message`) | 按归属窗口取回那条 `user.message` → `loop.wake(env)` |
+| Agent Loop | `core/agent_loop.py:232` | `derive_messages` → `sysprompt.assemble` → `llm.chat` |
+| LLM → agent.message | `core/llm.py` / `core/agent_loop.py` | 真实调用;纯文本终态落 `agent.message` |
+
+**治理边界(只写已核对的事实,不推测)**
+- 执行器与治理层**无任何 `schedule` 专用分支**(`grep schedule` 于 `core/tools_executor.py` 与 `governance/*.py` 零命中)。
+- 授权唯一入口 = `ctx.governance.authorize`(`core/tools_executor.py:479`;审批后重入 `:625`);guard **不感知**来源(`core/tools_guard.py` 无 `origin`/`meta` 读取)。
+- ⇒ 定时任务到点后产生的 tool call 走**与前台完全相同**的四关管道:实测定时路径同时产出 `guard.evaluated` / `decision.issued` / `receipt.emitted`,危险工具被 `guard.rejected`。
+- Scheduler 自身**不读 intent 内容**;唯一与内容相关的判断是 `is_risky`(深夜禁触窗),来自模板 `meta.tools` 推导或显式覆盖。
+- 已知且**已公开声明**的治理缺口不因本能力而改变:`evidence.archived` 无生产者(§附录 A 之外,见 `LIMITATIONS.md` L-11)、`AuditSystem` 无调用路径(L-10)。
+
+## B.2 决策登记
+
+**Accepted(已接受)**
+| # | 决策 | 依据 |
+|---|---|---|
+| D-1 | Phase 0–3 当前行为接受,无待修缺陷 | Closure:`Final Finding Count = 0 confirmed defects` |
+| D-2 | Scheduler 现为**进程内执行模型**(定义持久 / 执行不持久) | ADR-005 单进程;`engine.py:615` 每会话一个实例 |
+| D-3 | **不做** missed trigger 补偿(只记 `schedule.missed`,不补跑) | F048 规格明文边界 |
+| D-4 | `is_risky` **单调**:工具只能升级为危险,不得下调 Scheduler 推导 | Phase 1 人工批准 |
+| D-5 | 不改 `derive_messages` 输出契约;UI 来源标记在 service 层复制附加 | Phase 3 实现取舍(`service.py:31` `_with_message_origin`) |
+| D-6 | 本阶段**不修改** KF-C / KF-D | Closure 裁定 |
+
+**Open(待产品决策,本附录不代为决定)**
+| # | 待决 | 裁定(**2026-09-21 R24 由用户授权代行为产品决策**) |
+|---|---|---|
+| O-1 | 到点提醒的**最终语义**:Agent 应"真的发出提醒",还是"确认任务状态"? | **已裁定:真的发出提醒**。实现取本文 §B.3 所列的**最小面**——`engine.run_for_task` 把**框架侧**来源(`task.meta.source="schedule:<name>"`,受控非模型文本)提到 `ag_ctx.turn_source`,由系统提示的**受控段** `[本轮来源] …(系统/定时触发的一轮。请直接产出该触发要求的内容本身…)` 渲染。不动事件、不动减少器、不动 compaction。 |
+| O-2 | 应用关闭后**是否仍需执行**? | **已裁定:不执行(维持进程内模型)**。执行载体=桌面/CLI 进程本身,与 INV-07 单写者锁同一生命周期;引入常驻守护进程会新增第二个写者与一套锁/配额语义,不在本项目姿态内。故 KF-D **不改**;该边界在 LIMITATIONS **L-16** 如实登记(不是缺陷,是范围裁定)。 |
+
+## B.3 KF-C(P2)— Scheduled Intent semantic/context gap
+
+| 字段 | 内容 |
+|---|---|
+| **现象** | 到点触发后,真实 Agent 回复的是**任务状态复述**("你的定时提醒已就绪……每天早上 8:00 会提醒你……"),而非真的发出提醒内容(如"该开始工作了")。实测:`1分钟后提醒我站起来活动一下` → 到点回复 `That reminder is already set — you're all covered.` |
+| **根因** | intent 为**单串双语义**(任务语义 + 被重放的用户话术);且到点那一轮**无任何通道**把"这是定时触发"告知模型 |
+| **证据(数据流)** | 创建 `core/tool_schedule.py:114` → `core/schedule.py:430`;持久化 `schedule.registered.template.intent`;触发 `core/schedule.py:540` 内 `intent` **同一变量**既作 `user.message.content` 又作 `q.submit(intent, meta={"source": "schedule:<name>"})`;入队载荷仅 `{task_id,pos}`(`events/payload.py` `TaskEnqueuedPayload`);执行 `engine.py:778` 只读 `enqueued_seq`/`intent` |
+| **证据(三条通道全断)** | ① `task.meta` **全库无消费者**(`grep '\.meta\['` / `meta.get("source")` 零命中);② `core/session.py:192` `_fold_history` 对 `user.message` 只取 `content`,**`origin` 不进历史**;③ `core/system_prompt.py:405` `_vars` 白名单仅 role/deny/domains/workspace/sandbox_level/window_tokens/title/capabilities,且明文"**禁止任何 LLM 输入/工具结果入表**(注入防御)" |
+| **为何不是 Runtime Defect** | 链路按既有契约完整运作:无异常、无数据丢失、无治理绕过;F048"把模板作为新任务入队并复用 guard/预算/日志纪律"全部满足 |
+| **为何不影响 Phase 0–3 验收** | 验收口径为"到点后产生当前会话的 `agent.message`"——**已满足**(实测 `schedule.trigger=1`、`task.enqueued`、同会话 `agent.message` +1)。本项属**回复语义质量**,不在任何既有验收项内 |
+| **若未来要改,涉及层** | 最小面为**上下文构造侧**:`engine.run_for_task` 消费 `task.meta` + `system_prompt` 增受控段(**不动事件、不动减少器、不动 compaction**);若改为产品侧重定义 intent 语义,则须改 `_fire` 写入形状,波及 replay/compaction/UI |
+| **状态** | `CLOSED`(2026-09-21 R24;O-1 已裁定=真的发出提醒,实现见上表 O-1 行) |
+| **关联** | `core/schedule.py:540` · `engine.py:778` · `core/session.py:192` · `core/system_prompt.py:405` · `core/task_queue.py` · Phase 0–3 Closure Report |
+
+## B.4 KF-D(P2)— In-process scheduler execution boundary
+
+| 字段 | 内容 |
+|---|---|
+| **现象** | 应用运行时到点可触发;**应用退出后不再触发** |
+| **Schedule Definition 是否持久化** | **是**。`schedule.registered` 存 name/kind/expr/`template.intent`/`is_risky`/`paused`/`next_fire_at` 快照;`last_fired_at` 由 `schedule.trigger` 派生(`core/schedule.py:131` `ScheduleJob`) |
+| **Execution 是否持久化** | **否**。ticker 为进程内 asyncio 协程(`core/schedule.py:781`),随 spine 生灭;任务队列 `_q` 为纯内存 `deque`(`core/task_queue.py:123`),**无重启补投** |
+| **应用重启如何恢复** | `recover()`(`core/schedule.py:643`)回放重建 → 核算 `missed` → 重臂 `next_fire_at` → `_ensure_ticker` 启泵。**未来触发照常**;宕机窗内错过的**只记不补**(D-3) |
+| **应用关闭时发生什么** | `EngineSpine.close()`(`engine.py:108`)→ `self.schedule.stop()`(`:125`)← `ApplicationService.shutdown()` ← `DesktopApp._shutdown_async()`。**拆卸完整,无泄漏 ticker** |
+| **未打开会话为何不运行** | spine 为**逐会话懒装配**:`_engines[sid]` 仅在 `application/service.py:222` `queue_for` / `:278` `public_spine_for` 写入,**无启动全量扫描**。即应用运行期间,用户未点开的会话其定时任务**同样不触发** |
+| **单写者锁约束** | `persistence.py:179` `acquire_session_lock` 取 OS 级非阻塞独占锁,被占即 `PERS-202`(`:191`)。⇒ 应用持锁期间**外部进程无法打开同一会话**,构成"外部 tick"方案的前置约束 |
+| **为何不是 Bug** | 恢复、持久化、防重复均已实现且有测试(含**真实落盘**重启用例 `tests/unit/test_schedule_nl_phase2.py`);进程内模型是 ADR-005 的直接推论,且 `docs/MAP.md:233` 已声明"子 Agent/jobs/schedule/workflow 全为协程级并发" |
+| **准确名称** | **in-process, event-sourced scheduler**(定义持久 / 执行**不**持久)。称 "persistent scheduler" 会误导 |
+| **若未来要支持关机后继续触发** | 最小变化 = 新增 CLI 子命令复用 `recover()+_tick()`,由系统计划任务周期调用;**前置**必须先解决与单写者锁的关系(否则 app 持锁时外部 tick 必失败) |
+| **状态** | `OPEN`(待 O-2) |
+| **关联** | `core/schedule.py:643,781` · `engine.py:108,615` · `core/task_queue.py:123` · `persistence.py:179` · `application/service.py:222,278` · `docs/MAP.md:233` · ADR-005 |
+
+**登记口径声明**:本附录仅登记**事实、证据、边界与决策**,**不含任何修复动作**;KF-C / KF-D 的改动均**需另行人工授权**,且须**先有 O-1 / O-2 的产品答案**。
+
+*— 附录 B 完 —*
+

@@ -21,7 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from pyharness.errors import raise_code
+from pyharness.errors import PyHError, raise_code
 
 log = logging.getLogger("pyharness.plugin_loader")
 

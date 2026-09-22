@@ -50,7 +50,7 @@ import asyncio
 import logging
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Deque, Literal, Optional
 
 from pyharness.config import load_settings

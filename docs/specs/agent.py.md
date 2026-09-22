@@ -263,7 +263,7 @@ GWT-A2-01 submit 强同步序 · GWT-A2-02 headless 自动关 · GWT-A2-03 交�
 
 ## 关联文档
 
-- PRD-Core.md §2.2(模块2)/§2.3(ctx.* 挂载表)/§2.4(数据流步 1-4)/§2.5(启动六步/强同步三类)
+- PRD-Core.md §2.2(模块2)/§2.3(ctx.* 挂载表)/§2.4(数据流步 1-4)/§2.5(启动六步/强同步事件(`SYNC_TYPES`))
 - DIS-CORE.md §2(本模块伪代码级唯一权威)、§0.2(会话/run 口径、finished 归属)
 - DIS-SEAM.md §2.4(能力生命周期 enter→announce→detach 状态机)、§2.5(locator 挂摘)
 - EVENT-SCHEMA.md §3.1(session.created/finished 字段与校验)、§3.3(registry.updated)

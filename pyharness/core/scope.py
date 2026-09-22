@@ -103,7 +103,8 @@ WORKSPACE_DOMAINS: frozenset = frozenset({"fs", "workspace", "storage"})
 ALLOWLIST_DOMAINS: frozenset = frozenset({"web", "net"})
 # 会话内部自管理域:无外部副作用(目标/待办/计划/实用),strict 下恒可见
 SELF_DOMAINS: frozenset = frozenset({"goal", "todo", "plan", "util", "user",
-                                     "skill", "session", "schedule"})
+                                     "skill", "session", "schedule",
+                                     "subagent"})
 # session.* = 只读检索自身会话日志(F057 session.fts_query),无外部副作用,与
 # goal/todo 同族 → strict 下恒可见(2026-09-12 装配 FTS 工具时补,原缺此域导致
 # 索引工具在默认 strict 档被域显隐静默隐藏)
@@ -111,6 +112,18 @@ SELF_DOMAINS: frozenset = frozenset({"goal", "todo", "plan", "util", "user",
 # 零外部副作用;到点后的真实执行仍走 task_queue → AgentLoop → tools 四关管道
 # (含 high/critical 工具自身的审批与 guard),与 plan 同族 → 同列自管理域
 # (2026-09-18 装配 schedule 工具时补;同 session 域先例:缺域即被静默隐藏)。
+# subagent = 会话内子任务派发(F049 工具面,**N2-a 修复**):``subagent.spawn`` 本身
+# 零外部副作用(只派生一个**独立会话**,其内部动作仍各自过四关管道、同权 guard);
+# 缺此域 ⇒ 默认 strict 档下 ``can_use("subagent.spawn")=False`` ⇒ **整个子代理能力
+# 从 LLM 视角不可达**(实测:strict 下 0 子会话,standard 下 1 子会话)。
+# 这是同类缺陷的**第三次**发生(session / schedule 之后),故本轮同时引入
+# ``RESTRICTED_DOMAINS`` 与之配套的"注册即须归类"不变量,把隐式收紧变为显式声明。
+
+# 需**收紧**的域(默认 strict 下不可见,须 basic 档或 allowlist 放行)。
+# **显式声明**的意义:修复前该集合是"隐式"的 —— 任何未被三张白名单覆盖的域都
+# 自动落入收紧面,于是"漏配"与"有意收紧"无法区分(subagent 就是这样被静默隐藏的)。
+# 现在:域分类必须**完备**(见 tests/invariants 的 Registered-Tool-Is-Classified)。
+RESTRICTED_DOMAINS: frozenset = frozenset({"exec", "proc"})
 
 # 内置危险分级默认表(F023 同源示意;can_use 只消费 critical——不可审批直接不可用;
 # high 级转审批由 guard 链 g-danger 按工具定义处理,scope 层不拦)。
@@ -173,6 +186,9 @@ class ScopePolicy:
     danger_marks: list[dict[str, str]] = field(default_factory=list)  # 分级规则
     allowed_domains: set[str] = field(default_factory=set)  # 域名 allowlist
     workspace_root: str = ""                       # workspace 根(F055)
+    # workspace 外**只读**例外目录(A2/R24 接线 `security.policy.read_extra_dirs`):
+    # 仅对**读类**工具放行,写类一律仍拒;两层(g3 与 provider)同判。默认为空 = 无例外。
+    read_extra_dirs: list[str] = field(default_factory=list)
     sandbox_level: str = "strict"                  # strict/basic/off(F054)
 
     def model_dump(self) -> dict:
@@ -182,6 +198,7 @@ class ScopePolicy:
                 "danger_marks": [dict(m) for m in self.danger_marks],
                 "allowed_domains": set(self.allowed_domains),
                 "workspace_root": self.workspace_root,
+                "read_extra_dirs": list(self.read_extra_dirs),
                 "sandbox_level": self.sandbox_level}
 
 
@@ -224,8 +241,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _fresh_workspace(root: str, session_id: str) -> str:
-    """F055 fresh workspace:storage.workspaces_dir/<session_id>(不落盘,仅策略值)。"""
+def session_workspace(root: str, session_id: str) -> str:
+    """F055 会话 workspace 根**唯一派生点**:{root}/{session_id}(仅算策略值,不落盘)。
+
+    权威:`PRD-Core §5.6 F055`/`CFG.md §3.6 storage.workspaces_dir`/`OPS.md`/`DEP.md`
+    一致要求每会话专属根;装配层(engine/subagent)一律引用本函数,不得各自拼接
+    ——"多层各自实现必分裂"(workspace 根已发生过一次 4 处分叉:engine 裸根、
+    tool_exec 再拼 /<sid>、subagent 取 .parent、build_scope 用本函数)。
+    """
     return str(Path(root).expanduser() / session_id)
 
 
@@ -552,11 +575,14 @@ def build_scope(cfg: Any, session_id: str, *,
         allowed_domains=set(getattr(
             getattr(getattr(cfg, "security", None), "network", None),
             "allowed_domains", None) or []),
-        workspace_root=_fresh_workspace(
+        workspace_root=session_workspace(
             getattr(getattr(cfg, "storage", None), "workspaces_dir",
                     "~/.pyharness/workspaces"),
             session_id),                             # F055 fresh workspace
-        sandbox_level=getattr(sandbox, "level", "strict") or "strict")  # 默认 strict
+        sandbox_level=getattr(sandbox, "level", "strict") or "strict",  # 默认 strict
+        read_extra_dirs=[str(d) for d in (getattr(
+            getattr(getattr(cfg, "security", None), "policy", None),
+            "read_extra_dirs", None) or [])])          # A2:workspace 外只读例外
     _validate_minimal(p)                             # 越权拒绝(CFG-601)
     window = getattr(getattr(cfg, "loop", None), "max_context_tokens", None)
     ratio = getattr(getattr(getattr(cfg, "loop", None), "compact", None),
@@ -605,6 +631,8 @@ __all__ = [
     "BudgetState", "TaskUsage", "BudgetExhausted",
     # 核心
     "Scope", "build_scope", "from_snapshot", "active_scope",
+    # workspace 根唯一派生点(F055;engine/subagent 装配层同源引用)
+    "session_workspace",
     # 常量(域前缀表,工具注册表落地后同源)
     "WORKSPACE_DOMAINS", "ALLOWLIST_DOMAINS", "DEFAULT_DANGER_MARKS",
     "DEFAULT_WINDOW_TOKENS", "DEFAULT_WINDOW_RATIO",

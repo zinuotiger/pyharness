@@ -191,7 +191,7 @@ grep -l "PERS-202" ~/.pyharness/sessions/*.jsonl 2>/dev/null && echo "ALERT pers
 
 | 项 | 内容 |
 |---|---|
-| 症状 | 写 JSONL 失败 → **PERS-202**:强同步三类(user.message/guard.rejected/approval.*)当场抛,异步路径重试 3 次后**会话暂停(拒新不丢旧)**;JSONL 不增长 |
+| 症状 | 写 JSONL 失败 → **PERS-202**:强同步事件(`SYNC_TYPES`)(user.message/guard.rejected/approval.*)当场抛,异步路径重试 3 次后**会话暂停(拒新不丢旧)**;JSONL 不增长 |
 | 诊断 | `df -h /c` 确认满;`du -sh ~/.pyharness/*` 找大户(sessions/spill/log/db-wal);查未 flush 攒批(≤0.5s/64 条,CFG §3.4) |
 | 修复 | 清空间:已备份旧会话/死会话 spill 先清(§5.4),轮转日志删旧份;**勿在满盘时删真源**;清出后 `repair --session <sid>` 恢复,重试队列零丢失 |
 | 验证 | `df` 有裕量;会话可续写且事件不丢;无新增 PERS-202;seq 连续 |
@@ -201,7 +201,7 @@ grep -l "PERS-202" ~/.pyharness/sessions/*.jsonl 2>/dev/null && echo "ALERT pers
 | 项 | 内容 |
 |---|---|
 | 症状 | 进程被杀/闪退/断电;重启需恢复原会话;桌面窗口消失 |
-| 诊断 | 崩溃只丢 ≤0.5s 攒批普通事件(强同步三类先写后返回,CFG §3.4);`tail` JSONL 看末事件是否半行截断;演练对照 CONSTRAINTS-08 §10(Ctrl+C 后重启强同步不丢) |
+| 诊断 | 崩溃只丢 ≤0.5s 攒批普通事件(强同步事件(`SYNC_TYPES`)先写后返回,CFG §3.4);`tail` JSONL 看末事件是否半行截断;演练对照 CONSTRAINTS-08 §10(Ctrl+C 后重启强同步不丢) |
 | 修复 | 直接重启恢复:`uv run pyharness chat --session <sid> --once "继续"`;repair 提示尾部截断 → 按 S-03 跑 `repair --session <sid>`;未 flush 中间态丢失属预期,不 panic |
 | 验证 | 回放能引用崩溃前内容(INV-03);无 EVT-101;guard.rejected/approval.* 等强同步事件齐全 |
 
@@ -385,7 +385,7 @@ grep -rnE "sk-[A-Za-z0-9]{16,}|[A-Za-z0-9]{32,}" ~/.pyharness/sessions/ ~/.pyhar
 
 ## 7.4 审计
 
-审计真源 = 会话 JSONL(append-only,含强同步三类);SQLite/FTS 只是加速视图。示例:`session show <sid> | grep -n guard.rejected`(每行带 guard_id/policy_ref/call_id);`grep -l 'code=CRED-703' ~/.pyharness/sessions/*.jsonl`。配置留痕事件:启动加载摘要、`guard.disabled`、`sandbox.opened`、`config.updated`、CFG-607 警告集(CFG §7.3)——查"谁改过策略"看这几类。日志/配置不进版本库、gitignore;备份 tar 含会话内容,勿放公共盘。
+审计真源 = 会话 JSONL(append-only,含强同步事件(`SYNC_TYPES`));SQLite/FTS 只是加速视图。示例:`session show <sid> | grep -n guard.rejected`(每行带 guard_id/policy_ref/call_id);`grep -l 'code=CRED-703' ~/.pyharness/sessions/*.jsonl`。配置留痕事件:启动加载摘要、`guard.disabled`、`sandbox.opened`、`config.updated`、CFG-607 警告集(CFG §7.3)——查"谁改过策略"看这几类。日志/配置不进版本库、gitignore;备份 tar 含会话内容,勿放公共盘。
 
 ---
 

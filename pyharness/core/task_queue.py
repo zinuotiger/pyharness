@@ -54,11 +54,31 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Optional
 
 from pyharness.errors import PyHError, raise_code
+# 唯一的外围 import(与 agent_loop 同款):BudgetExhausted 是**循环控制信号**,
+# 非 PyHError 子类;不引用它则预算终态会落入 `except Exception` 兜底被记成
+# CYC-999,丢掉 ERR.md 已登记的 LLM-305/`reason=budget` 语义(O-3)。scope 是
+# 纯策略容器(无下游脊柱依赖),不违反"不 import 外围执行件"的装配纪律。
+from pyharness.core.scope import BudgetExhausted  # noqa: E402
 
 log = logging.getLogger("pyharness.task_queue")
 
 # 队深上限默认值(CFG 锁死 32;PARAMETER-ANCHOR 配置默认值列)
 DEFAULT_MAX_QUEUE = 32
+
+
+def queue_kwargs_of(cfg: Any) -> dict:
+    """由 Settings **鸭子取值**解析队深标量(F043 边界)。
+
+    本模块**不 import** ``pyharness.config``(依赖注入纪律):只按属性读取。缺键 ⇒
+    返回 ``{}``,``TaskQueue`` 回落模块常量 32,行为与修复前一致。同
+    ``persistence.flush_kwargs_of`` / ``bus.bus_kwargs_of`` 先例。
+
+    2026-09-21 修:``loop.task_queue_max`` 在 CFG §3.2 声明可调(1-1024)且带范围
+    校验,但生产 5 处装配点一律用默认值 ⇒ **死配置**(本模块 docstring 曾写
+    "CFG 锁死 32",与 CFG 表冲突;以 CFG 表为准 → 接线)。
+    """
+    v = getattr(getattr(cfg, "loop", None), "task_queue_max", None)
+    return {"max_queue": v} if v is not None else {}
 
 
 # ------------------------------------------------------------------ 数据结构
@@ -130,6 +150,7 @@ class TaskQueue:
         self._done: dict[str, TaskResult] = {}           # 终态缓存(重复等待幂等)
         self._segments: set[str] = set()                 # 已开段 task_id(配对闸,F044)
         self._cancel_pending: Optional[str] = None       # 取消旗标(见 _run_task)
+        self._closing: bool = False                      # 收尾闸(shutdown 幂等位)
         self._id_counter = itertools.count(1)            # t-N 单调源
 
     # ============================================================ 内部辅助
@@ -187,6 +208,13 @@ class TaskQueue:
         """
         if not intent or not intent.strip():      # 空意图拒入队(白名单前置)
             raise_code("EVT-100", hint="空任务意图,submit 拒绝")
+        if self._closing:                         # R12-3 三阶:收尾后拒新(不留悬挂等待者)
+            # 收尾后泵已退场(挂起态也直接退场)⇒ 入队任务永不执行、其等待者悬挂。
+            # 用队列自己的功能码 QUE-001(拒新);**直接构造**(该码未登记,raise_code
+            # 会改写为 CYC-999,见模块偏离 5),ctx.reason 区分"满"与"已收尾"。
+            raise PyHError("QUE-001", ctx={
+                "reason": "closed", "queue": "closed",
+                "advice": "会话队列已收尾(shutdown 后不再接新任务)"})
         if len(self._q) >= self._max_queue:       # 队深上限(F043 边界:满拒)
             raise PyHError("QUE-001", ctx={"advice":
                 f"队列已满(≥{self._max_queue}),请等当前任务结束或取消"})
@@ -213,6 +241,13 @@ class TaskQueue:
         """
         while True:
             if self._suspended():                 # 暂停期:只停消费,不丢队不超时
+                if self._closing:                 # 收尾中:挂起无意义,直接退场
+                    # R12-3 二阶:审批真挂起后,"挂起态收尾"成为常态;若在此继续等
+                    # `_resume_evt`,shutdown 会走 5s 超时兜底(会话收尾平白多等 5 秒)。
+                    # **不清** `_pause_reasons`:让审批侧(close 后 detach → cancel_all)
+                    # 照常补一条 `queue.resumed`,事件对保持配对。
+                    self._pump_task = None
+                    return
                 await self._resume_evt.wait()     # resume 时置位唤醒(非忙等)
                 self._resume_evt.clear()
                 continue
@@ -240,10 +275,20 @@ class TaskQueue:
         segment.end 配对关闭。失败分级:PyHError 原码 / 未预期 CYC-999 / 取消
         cancelled(归一化后泵吸收,接队首);终态落事件即 _settle(唤醒 wait_for)。
         """
-        await self._session.append("task.started", {"task_id": t.id}, actor="system")
-        # 强同步段锚:先落盘再执行,崩溃后回放段不悬空(F044)
-        start_seq = await self.open_segment(t.id)
         t0 = time.perf_counter()
+        try:
+            await self._session.append("task.started", {"task_id": t.id},
+                                       actor="system")
+            # 强同步段锚:先落盘再执行,崩溃后回放段不悬空(F044)
+            start_seq = await self.open_segment(t.id)
+        except PyHError as e:                     # 会话已终态/日志拒写:任务不得悬挂
+            # 2026-09-21:此前 started/段锚在 try **之外**,会话若已终态(EVT-104)
+            # 会直接抛出 → 泵记 crash、`_settle` 被跳过 → **等待者永久悬挂**。
+            log.warning("任务无法开始(会话终态/日志拒写)task=%s code=%s",
+                        t.id, e.code)
+            self._settle(t.id, TaskResult(ok=False, code=e.code, summary=e.code,
+                                          duration_ms=0.0))
+            return                                # 未开段:无需关段
         # 执行子任务:协作取消注入点(F025,取消不伤泵);runner 内部事件带 task_id 由
         # agent_loop 自绑(本模块只引用 segment 围栏,不越权写执行期事件)
         child = asyncio.create_task(self._run_runner(t))
@@ -254,33 +299,72 @@ class TaskQueue:
                 self._cancel_pending = None
                 child.cancel()
             await child
-            await self._session.append("task.completed",
-                {"task_id": t.id, "reason": "ok"}, actor="system")
+            await self._terminal_event("task.completed",
+                {"task_id": t.id, "reason": "ok"})
             self._settle(t.id, TaskResult(ok=True, duration_ms=self._ms_since(t0)))
         except asyncio.CancelledError:
             if child.cancelled():                 # 取消源 = 执行子任务(API cancel)
                 # F025:归一化 failed(cancelled);事件 + settle 双通道表达"取消不吞"
-                await self._session.append("task.failed", {"task_id": t.id,
-                    "reason": "cancelled", "error": "cancelled"}, actor="system")
+                await self._terminal_event("task.failed", {"task_id": t.id,
+                    "reason": "cancelled", "error": "cancelled"})
                 self._settle(t.id, TaskResult(ok=False, code="cancelled",
                     summary="cancelled", duration_ms=self._ms_since(t0)))
                 # 不向泵 re-raise:取消已事件化,泵自动接队首(GWT-F043-02,见偏离 2)
             else:
                 raise                             # 泵自身被外部取消:让路
         except PyHError as e:                     # 业务失败:事件化并继续队列(F043)
-            await self._session.append("task.failed", {"task_id": t.id,
-                "reason": "error", "error": e.code}, actor="system")
+            await self._terminal_event("task.failed", {"task_id": t.id,
+                "reason": "error", "error": e.code})
             self._settle(t.id, TaskResult(ok=False, code=e.code, summary=e.code,
                 duration_ms=self._ms_since(t0)))
+        except BudgetExhausted:                   # F032 预算硬闸:保预算终态语义
+            # 常态下 agent_loop 自行收敛 BudgetExhausted(reason=budget)不会到此处;
+            # 本分支是防御路径(预算在循环 try 之外被抛/执行器直抛)。无此分支则
+            # 落入下面的兜底 → error:CYC-999,丢掉 budget(ERR.md 登记 LLM-305)。
+            await self._terminal_event("task.failed", {"task_id": t.id,
+                "reason": "budget", "error": "LLM-305"})
+            self._settle(t.id, TaskResult(ok=False, code="LLM-305",
+                summary="budget", duration_ms=self._ms_since(t0)))
         except Exception as e:                    # 未预期:归 CYC-999,堆栈仅本地
             log.exception("task failed unexpected task=%s", t.id)
-            await self._session.append("task.failed", {"task_id": t.id,
-                "reason": "error", "error": "CYC-999"}, actor="system")
+            await self._terminal_event("task.failed", {"task_id": t.id,
+                "reason": "error", "error": "CYC-999"})
             self._settle(t.id, TaskResult(ok=False, code="CYC-999",
                 summary=f"{type(e).__name__}: {e}"[:200], duration_ms=self._ms_since(t0)))
         finally:
             self._exec = None
-            await self.close_segment(t.id, start_seq)   # 配对关闭;段=回放最小单位(F058)
+            await self._close_segment_guarded(t.id, start_seq)  # 配对关闭(F058)
+
+    async def _terminal_event(self, type_: str, payload: dict) -> None:
+        """终态事件写入(**会话已终态时不吞结算**)。
+
+        会话可在任务在途时收尾(`session.finished` 落盘 + 终态位置位)⇒ 本任务的
+        终态事件被 EVT-104 拒写。拒写只应损失"事件留痕",**不得**让 `_settle` 被
+        跳过(等待者永久悬挂)——故此处只吞 EVT-104 并告警,其余错照抛。
+        """
+        try:
+            await self._session.append(type_, payload, actor="system")
+        except PyHError as e:
+            if e.code == "EVT-104":
+                log.warning("终态事件被拒(会话已终态)type=%s task=%s;"
+                            "结算继续(以 _done 缓存为准)",
+                            type_, payload.get("task_id"))
+                return
+            raise
+
+    async def _close_segment_guarded(self, task_id: str, start_seq: int) -> None:
+        """关段(**终态会话不炸泵**):EVT-104 只告警,不让 finally 抛出。
+
+        此前 `close_segment` 直调 append ⇒ 会话已终态时在 finally 中抛出,泵记
+        "task pump crash" 且段锚永久不闭合(证据生产者不触发 ⇒ 该任务零证据)。
+        """
+        try:
+            await self.close_segment(task_id, start_seq)
+        except PyHError as e:
+            if e.code == "EVT-104":
+                log.warning("段锚未闭合(会话已终态)task=%s code=EVT-104", task_id)
+                return
+            raise
 
     async def _run_runner(self, t: Task) -> None:
         """执行器调用(子任务体):runner 须可调用 run_for_task(task)。
@@ -336,6 +420,52 @@ class TaskQueue:
         self._resume_evt.set()                         # 唤醒泵(先 resumed 后放行)
 
     # ============================================================ 取消(F025)
+    async def shutdown(self, *, reason: str = "close") -> None:
+        """会话收尾**前置**排空(幂等):取消在途任务、等泵退场、兜底结算。
+
+        为什么必须在 `session.finished` **之前**:任务终态事件与 `segment.end` 都是
+        append,会话终态位一旦置位即 EVT-104 拒写 ⇒ 在途任务**丢终态、丢段锚、
+        等待者悬挂**(2026-09-21 实测复现:`task.completed=0/segment.end=0/wait_for
+        3s 未返回`)。取消路径本身已归一化为 `task.failed{cancelled}` + `finally`
+        关段,故"先取消并等泵退场"即得完整终局。
+
+        超时/异常路径不放弃:仍在途等待者统一按 `cancelled` 结算(绝不悬挂)。
+        """
+        if self._closing:
+            return
+        self._closing = True
+        # ① 队内等待任务:直接摘除并记 failed(cancelled)(不执行 —— 收尾不是"继续跑")
+        for t in list(self._q):
+            try:
+                await self.cancel(t.id, by=reason)
+            except PyHError as e:
+                log.warning("queue shutdown:摘除等待任务失败 code=%s task=%s",
+                            e.code, t.id)
+        # ② 在途任务:取消 → 归一化 failed(cancelled) + finally 关段
+        running = self._running
+        if running is not None:
+            try:
+                await self.cancel(running.id, by=reason)
+            except PyHError as e:                 # 审计失败不阻断排空
+                log.warning("queue shutdown:取消在途任务失败 code=%s", e.code)
+        # ②' **先唤醒泵**(R12-3 二阶):队列若处于挂起态(如等审批),泵阻塞在
+        # `_resume_evt.wait()` ⇒ 直接 await 会走 5s 超时兜底才退场(会话收尾平白
+        # 多等 5 秒)。置位唤醒后泵醒来即见空队退场。
+        self._resume_evt.set()
+        pump = self._pump_task
+        if pump is not None and not pump.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(pump), timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pump.cancel()
+                log.warning("queue shutdown:泵未在 5s 内退场,已取消")
+            except Exception:                     # noqa: BLE001 泵异常已事件化
+                log.warning("queue shutdown:泵退出异常", exc_info=True)
+        # 兜底:任何仍未结算的等待者不得悬挂(泵被外部取消/超时/崩溃路径)
+        for tid in list(self._futures):
+            self._settle(tid, TaskResult(ok=False, code="cancelled",
+                                         summary="session-close"))
+
     async def cancel(self, task_id: str, *, by: str = "system") -> bool:
         """任务取消(F025):running → system.cancelled 审计 + 传播取消,队首自动接;
         waiting → 直接摘除并记 failed(cancelled);不存在/已终态 → 幂等 False。

@@ -17,7 +17,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import shlex
 import subprocess
 import threading
 from collections import deque

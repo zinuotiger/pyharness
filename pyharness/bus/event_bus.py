@@ -25,7 +25,7 @@ from pyharness.errors import raise_code, struct_error
 from pyharness.events.vocab import SYNC_TYPES, is_registered
 
 if TYPE_CHECKING:  # 仅类型标注用(总线不实例化 schema,只做存在性判定)
-    from pydantic import BaseModel
+    pass
 
 log = logging.getLogger("pyharness.bus")
 
@@ -107,7 +107,8 @@ class EventBus:
     # 预置入 _types 使 Registry 的 F003 留痕 emit 不被自身 EVT-102 闸拦截。
     _INTERNAL_TYPES: tuple[str, ...] = ("registry.updated",)
 
-    def __init__(self, backpressure_limit: int = 1000):
+    def __init__(self, backpressure_limit: int = 1000,
+                 deadletter_samples: int = 0):
         self._by_type: dict[str, list[Subscription]] = {}   # 精确索引
         self._wild: list[Subscription] = []                 # 通配索引(tool.*)
         # 事件 schema 注册表(EVT-102 判定):register_type 写入 + 预置内部瞬时
@@ -117,6 +118,11 @@ class EventBus:
         self.dropped: dict[str, int] = {}                   # 背压丢弃计数(可观测)
         self._inflight: set[str] = set()                    # 投递中 owner(F004 busy 判定)
         self.backpressure_limit = backpressure_limit        # F005 阈值(public)
+        # F005 **死信样本**(R24 接线 `plugins.deadletter_samples`):背压丢弃时
+        # 留最近 N 条**摘要**供诊断(0 = 不采样)。此前该键零读取者 —— 丢弃只有
+        # 计数与 `bus.backpressure` 事件,拿不到"丢的是什么"。
+        self.deadletter_samples = max(0, int(deadletter_samples or 0))
+        self.deadletters: deque = deque(maxlen=self.deadletter_samples or 0)
         self._sub_seq = itertools.count()                   # 订阅注册序发号器
         self._draining: set[str] = set()                    # 正在排空队列的 sender
         self._qlocks: dict[str, asyncio.Lock] = {}          # per-sender 队列锁
@@ -274,7 +280,10 @@ class EventBus:
                                     s.owner, s.pattern)
                         continue
                     task = loop.create_task(self._consume_task(fn, s, type_))
-                    task.add_done_callback(lambda t: self._task_error(t, s, type_))
+                    # 默认参数快照循环变量 s/type_:lambda 闭包延迟绑定会共享循环
+                    # 末值,多异步订阅者匹配时 EVT-103 会归属到错误订阅者(B023)。
+                    task.add_done_callback(
+                        lambda t, s=s, type_=type_: self._task_error(t, s, type_))
                 stats["delivered"] += 1
             except Exception as exc:        # 订阅者崩溃 → EVT-103 隔离
                 log.error("%s", struct_error("EVT-103", type_=type_, owner=s.owner,
@@ -326,6 +335,9 @@ class EventBus:
             if len(q) >= self.backpressure_limit:   # 满 = 拒新(不丢旧)
                 self.dropped[sender] = self.dropped.get(sender, 0) + 1
                 drop = self.dropped[sender]
+                if self.deadletter_samples > 0:        # F005 死信样本(有界)
+                    self.deadletters.append({"sender": sender, "type": type_,
+                                             "dropped_n": drop})
             else:
                 q.append((type_, payload))          # 入队 = 已承诺,绝不丢
                 if sender not in self._draining:
@@ -416,7 +428,7 @@ def schedule_emit(bus: EventBus, type_: str, payload: dict, *,
         loop = asyncio.get_running_loop()
     except RuntimeError:
         log.warning("schedule_emit: 无运行中事件循环,%s 未投递", type_)
-        coro.close()
+        result.close()
         return None
     task = loop.create_task(_await_dispatch(result))
     _PENDING_EMITS.add(task)
@@ -424,4 +436,27 @@ def schedule_emit(bus: EventBus, type_: str, payload: dict, *,
     return task
 
 
-__all__ = ["EventBus", "Subscription", "STOP", "schedule_emit"]
+def bus_kwargs_of(cfg: Any) -> dict:
+    """由 Settings **鸭子取值**解析总线标量(F005 背压阈值)。
+
+    本模块**不 import** ``pyharness.config``(依赖方向纪律):只按属性读取。缺键 ⇒
+    返回 ``{}``,``EventBus`` 回落模块常量 1000,行为与修复前一致。同
+    ``persistence.flush_kwargs_of`` 先例。
+
+    2026-09-21 修:``plugins.backpressure_limit`` 声明可调(CFG §3.7)且带范围校验,
+    但三处装配点(engine / cli / 子会话)一律 ``EventBus()`` 取默认 ⇒ **死配置**
+    (此前的文本级扫描被 ``EventBus.backpressure_limit`` 同名属性骗过,漏检)。
+    """
+    plugins = getattr(cfg, "plugins", None)
+    out: dict = {}
+    v = getattr(plugins, "backpressure_limit", None)
+    if v is not None:
+        out["backpressure_limit"] = v
+    d = getattr(plugins, "deadletter_samples", None)   # F005 死信样本(R24)
+    if d is not None:
+        out["deadletter_samples"] = d
+    return out
+
+
+__all__ = ["EventBus", "Subscription", "STOP", "schedule_emit",
+           "bus_kwargs_of"]

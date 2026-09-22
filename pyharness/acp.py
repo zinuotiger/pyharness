@@ -380,7 +380,12 @@ async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
         ctx, cfg, log_=log_,
         sessions_dir=Path(str(sessions_dir)).expanduser(),
         bus=getattr(ctx, "bus", None),
-        store=getattr(log_, "_persistence", None))
+        store=getattr(log_, "_persistence", None),
+        # GAP-11:ACP 桥即人类通道。``_set_channel`` 已在 bootstrap 期写入
+        # ``ctx.channel = "acp:<client_id>"``;此处把它**声明给引擎**(spine →
+        # agent ctx),否则治理决策会 APR-503 fail-closed。字段缺失时传 None =
+        # 显式"无人类通道"语义(与"从未声明"是两件事)。
+        channel=getattr(ctx, "channel", None))
     return getattr(ctx, "task_queue", None)
 
 

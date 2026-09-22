@@ -247,7 +247,12 @@ main { flex:1; display:flex; min-height:0; }
 <script>
 "use strict";
 const $ = (s) => document.querySelector(s);
-const state = { sid: null, seq: 0, approvals: new Map(), asks: new Map(), es: null, editPending: false, draft: null, tenant: localStorage.getItem("pyharness.tenant") || "default", contextSession: null };
+// R31-2:租户以 **URL 参数** 为准(服务端据此校验该租户令牌并下发对应 cookie),
+// localStorage 仅作记忆;两者不一致时 URL 胜出。
+function _urlTenant() {
+  try { return new URL(location.href).searchParams.get("tenant") || ""; } catch (e) { return ""; }
+}
+const state = { sid: null, seq: 0, approvals: new Map(), asks: new Map(), es: null, editPending: false, draft: null, tenant: _urlTenant() || localStorage.getItem("pyharness.tenant") || "default", contextSession: null };
 
 /* ---------- 工具 ---------- */
 async function api(path, opts = {}) {
@@ -949,14 +954,21 @@ async function attachOpen() {
 }
 async function telemetryOpen() {
   if (!state.sid) { appendMsg({ role: "system", content: "⚠ 先新建/打开会话" }); return; }
-  panelShow("本地审计导出(F066 遥测 · 事件流折叠)", "<div style='color:var(--muted)'>生成中…</div>");
+  panelShow("审计:治理因果 + 本地遥测", "<div style='color:var(--muted)'>生成中…</div>");
   try {
-    const d = await api(`/api/sessions/${state.sid}/telemetry`);
-    if (!d.ok) { $("#panel-body").innerHTML = `<div>⚠ ${esc(d.error || "生成失败")}</div>`; return; }
+    // 治理因果审计(GAP-7)与旧遥测并列:前者回答"这条决策为什么发生、
+    // 被拒的调用是否真的没有执行",后者只是事件类型计数。
+    const [gov, tel] = await Promise.all([
+      api(`/api/sessions/${state.sid}/governance-audit?reconcile=true`),
+      api(`/api/sessions/${state.sid}/telemetry`),
+    ]);
     const pre = document.createElement("pre");
     pre.className = "sbody";
     pre.style.maxHeight = "62vh";
-    pre.textContent = JSON.stringify(d.audit, null, 2);
+    pre.textContent = JSON.stringify(
+      { governance: gov.ok ? gov : { error: gov.error || "治理审计失败" },
+        telemetry: tel.ok ? tel.audit : { error: tel.error || "遥测失败" } },
+      null, 2);
     $("#panel-body").innerHTML = "";
     $("#panel-body").appendChild(pre);
   } catch (e) { $("#panel-body").innerHTML = `<div>⚠ ${esc(e.message)}</div>`; }
@@ -1157,7 +1169,11 @@ async function loadSettingsPanel() {
       const tenant = document.getElementById("tenant-id").value.trim() || "default";
       state.tenant = tenant;
       localStorage.setItem("pyharness.tenant", tenant);
-      location.reload();
+      // R31-2:切租户必须**带着租户名重新加载** —— 服务端据此校验该租户令牌并下发
+      // 对应 cookie(此前只 reload,服务端无从知道该校验哪个租户)。
+      const u = new URL(location.href);
+      u.searchParams.set("tenant", tenant);
+      location.href = u.toString();
     };
     document.querySelectorAll(".edit-profile").forEach((b) => b.onclick = () => {
       const p = profiles.find((x) => x.id === b.dataset.id);

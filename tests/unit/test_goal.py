@@ -158,7 +158,7 @@ async def test_list_active_order_and_excludes_terminal():
     sess = FakeSession()
     m = GoalManager(sess)
     g1 = await m.goal_create("目标甲")
-    g2 = await m.goal_create("目标乙")
+    await m.goal_create("目标乙")
     g3 = await m.goal_create("目标丙")
     await m.goal_update("g-1", status="paused")  # 活动态之一,仍在板
     await m.goal_abandon("g-2", reason="不做")   # 终态出板

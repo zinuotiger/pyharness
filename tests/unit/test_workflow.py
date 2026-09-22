@@ -6,7 +6,6 @@ stop_on_fail 即停、空步骤 EVT-100、queue_submit_adapter 落盘+wait_for �
 """
 from __future__ import annotations
 
-import asyncio
 
 import pytest
 

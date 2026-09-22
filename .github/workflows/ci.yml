@@ -1,0 +1,148 @@
+name: CI
+
+# 最小可用 CI(GAP-6):门禁只跑**真实项目命令**,失败必须可观察。
+#
+# 设计取舍:
+# - 单 OS = windows-latest:本项目是 Windows-first(``pywinpty`` 仅 win32、
+#   原生壳按 Windows 桌面形态设计)。在未验证的平台上跑会引入与代码无关的红灯,
+#   那反而是"看起来有 CI"的噪音。
+# - 安装 ``.[dev]``(含 PySide6):让原生壳用例**真的跑**而不是 skip。缺依赖时
+#   ``pytest.importorskip`` 会给出**带理由的 skip**,不会被当成通过。
+# - 分层单独跑(security / acceptance / e2e / structural):失败可归因到层,
+#   而不是混在 1900 条里。
+# - 覆盖率设下限:低于阈值即失败(数字在下方 ``COV_FLOOR`` 统一维护)。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # 覆盖率下限(百分比整数)。随能力增长应上调,不得为凑绿而下调。
+  COV_FLOOR: "75"
+
+jobs:
+  test:
+    name: 全量测试 + 覆盖率
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装(含可选 native 依赖)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: 环境自检(可选依赖是否在位,必须可见)
+        run: |
+          python -c "import PySide6, sys; print('PySide6', PySide6.__version__)"
+          python -c "import pywinpty; print('pywinpty ok')"
+
+      - name: 全量测试(无 --ignore)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -q -p no:cacheprovider `
+            --junit-xml=junit.xml
+
+      - name: 覆盖率门禁
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -q -p no:cacheprovider `
+            --cov=pyharness --cov-report=term-missing `
+            --cov-fail-under=${{ env.COV_FLOOR }} `
+            --junit-xml=junit-cov.xml
+
+      - name: 上传 junit(失败可归因)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: junit*.xml
+          if-no-files-found: warn
+
+  gates:
+    name: 分层门禁(security / acceptance / e2e / 结构)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装(含可选 native 依赖)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: 安全门禁(tests/security)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/security
+
+      - name: 验收门禁(tests/acceptance)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/acceptance
+
+      - name: 端到端门禁(tests/e2e)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/e2e
+
+      - name: 不变量门禁(tests/invariants)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/invariants
+
+      - name: 结构门禁(依赖方向 / 外壳↔服务契约)
+        run: |
+          python -m pytest -q -p no:cacheprovider -o addopts="" `
+            tests/unit/test_governance_policy.py `
+            tests/integration/test_shell_service_contract.py
+
+      - name: 生产代码禁止引入测试期旁路(快速静态闸)
+        shell: bash
+        run: |
+          # 治理写侧唯一入口纪律:authorize() 只允许在 tools_executor 被调用。
+          # 用 **AST** 判定而非 grep —— docstring/注释里提到该符号不算调用点
+          # (本仓库已实际踩过这个坑,见 tests/conftest.py::authorize_call_sites)。
+          python - <<'PY'
+          import ast, pathlib, sys
+          base = pathlib.Path("pyharness")
+          hits = set()
+          for p in sorted(base.rglob("*.py")):
+              tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+              for n in ast.walk(tree):
+                  if not isinstance(n, ast.Call):
+                      continue
+                  f = n.func
+                  if (isinstance(f, ast.Attribute) and f.attr == "authorize"
+                          and isinstance(f.value, ast.Attribute)
+                          and f.value.attr == "governance"):
+                      hits.add(str(p).replace("\\", "/"))
+          expected = {"pyharness/core/tools_executor.py"}
+          if hits != expected:
+              print(f"::error::governance.authorize() 调用点漂移: {sorted(hits)}")
+              sys.exit(1)
+          print("authorize() 调用点恰好 1 处(工具执行关 2)", hits)
+          PY
+          # 治理读侧(AuditSystem / Evidence)必须有生产调用点,否则又是"库级可达、
+          # 产品不可达"——这正是 GAP-7 / GAP-8 的原始形态。
+          for sym in "governance.audit" "archive_task_evidence" "governance_audit("; do
+            if ! grep -rq "$sym" pyharness/ --include=*.py; then
+              echo "::error::治理读侧符号 $sym 无生产调用点"; exit 1
+            fi
+          done
+          echo "静态闸通过"

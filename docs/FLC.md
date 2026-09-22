@@ -27,7 +27,7 @@
 | FLC-102 | 消息历史=日志派生(derive reducer 纯函数),禁止第二份历史 | P0 | PRD §4.1 |
 | FLC-103 | guard 单调拒绝:只拒绝不放行;deny 不可被后续 allow 覆盖 | P0 | PRD §4.3 |
 | FLC-104 | 参数 pydantic 先验后跑,校验失败=函数零调用(副作用断言) | P0 | PRD §4.4 |
-| FLC-105 | 强同步三类事件即时 flush,普通事件攒批 | P0 | EVENT-SCHEMA §8 |
+| FLC-105 | 强同步事件(`SYNC_TYPES`)即时 flush,普通事件攒批 | P0 | EVENT-SCHEMA §8 |
 | FLC-106 | 原子写(临时文件+rename),断电不损坏已提交事件 | P0 | DIS-CORE §8 |
 | FLC-107 | 循环三态机 idle/running + 轮数上限(默认10) | P0 | DIS-CORE §1 |
 | FLC-108 | 降级链第 1 阶段就做(主 DeepSeek→备 qwen),不留到以后 | P0 | CONSTRAINTS-02 |

@@ -367,7 +367,7 @@ async def append(self, type_, payload, *, actor, sync=False, trace=None):
     self._seq = env.seq
     self._cache.append(env)                    # 先入内存:订阅者可即时读
     await bus.emit(env.type, env)              # 分发;日志订阅者负责落盘(§8)
-    if sync or env.type in SYNC_TYPES:         # 强同步三类:user.message/
+    if sync or env.type in SYNC_TYPES:         # 强同步事件(`SYNC_TYPES`):user.message/
         await self.persistence.flush(env.seq)  #   guard.rejected/approval.*(§3.6)
     self.history_cache = None                  # 派生缓存整体失效
     return env
@@ -1074,7 +1074,7 @@ PRD §2.4/§4.3/§5.2 F008·F014·F015·F022·F023·F026;MAP §4(工具调用四
 
 ```python
 async def append(self, env, sync=False):
-    """sync=True(强同步三类):write+flush 成功才返回——崩溃最多丢其后 ≤0.5s 事件;
+    """sync=True(强同步事件(`SYNC_TYPES`)):write+flush 成功才返回——崩溃最多丢其后 ≤0.5s 事件;
     否则入 _pending 攒批(满 64 条或 0.5s 定时器触发 _flush)。"""
     line = env.model_dump_json() + "\n"
     if sync:
@@ -1170,7 +1170,7 @@ async def repair(self, session_id):
  NORMAL(攒批)──(满 64/0.5s)──► FLUSHING ──成功──► NORMAL
    │                              │失败
    │                              ▼
-   │ 强同步点(sync 三类)       ERROR_BACKOFF(重试≤3)──成功──► NORMAL
+   │ 强同步点(`SYNC_TYPES`)       ERROR_BACKOFF(重试≤3)──成功──► NORMAL
    │   │                          │3 败
    │   ▼                          ▼
    └─► SYNC_FLUSH ──失败──► SUSPENDED(PERS-202,会话暂停)──repair──► RECOVERING──► NORMAL
@@ -1179,7 +1179,7 @@ async def repair(self, session_id):
 | 当前→目标 | 触发 | 动作/事件 |
 |---|---|---|
 | normal→flushing | 攒批满 64/0.5s | 批量 write+flush |
-| normal→sync_flush | 强同步三类事件 | 立即 write+flush,成功才返回 |
+| normal→sync_flush | 强同步事件(`SYNC_TYPES`) | 立即 write+flush,成功才返回 |
 | flushing/sync→error_backoff | OSError | 入 _retry_q;重试 |
 | error_backoff→suspended | 3 次失败 | PERS-202 事件+暂停会话(拒新不丢旧) |
 | suspended→recovering | repair(F060) | 备份/截断/隔离/重建 |
@@ -1198,7 +1198,7 @@ async def repair(self, session_id):
 
 ## 8.6 边界与限制
 
-1. 崩溃一致性:强同步三类之后的事件最多丢 ≤0.5s,由 repair 截断声明;已落盘事实永不回滚。
+1. 崩溃一致性:强同步事件(`SYNC_TYPES`)之后的事件最多丢 ≤0.5s,由 repair 截断声明;已落盘事实永不回滚。
 2. 只追加物理格式:无就地改写;损坏行隔离不删除(人类决策,F060);修复前强制备份。
 3. 单进程写(INV-07):文件句柄 append 模式单写者;轮转文件名带序号,重放按序合并。
 4. 敏感性:事件 payload 全序列化(工具大结果只进 spill_ref,F039);日志全出口脱敏(INV-09)。

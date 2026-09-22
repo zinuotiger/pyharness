@@ -338,15 +338,48 @@ async def test_t18_authorize_emits_one_decision_issued():
 
 
 async def test_t19_authorize_emits_for_reject_too():
-    """未传 principal → 临时 SYSTEM 身份模型;reject 同样恰一条事件。"""
+    """未传 principal → 由 ctx 派生;reject 同样恰一条事件。
+
+    GAP-11 修复后语义收紧:``channel`` **显式声明为 None** = headless(无人类
+    通道)⇒ 明确的 SYSTEM 主体。与之相对,"属性缺失"不再是 headless,而是
+    装配缺陷 → APR-503(见 ``test_t19b_missing_channel_fails_closed``)。
+    """
     sess = _Sess()
     gc = _make_gc(_chain(session=sess))
-    ctx = types.SimpleNamespace(scope=_Scope(allow=False), session=sess)
+    ctx = types.SimpleNamespace(scope=_Scope(allow=False), session=sess,
+                                channel=None)
     d = await gc.authorize(_call("custom.tool"), ctx)
     assert d.verdict is Verdict.REJECT
     evs = [e for e in sess.events if e[0] == "decision.issued"]
     assert len(evs) == 1 and evs[0][1]["verdict"] == "reject"
     assert evs[0][1]["guard_ids"] == ["scope-hidden"]
-    # M5/S4-P1-3:ctx **无 channel**(headless)⇒ 明确的 SYSTEM 主体(非 human)
+    # 显式 headless ⇒ 明确的 SYSTEM 主体(非 human,也非静默降级而来的 system)
     assert evs[0][1]["principal_kind"] == "system"
     assert evs[0][1]["principal_id"] == "system"
+
+
+async def test_t19b_missing_channel_fails_closed():
+    """GAP-11:ctx **无 channel 属性** ≠ headless ⇒ APR-503 fail-closed。
+
+    负向验证:"从未声明通道"必须与"已声明无通道"区分——前者是装配缺陷,
+    静默降级为 SYSTEM 会让无人批准的执行看起来像"系统决定"。
+    """
+    sess = _Sess()
+    gc = _make_gc(_chain(session=sess))
+    ctx = types.SimpleNamespace(scope=_Scope(), session=sess)   # 无 channel
+    with pytest.raises(Exception) as ei:
+        await gc.authorize(_call("custom.tool"), ctx)
+    assert "APR-503" in str(getattr(ei.value, "code", "") or ei.value)
+    # 未产出任何治理事件(拒绝发生在判定之前,零副作用)
+    assert all(t != "decision.issued" for t, _, _ in sess.events)
+
+
+async def test_t19c_unknown_channel_fails_closed():
+    """GAP-11:非白名单通道名 ⇒ APR-503(既有语义,回归钉死)。"""
+    sess = _Sess()
+    gc = _make_gc(_chain(session=sess))
+    ctx = types.SimpleNamespace(scope=_Scope(), session=sess,
+                                channel="hacker")
+    with pytest.raises(Exception) as ei:
+        await gc.authorize(_call("custom.tool"), ctx)
+    assert "APR-503" in str(getattr(ei.value, "code", "") or ei.value)

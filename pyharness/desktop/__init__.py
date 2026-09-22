@@ -37,6 +37,7 @@ from .launcher import assemble_desktop_ctx, main, run_desktop
 __all__ = [
     "WINDOW_TITLE", "WINDOW_WIDTH", "WINDOW_HEIGHT", "HOST",
     "TIMELINE_KINDS", "CHANNEL", "WARN_RATIO",
+    "BRIDGE_TIMEOUT_S", "LISTEN_TIMEOUT_S", "SSE_HEARTBEAT_S",
     "TimelineNode", "StreamClient", "EventStreamHub", "DesktopBridge",
     "DesktopApp", "DesktopSessionManager",
     "render_timeline_node", "derive_timeline", "approval_node", "redact_args",

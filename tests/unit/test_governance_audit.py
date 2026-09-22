@@ -318,7 +318,7 @@ class TestAuditWiring:
     async def _spine(self, tmp_path, sid):
         from pyharness.engine import assemble_real_engine
         return await assemble_real_engine(
-            self._cfg(tmp_path), sid=sid, sessions_dir=tmp_path / "sessions")
+            self._cfg(tmp_path), sid=sid, sessions_dir=tmp_path / "sessions", channel="cli")
 
     async def test_single_instance_and_no_audit_subscription(self, tmp_path):
         """① ``ctx.governance.audit`` 与 ``spine.governance.audit`` 同一实例;
@@ -372,6 +372,22 @@ class TestReconcile:
         log.events.append(_Ev(18, "context.compacted",
                               {"ranges": [[5, 5]], "summary": "压缩"}))
         assert await a.reconcile() == []
+
+    async def test_t1b_seq_gap_declarable_via_recovered_seq_holes(self):
+        """**R14-9**:``session.recovered.fixed`` 的 ``"seq-holes:[…]"`` 同样是合法声明。
+
+        修复前 ``AuditSystem._declared_holes`` 只认 ``compacted.ranges`` 与
+        ``recovered.lost`` ⇒ repair 刚用 ``seq-holes:[…]`` 声明过的空洞，在治理对账里
+        仍被报成 ``SEQ-GAP``（**假一致性发现**：把一次合法修复当成治理缺陷）。
+        判据已收口到 ``events.declared_ranges``（唯一来源）。
+        """
+        log = self._clean()
+        log.events = [e for e in log.events if e.seq != 5]     # 挖洞(seq=5)
+        a = AuditSystem(session=log)
+        assert "SEQ-GAP:5" in await a.reconcile()
+        log.events.append(_Ev(18, "session.recovered",
+                              {"fixed": ["seq-holes:[5]"]}))
+        assert await a.reconcile() == [], "repair 声明的空洞不得再报 SEQ-GAP"
 
     # ---------------------------------------------------- T-2 NO-GUARD-EVENT
     async def test_t2_no_guard_event_reported_and_fixable(self):
@@ -511,7 +527,7 @@ class TestReconcileWiring:
         from pyharness.engine import assemble_real_engine
         ctx = await assemble_real_engine(
             self._cfg(tmp_path), sid="s-eng-aud-000003",
-            sessions_dir=tmp_path / "sessions")
+            sessions_dir=tmp_path / "sessions", channel="cli")
         gov = ctx.engine_spine.governance
         await ctx.session.append("session.created",
                                  {"title": "", "model": "m"}, actor="system")

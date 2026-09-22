@@ -128,14 +128,18 @@ async def test_desktop_service_registry_switches_tenant(tmp_path):
 
 
 def test_settings_http_routes_are_tenant_scoped(tmp_path):
+    """R31-2:非 default 租户的设置面**既**要全局令牌,**也**要本租户令牌。"""
     raw = Settings.model_validate(DEFAULTS).model_dump()
     raw["storage"]["root"] = str(tmp_path)
     app = DesktopApp(SimpleNamespace(
         bus=EventBus(), settings=Settings.model_validate(raw)))
     client = TestClient(app.api, base_url="http://localhost")
+    tok = {t: app._tenant_store().api_token(t) for t in ("alpha", "beta")}
+
     headers = {
         "X-PyHarness-Token": app._api_token,
         "X-PyHarness-Tenant": "alpha",
+        "X-PyHarness-Tenant-Token": tok["alpha"],
     }
     created = client.post("/api/settings/models", headers=headers,
                           json=_profile("http-profile"))
@@ -145,8 +149,14 @@ def test_settings_http_routes_are_tenant_scoped(tmp_path):
     alpha = client.get("/api/settings/models", headers=headers).json()
     assert alpha["count"] == 1
     beta = client.get("/api/settings/models",
-                      headers={**headers, "X-PyHarness-Tenant": "beta"}).json()
+                      headers={**headers, "X-PyHarness-Tenant": "beta",
+                               "X-PyHarness-Tenant-Token": tok["beta"]}).json()
     assert beta["tenant_id"] == "beta" and beta["count"] == 0
+
+    # 缺本租户令牌 ⇒ 401(全局令牌不足以进入别的租户)
+    refused = client.get("/api/settings/models",
+                         headers={**headers, "X-PyHarness-Tenant": "beta"})
+    assert refused.status_code == 401, "仅有全局令牌不得进入其它租户"
 
 
 # ================== 租户事件可见性:单点判据 + 归属不被跨租户 sid 撞名夺走
@@ -504,28 +514,249 @@ def test_request_tenant_falls_back_only_when_session_absent(tmp_path):
 
 
 def test_forged_header_cannot_read_another_tenants_session_over_http(tmp_path):
-    """**端到端**:伪造头读他租户会话 ⇒ 403 且正文零泄漏(**不再 200 改判放行**)。
+    """**端到端**:跨租户读取被**两层**挡住 —— 鉴权(401)与归属(403)。
 
-    单元级 ``resolve_request_tenant`` 只能证明解析结果;此处走真实 ASGI 栈(中间件
-    → 租户服务 → 会话读取),证明**没有任何一层**再按客户端头把请求交给别的租户。
+    单元级 ``resolve_request_tenant`` 只证明归属;此处走真实 ASGI 栈,把两层分开断言:
+    ①声明非 default 且**未出示**该租户令牌 ⇒ **401**(鉴权先行,连"该租户下是否有
+      这个会话"都不暴露);②``default`` 走兼容口(不需租户令牌)但归属不符 ⇒ **403**;
+    ③出示了**别的租户**令牌 ⇒ **403**(声明≠归属,不改判);④归属租户 + 本租户令牌 ⇒ 200。
     """
     from fastapi.testclient import TestClient
 
     sid = "s-l1e2ebeta01"
     _write_log(tmp_path / "tenants" / "beta" / "sessions", sid, "beta", "BETA-ONLY")
     app = _tenant_app(tmp_path)
+    tok = {t: app._tenant_store().api_token(t) for t in ("alpha", "beta")}
     client = TestClient(app.api, base_url="http://localhost")
 
-    def get(header):
+    def get(header, token=None):
         h = {"X-PyHarness-Token": app._api_token}
         if header is not None:
             h["X-PyHarness-Tenant"] = header
+        if token is not None:
+            h["X-PyHarness-Tenant-Token"] = token
         return client.get(f"/api/sessions/{sid}/messages", headers=h)
 
-    for header in ("alpha", "default", None):
+    # ① 未授权租户(非 default 且无令牌)
+    r = get("alpha")
+    assert r.status_code == 401, f"未出示租户令牌必须 401,实测 {r.status_code}"
+    assert "BETA-ONLY" not in r.text
+    # ② default 是兼容口(鉴权放行),由**归属**拒绝
+    for header in ("default", None):
         r = get(header)
         assert r.status_code == 403, f"header={header!r} 必须 403,实测 {r.status_code}"
         assert "BETA-ONLY" not in r.text, f"header={header!r} 泄漏了正文"
-    ok = get("beta")
+    # ③ 持 alpha 令牌但会话属 beta ⇒ 403(不放行、也不改判给 beta)
+    mism = get("alpha", tok["alpha"])
+    assert mism.status_code == 403, f"跨租户声明必须 403,实测 {mism.status_code}"
+    assert "BETA-ONLY" not in mism.text, "跨租户声明泄漏了正文"
+    # ④ 归属租户 + 本租户令牌 ⇒ 200
+    ok = get("beta", tok["beta"])
     assert ok.status_code == 200 and "BETA-ONLY" in ok.text, "归属租户自身仍可读"
+
+
+# ================ R31-2:per-tenant 鉴权(凭证 → 租户 的绑定)
+def test_tenant_token_store_creates_reads_and_verifies(tmp_path):
+    """令牌库:首次生成、再次读取**同一值**、比对正确/错误/空。"""
+    from pyharness.core.tenant_settings import TenantSettingsStore, tenants_dir
+
+    store = TenantSettingsStore(tenants_dir(tmp_path))
+    assert store.root == tmp_path / "tenants", "派生点须与 tenants_dir 同源"
+    t1 = store.api_token("alpha")
+    assert t1 and len(t1) >= 32
+    assert store.api_token("alpha") == t1, "二次读取必须同一值(不得重铸)"
+    assert store.api_token("beta") != t1, "不同租户必须不同令牌"
+    assert store.verify_token("alpha", t1) is True
+    assert store.verify_token("alpha", "wrong") is False
+    assert store.verify_token("alpha", "") is False
+    assert store.verify_token("nosuch", t1) is False, "未生成的租户不得误判为通过"
+
+
+def test_verify_token_is_read_only_and_never_mints(tmp_path):
+    """**关键**:校验发生在**未认证**路径上,读不到**绝不能就地生成**。
+
+    否则任何人报一个租户名即可凭空得到令牌文件(并把 `/` 下发的 cookie 据为己有),
+    整条授权即为空转。故 :meth:`verify_token` 必须只读。
+    """
+    from pyharness.core.tenant_settings import TenantSettingsStore, tenants_dir
+
+    store = TenantSettingsStore(tenants_dir(tmp_path))
+    assert store.verify_token("ghost", "anything") is False
+    assert not store.token_path("ghost").exists(), "校验不得铸出令牌文件"
+    assert not store.tenant_dir("ghost").exists(), "校验不得创建租户目录"
+
+
+def test_tenant_authorization_truth_table_over_http(tmp_path):
+    """**授权真值表**(端到端):凭证 ↔ 声明租户 的允许/拒绝,逐格断言。
+
+    这是 L-1「鉴权面」的核心用例 —— 此前缺的正是"该主体**能否**用这个租户"。
+    """
+    from fastapi.testclient import TestClient
+
+    sid = "s-r312alpha01"
+    _write_log(tmp_path / "tenants" / "alpha" / "sessions", sid, "alpha", "ALPHA-ONLY")
+    app = _tenant_app(tmp_path)
+    tok = {t: app._tenant_store().api_token(t) for t in ("alpha", "beta")}
+    client = TestClient(app.api, base_url="http://localhost")
+
+    def get(tenant, token=None):
+        h = {"X-PyHarness-Token": app._api_token}
+        if tenant is not None:
+            h["X-PyHarness-Tenant"] = tenant
+        if token is not None:
+            h["X-PyHarness-Tenant-Token"] = token
+        return client.get(f"/api/sessions/{sid}/messages", headers=h)
+
+    cases = [
+        # (租户声明, 租户令牌, 期望状态, 说明)
+        ("alpha", None, 401, "未出示租户令牌"),
+        ("alpha", "wrong", 401, "出示错误令牌"),
+        ("alpha", tok["beta"], 401, "出示**别的租户**的令牌"),
+        ("beta", tok["beta"], 403, "已授权但归属不符(声明≠归属,R31-1)"),
+        ("default", None, 403, "default 走兼容口,由归属拒绝"),
+        ("alpha", tok["alpha"], 200, "归属租户 + 本租户令牌"),
+    ]
+    for tenant, token, want, why in cases:
+        r = get(tenant, token)
+        assert r.status_code == want, \
+            f"{why}:租户={tenant!r} 令牌={'有' if token else '无'} " \
+            f"期望 {want} 实测 {r.status_code}"
+        if want != 200:
+            assert "ALPHA-ONLY" not in r.text, f"{why}:泄漏了正文"
+
+
+def test_tenant_token_alone_suffices_for_api_routes(tmp_path):
+    """**只持租户令牌**(无全局令牌)必须能用该租户的 API —— 且**仅**该租户。
+
+    这是浏览器只拿到租户 cookie 的真实形态(全局 cookie 刻意**不发**,否则拿全局令牌
+    即可换任意租户 cookie)。若路由依赖只认全局令牌,这类客户端就"进得了页面、调不动
+    接口"(实测 401)——本用例钉住该回归,并同时证明租户令牌不跨租户。
+    """
+    from fastapi.testclient import TestClient
+
+    sid = "s-r312onlytok"
+    _write_log(tmp_path / "tenants" / "alpha" / "sessions", sid, "alpha", "ALPHA-ONLY")
+    app = _tenant_app(tmp_path)
+    tok = app._tenant_store().api_token("alpha")
+    client = TestClient(app.api, base_url="http://localhost")
+
+    ok = client.get(f"/api/sessions/{sid}/messages",
+                    headers={"X-PyHarness-Tenant": "alpha",
+                             "X-PyHarness-Tenant-Token": tok})
+    assert ok.status_code == 200, f"只持租户令牌必须放行本租户,实测 {ok.status_code}"
+    assert "ALPHA-ONLY" in ok.text
+
+    cross = client.get(f"/api/sessions/{sid}/messages",
+                       headers={"X-PyHarness-Tenant": "beta",
+                                "X-PyHarness-Tenant-Token": tok})
+    assert cross.status_code == 401, "一个租户的令牌不得用于另一个租户"
+    assert "ALPHA-ONLY" not in cross.text
+
+
+def test_operator_token_published_when_generated(tmp_path):
+    """**随机态**操作者令牌必须落盘可查,否则浏览器入口等于关闭。
+
+    引导页按 ADR-023 不再无凭证发放令牌;而 ``shell.web.token`` 未配置时令牌是进程
+    随机的、从不打印 ⇒ 若不落盘,浏览器用户**无从取得**、页面恒 401。
+    """
+    import os
+    import stat as _stat
+
+    app = _tenant_app(tmp_path)                       # 未配 shell.web.token ⇒ 随机态
+    p = app.publish_operator_token()
+    assert p is not None, "随机态令牌必须落盘"
+    assert p == tmp_path / "web.token"
+    assert p.read_text(encoding="utf-8").strip() == app._api_token
+    if os.name != "nt":                               # Windows 不保证 POSIX 位
+        assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+    # 落盘的令牌确实能过引导页(端到端:这就是浏览器用户的取用路径)
+    from fastapi.testclient import TestClient
+    r = TestClient(app.api, base_url="http://localhost").get(
+        "/?token=" + p.read_text(encoding="utf-8").strip())
+    assert r.status_code == 200, "落盘令牌必须能引导"
+    assert "pyharness_token" in (r.headers.get("set-cookie") or "")
+
+
+def test_operator_token_not_published_when_configured(tmp_path):
+    """**配置态**不落盘:用户已知该值,没必要在磁盘上多一份副本。"""
+    raw = Settings.model_validate(DEFAULTS).model_dump()
+    raw["storage"]["root"] = str(tmp_path)
+    raw["storage"]["sessions_dir"] = str(tmp_path / "sessions")
+    raw["shell"]["web"]["token"] = "configured-operator-secret"
+    app = DesktopApp(SimpleNamespace(
+        bus=EventBus(), settings=Settings.model_validate(raw)))
+
+    assert app._api_token == "configured-operator-secret"
+    assert app._api_token_generated is False
+    assert app.publish_operator_token() is None, "配置态不得再落一份副本"
+    assert not (tmp_path / "web.token").exists()
+
+
+def test_operator_token_mints_tenant_access(tmp_path):
+    """**R31-2 创建路径**:持操作者令牌 + 声明租户 ⇒ 铸/取该租户令牌并下发 cookie。
+
+    没有这条,非 default 租户在真实使用中**永远 401** —— ``api_token()`` 在所有
+    生产路径里都没有别的调用点(UI 验收实测:租户边界用例只能靠手工创建令牌文件)。
+    """
+    from fastapi.testclient import TestClient
+
+    app = _tenant_app(tmp_path)
+    store = app._tenant_store()
+    assert not store.token_path("alpha").exists(), "前置:alpha 尚无令牌"
+    c = TestClient(app.api, base_url="http://localhost")
+    r = c.get("/?tenant=alpha", headers={"X-PyHarness-Token": app._api_token})
+    assert r.status_code == 200, "操作者令牌应能引导到任意租户"
+    assert "pyharness_tenant_token" in (r.headers.get("set-cookie") or "")
+    assert store.token_path("alpha").exists(), "应铸出该租户令牌文件"
+
+    # 铸出的令牌可**独立**使用 —— 这正是租户令牌的用途:可外发的最小凭证
+    tok = store.api_token("alpha")
+    r2 = TestClient(app.api, base_url="http://localhost").get(
+        "/api/settings/models",
+        headers={"X-PyHarness-Tenant": "alpha", "X-PyHarness-Tenant-Token": tok})
+    assert r2.status_code == 200
+
+
+def test_tenant_token_cannot_mint_another_tenant(tmp_path):
+    """租户令牌**只能**进自己的租户:不得拿它撬开别的租户(也不得铸出对方的令牌)。"""
+    from fastapi.testclient import TestClient
+
+    app = _tenant_app(tmp_path)
+    alpha = app._tenant_store().api_token("alpha")
+    r = TestClient(app.api, base_url="http://localhost").get(
+        "/?tenant=beta", headers={"X-PyHarness-Tenant-Token": alpha})
+    assert r.status_code == 401, "alpha 的令牌不得引导进 beta"
+    assert not app._tenant_store().token_path("beta").exists(), \
+        "不得借他人的租户令牌铸出 beta 的令牌"
+
+
+def test_no_credential_and_wrong_credential_cannot_mint(tmp_path):
+    """**安全**:匿名 / **错误的操作者令牌** / 别的租户令牌 —— 三者都**不得铸令牌**。
+
+    ``?tenant=`` 绝不能被当成匿名创建入口(那会让整个租户鉴权空转)。
+    """
+    from fastapi.testclient import TestClient
+
+    app = _tenant_app(tmp_path)
+    store = app._tenant_store()
+    c = TestClient(app.api, base_url="http://localhost")
+
+    r = c.get("/?tenant=mintme")                          # 匿名
+    assert r.status_code == 401 and not store.token_path("mintme").exists(), \
+        "匿名不得铸出租户令牌"
+
+    r = c.get("/?tenant=mintme&token=WRONG-OPERATOR")     # 错误的操作者令牌
+    assert r.status_code == 401 and not store.token_path("mintme").exists(), \
+        "错误的操作者令牌不得铸出租户令牌"
+
+    alpha = store.api_token("alpha")                      # 别人的租户令牌
+    r = c.get("/?tenant=mintme", headers={"X-PyHarness-Tenant-Token": alpha})
+    assert r.status_code == 401 and not store.token_path("mintme").exists(), \
+        "租户令牌不得铸出第三个租户"
+
+    # 对照:只有**正确**的操作者令牌能铸 —— 且铸出的就是**所声明**那个租户
+    r = c.get("/?tenant=mintme", headers={"X-PyHarness-Token": app._api_token})
+    assert r.status_code == 200
+    assert store.token_path("mintme").exists(), "操作者令牌应能铸出所声明租户的令牌"
+    assert not store.token_path("default").exists(), "不得铸出未被声明的租户令牌"
 

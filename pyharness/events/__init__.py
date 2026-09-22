@@ -9,7 +9,9 @@
     vocab.py    — 词表注册(register_event_type/payload_model_for/validate_payload)
     payload.py  — 74 事件 / 72 payload 模型各自负载模型(按 EVENT-SCHEMA §3 字段级权威)
 """
-from pyharness.events.envelope import (Envelope, SeqState, check_seq_gap,
+from pyharness.events.envelope import (DECLARE_TYPES, Envelope, SeqState,
+                                       call_id_of,
+                                       check_seq_gap, declared_ranges,
                                        make_envelope, validate_envelope)
 from pyharness.events.payload import (  # noqa: F401 — 负载模型面向上层/测试再导出
     PlanStep,
@@ -24,6 +26,7 @@ from pyharness.events.vocab import (ACTORS, EVENT_TYPES, SYNC_TYPES,
 __all__ = [
     # 信封与校验链
     "Envelope", "SeqState", "make_envelope", "validate_envelope", "check_seq_gap",
+    "DECLARE_TYPES", "declared_ranges", "call_id_of",
     # 词表与注册
     "EVENT_TYPES", "register_event_type", "payload_model_for", "is_registered",
     "is_transient", "registered_event_types", "validate_payload",

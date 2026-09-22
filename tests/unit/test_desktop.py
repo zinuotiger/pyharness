@@ -628,15 +628,29 @@ async def test_plugin_load_rejects_path_outside_configured_roots(tmp_path):
 
 
 def test_index_page_no_token_meta_cookie_issued():
-    """P1-2 收紧:token 不再明文进页面 meta;改为 HttpOnly cookie 下发(JS 不可读)。"""
+    """P1-2 收紧:token 不再明文进页面 meta;改为 HttpOnly cookie 下发(JS 不可读)。
+
+    R31-2:本页**须出示凭证**才发放 cookie(此前任何人 GET / 即得全局令牌)。
+    """
     app = _app(_sample_events())
-    resp = app._index_page()
+    req = SimpleNamespace(headers={"x-pyharness-token": app._api_token},
+                          query_params={}, cookies={})
+    resp = app._index_page(req)
     html = resp.body.decode("utf-8")
     assert f'<meta name="pyharness-token" content="{app._api_token}">' not in html
     assert "meta name=\"pyharness-token\"" not in html
     # HttpOnly cookie 携带 token(同源 fetch/SSE 自动带上)
     set_cookie = resp.headers.get("set-cookie") or ""
     assert "pyharness_token" in set_cookie and "HttpOnly" in set_cookie
+
+
+def test_index_page_without_credential_is_rejected():
+    """R31-2:**无凭证不再发放令牌** —— 免费发放点会让租户令牌形同虚设。"""
+    app = _app(_sample_events())
+    req = SimpleNamespace(headers={}, query_params={}, cookies={})
+    resp = app._index_page(req)
+    assert resp.status_code == 401, "引导页不得向未出示凭证的调用方发放令牌"
+    assert "pyharness_token" not in (resp.headers.get("set-cookie") or "")
 
 
 def test_route_list_sessions_empty_dir(tmp_path: Path):
@@ -1287,9 +1301,12 @@ async def test_tenant_middleware_rejects_header_conflicting_with_registered_tena
     fork sid 的**完整捕获**由 `_SESSION_ID_IN_PATH` 的独立用例覆盖;此处只钉租户语义。
     """
     from pyharness.core import tenant_settings as ts
+    from pyharness.core.tenant_settings import TenantSettingsStore
 
     app = d.DesktopApp(SimpleNamespace(
         session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
+    app._tstore = TenantSettingsStore(tmp_path / "tenants")   # R31-2:租户令牌库
+    tok = {t: app._tstore.api_token(t) for t in ("acme", "beta")}
     sid = "s-fork-1a2b3c4d"
     ts.register_session_tenant(sid, "acme")
     seen = {}
@@ -1298,18 +1315,26 @@ async def test_tenant_middleware_rejects_header_conflicting_with_registered_tena
         seen["tenant"] = app.current_tenant()
         return "ok"
 
-    def _mk(header):
+    def _mk(header, token=None):
         return SimpleNamespace(
             url=SimpleNamespace(path=f"/api/sessions/{sid}/messages"),
-            headers={"x-pyharness-tenant": header},
+            headers={"x-pyharness-tenant": header, **(
+                {"x-pyharness-tenant-token": token} if token else {})},
             query_params={})
 
     try:
+        # ① 未出示该租户令牌 ⇒ 401(鉴权先行):不得进入归属判定
         denied = await app._tenant_middleware(_mk("evil"), _call_next)
-        assert getattr(denied, "status_code", None) == 403, \
+        assert getattr(denied, "status_code", None) == 401, \
+            "未授权租户必须 401,不得按声明放行"
+        assert "tenant" not in seen
+        # ② 出示 beta 令牌但会话归属 acme ⇒ 403(**不改判给登记租户**,R31-1)
+        mismatch = await app._tenant_middleware(_mk("beta", tok["beta"]), _call_next)
+        assert getattr(mismatch, "status_code", None) == 403, \
             "声明与登记租户矛盾必须拒,不得改判给登记租户"
         assert "tenant" not in seen, "被拒的请求不得进入调用链(未泄漏任何租户上下文)"
-        assert await app._tenant_middleware(_mk("acme"), _call_next) == "ok"
+        # ③ 声明与登记相符 + 持该租户令牌 ⇒ 放行
+        assert await app._tenant_middleware(_mk("acme", tok["acme"]), _call_next) == "ok"
         assert seen["tenant"] == "acme", f"声明与登记相符应放行,实得 {seen['tenant']!r}"
     finally:
         ts.unregister_session_tenant(sid)
@@ -1322,6 +1347,8 @@ async def test_tenant_middleware_documents_unregistered_fallback(tmp_path):
     本用例把回落面**显式化**:若将来改为"无会话 id 也拒绝",此用例会 RED,从而强制
     走一次有意的设计变更,而不是静默漂移。注意与"归属不可得"的区别 —— 文件**在盘**
     却读不出租户时必须拒(见 test_tenant_settings 的 fail-closed 用例)。
+
+    声明 ``default``:它沿用全局令牌,不需要租户令牌(R31-2 的兼容口)。
     """
     app = d.DesktopApp(SimpleNamespace(
         session=None, bus=None, storage=SimpleNamespace(sessions_dir=tmp_path)))
@@ -1333,10 +1360,10 @@ async def test_tenant_middleware_documents_unregistered_fallback(tmp_path):
 
     req = SimpleNamespace(
         url=SimpleNamespace(path="/api/sessions/s-never-registered/messages"),
-        headers={"x-pyharness-tenant": "evil"},
+        headers={"x-pyharness-tenant": "default"},
         query_params={})
     assert await app._tenant_middleware(req, _call_next) == "ok"
-    assert seen["tenant"] == "evil", "查无此会话时声明即分区(路由只会 404)"
+    assert seen["tenant"] == "default", "查无此会话时声明即分区(路由只会 404)"
 
 
 # ================= ADR-011:错误码 → HTTP 状态映射(客户端 vs 引擎)2026-09-21

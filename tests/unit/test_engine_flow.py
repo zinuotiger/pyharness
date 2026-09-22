@@ -116,7 +116,7 @@ async def test_engine_full_chain_offline(tmp_path):
     try:
         ctx = await assemble_real_engine(
             cfg, sid="s-eng-flow-000001",
-            sessions_dir=__import__("pathlib").Path(tmp_path) / "sessions")
+            sessions_dir=__import__("pathlib").Path(tmp_path) / "sessions", channel="cli")
         # 会话引导(desktop manager 职责):首事件 created(seq=1,EVT-106)
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
@@ -157,7 +157,12 @@ async def test_engine_full_chain_offline(tmp_path):
         spine = ctx.engine_spine
         acts = spine.goals.list_active()
         assert len(acts) == 1 and acts[0].desc == "整理面试弹药库"
-        assert spine.todos.active_count() == 1
+        # 待办按**任务分桶**(契约:`TodoUpdatedPayload.task_id` 必填非空、"每任务 ≤20 项")。
+        # 2026-09-21 R11-6 起 `ctx.task_id` 在任务执行期内可见 ⇒ 本轮 todo 落在**本任务桶**;
+        # 此前恒 None ⇒ 全落默认桶 "main"(即"待办不关联任务"的旧缺陷行为)。
+        assert spine.todos.active_count("main") == 0, "默认桶不应再有本轮待办"
+        assert spine.todos.active_count(tid) == 1, \
+            f"待办应关联当前任务 {tid}:{spine.todos.list_items(tid)}"
     finally:
         llm_mod.adapters.clear()
         llm_mod.adapters.update(saved)
@@ -193,7 +198,7 @@ async def test_policy_updated_announced_once_at_first_run(tmp_path):
     try:
         ctx = await assemble_real_engine(
             cfg, sid="s-eng-policy-01",
-            sessions_dir=pathlib.Path(tmp_path) / "sessions")
+            sessions_dir=pathlib.Path(tmp_path) / "sessions", channel="cli")
         await ctx.session.append("session.created",
                                  {"title": "", "model": cfg.llm.model},
                                  actor="system", sync=True)

@@ -1,7 +1,6 @@
 """probe_engine_tools.py — engine 工具链装配探针。"""
 import asyncio, sys, tempfile
 from pathlib import Path
-sys.path.insert(0, r'C:/Users/<user>/Desktop/mini-harness')
 from pyharness.config import load_settings
 from pyharness import engine
 

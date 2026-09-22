@@ -6,12 +6,16 @@ import logging
 import socket
 import sys
 import time
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 
 from pyharness.errors import raise_code
 
 from .constants import HOST, LISTEN_TIMEOUT_S
+
+if TYPE_CHECKING:  # 仅注解引用(环形依赖,运行时不需要)
+    from .app import DesktopApp
 
 log = logging.getLogger("pyharness.desktop.net")
 
@@ -22,7 +26,47 @@ def pick_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def run_uvicorn(app: "DesktopApp", port: int) -> None:
+# 允许绑定的主机白名单(**仅 loopback**):接线 `shell.web.host` 时的安全姿态闸。
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def resolve_bind(cfg: Any) -> tuple:
+    """解析实际监听 ``(host, port)`` —— `shell.web.host`/`shell.web.port` 的**唯一读取点**。
+
+    R24 接线:此前该二键**零读取者**(L-23:绑模块常量 + ``pick_free_port()``,运维设了
+    不生效)。接线取舍(**安全姿态优先**):
+
+    - **host 只允许 loopback**(127.0.0.1 / localhost / ::1);配成其他地址 → ``CFG-601``
+      **拒绝启动**。理由:"服务仅绑 127.0.0.1"是本项目的安全基线,把 host 做成可指
+      ``0.0.0.0`` 的旋钮等于让一次手滑就对外开端口 ⇒ 这里 **fail-closed**。
+    - **port**:``0`` 或**被占用** → 回落 ``pick_free_port()``(保持"总能起来"的既有体验,
+      不因端口冲突让整个桌面壳启动失败);否则用配置值。
+    """
+    web = getattr(getattr(cfg, "shell", None), "web", None)
+    host = str(getattr(web, "host", None) or HOST).strip()
+    if host not in _LOOPBACK_HOSTS:
+        raise_code("CFG-601", field="shell.web.host", value=host,
+                   advice="Web 壳只允许绑 loopback(127.0.0.1/localhost/::1);"
+                          "对外暴露面不在本项目的安全姿态内")
+    try:
+        want = int(getattr(web, "port", 0) or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want <= 0:
+        return host, pick_free_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, want))
+        except OSError:
+            fallback = pick_free_port()
+            log.warning("shell.web.port=%d 不可用(被占用/无权限),回落空闲口 %d",
+                        want, fallback)
+            return host, fallback
+    return host, want
+
+
+def run_uvicorn(app: "DesktopApp", port: int, host: str = HOST) -> None:
     """后台线程 serve:单 worker、禁 reload(seq 单调前提 ADR-005);阻塞至 should_exit。
 
     偏离 5:手工持 loop(server.serve 在自建 loop 上运行)并把 app.loop 暴露给
@@ -34,7 +78,7 @@ def run_uvicorn(app: "DesktopApp", port: int) -> None:
     kw: dict = dict(log_level="warning", workers=1)
     if sys.stderr is None:                    # windowed/frozen 无 stderr:禁用 uvicorn 自配日志
         kw["log_config"] = None
-    config = uvicorn.Config(app.api, host=HOST, port=port, **kw)
+    config = uvicorn.Config(app.api, host=host, port=port, **kw)
     server = uvicorn.Server(config)
     app.server = server
     loop = asyncio.new_event_loop()

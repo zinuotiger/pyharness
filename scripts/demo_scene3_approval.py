@@ -43,7 +43,8 @@ async def main() -> int:
     await ctx.session.append("session.created",
                              {"title": f"场景三 审批{DECISION}",
                               "model": cfg.llm.model}, actor="system", sync=True)
-    prompt = f"把 {SID}/{TARGET} 的内容改成 'v2 已更新',然后汇报"
+    # 会话根即 agent 的 fs 根(F055:{workspaces_dir}/{sid}),目标用相对路径
+    prompt = f"把 {TARGET} 的内容改成 'v2 已更新',然后汇报"
     await ctx.session.append("user.message", {"content": prompt},
                              actor="user", sync=True)
     q = TaskQueue(session=ctx.session, runner=ctx.make_runner())

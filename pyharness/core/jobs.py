@@ -6,8 +6,17 @@ F025(取消归一 failed(cancelled))/F032(超预算直接 kill)/F040(todo 进度
 一句话:脱离前台会话运行的后台 job——start/status/cancel/logs 四入口;长任务不占对话
 (发出后可继续聊/关会话稍后查);job 与前台**共享同一会话 JSONL**,事件带
 task_id="job:<id>" 使 job 自成日志段(F044)可切片回放/审计/预算;并发 ≤4(JOB-001)、
-崩溃/超预算自动失败并告警、结果 7 天清理;job 不可交互;owner 授权模型:job_id 不是
-机密——查询/取消只认提交方 owner 身份(by),不知道 id ≠ 有权,知道 id ≠ 有权。
+**超预算自动失败并告警**(崩溃遗留的处置见下)、结果 7 天清理;job 不可交互;owner 授权
+模型:job_id 不是机密——查询/取消只认提交方 owner 身份(by),不知道 id ≠ 有权,知道
+id ≠ 有权。
+
+**崩溃遗留(2026-09-21 R14-12 如实标注)**:原 docstring 声称"崩溃…自动失败并告警",
+但**事件级无写入者**(全库仅本模块 `_run` 的 finally 与 `cancel` 写 `job.failed`;进程
+被杀即无终态)⇒ 实测崩溃遗留的 job 恒显示 `running`。现由**读侧**如实补正:job 跑在
+持有会话锁的宿主进程里 ⇒ 锁已释放而仍无终态 = 不可能在跑 ⇒ `job list/show` 判为
+`failed(reason=宿主进程已不在(崩溃遗留))`(见 `cli._cmd_job`)。**事件级**恢复写入
+(重启补 `job.failed` + 关悬空段)登记为 **L-26 待决**(须先定"由谁在何时补写",
+避免造出第二个事件写者)。
 
 偏离说明(契约=specs/jobs.py.md;以下为与规格伪码冲突处的取舍,均列理由,与
 task_queue.py/schedule.py 同款先例,已入模块 docstring 供审查):
@@ -175,6 +184,45 @@ class JobManager:
         self._running: dict[str, Job] = {}     # id → Job(在途 + 7 天内终态句柄)
         self._ids = itertools.count(1)         # j-N 单调源(顺序可猜,非机密)
 
+    # ============================================================ 崩溃恢复
+    async def recover(self) -> int:
+        """崩溃遗留 job 的**事件级**恢复(R24;此前只有读侧如实显示、日志里无终态)。
+
+        进程被杀 ⇒ ``_run`` 的 ``finally`` 未执行 ⇒ 日志里只有 ``job.started`` 没有
+        终态事件。本方法重放本会话事件,对"有 started 无终态"的 job **补写
+        ``job.failed(reason="crash")``**,使审计/派生视图与读侧判定一致
+        (``cli._cmd_job`` 已在"无宿主持锁"时报 failed)。
+
+        - **幂等**:补写后再重放不会重复(已见终态即跳过);
+        - **不新增事件写者**:仍走本类 ``self._session.append``(与 ``_run``/``cancel`` 同源);
+        - **失败不阻断**:事件词表/终态(EVT-104)等异常只记日志(恢复是收尾,不是主链)。
+        返回补写的条数。
+        """
+        started: set = set()
+        done: set = set()
+        for ev in self._session.events_after(0):
+            t = getattr(ev, "type", "")
+            p = getattr(ev, "payload", None) or {}
+            jid = str(p.get("job_id") or "")
+            if not jid:
+                continue
+            if t == "job.started":
+                started.add(jid)
+            elif t in ("job.completed", "job.failed"):
+                done.add(jid)
+        orphan = sorted(started - done)
+        for jid in orphan:
+            try:
+                await self._session.append(
+                    "job.failed", {"job_id": jid, "reason": "crash"},
+                    actor="system", task_id=f"job:{jid}", sync=True)
+            except PyHError as e:                 # EVT-104 终态会话等:记日志不阻断
+                log.warning("崩溃 job 补写终态失败 code=%s job=%s", e.code, jid)
+                continue
+        if orphan:
+            log.warning("崩溃遗留 job 已补写终态(reason=crash):%s", orphan)
+        return len(orphan)
+
     # ============================================================ 内部辅助
     def _active_count(self) -> int:
         """在途 job 数(并发口径 = queued/running/suspended,见偏离 2)。"""
@@ -327,7 +375,7 @@ class JobManager:
             j.state = "failed"
             reason = j._cancel_reason or "cancelled"   # session-closed vs user-cancel
             raise
-        except Exception as e:                    # 兜底:CYC-999,堆栈仅本地
+        except Exception:                         # 兜底:CYC-999,堆栈仅本地
             log.exception("job crashed id=%s", j.id)
             j.state, reason = "failed", "CYC-999"
         finally:

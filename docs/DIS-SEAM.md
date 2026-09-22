@@ -38,7 +38,7 @@
   ↑ ctx.* 服务定位器(§3):统一命名空间门面;脊柱服务 eager,能力服务 lazy
   ↑ seam 三件套(§2):Definition ↔ Provider ↔ Consumer;生命周期 enter→announce→detach
   ↑ 自研插件总线(§4):emit/subscribe(sequential/waterfall/parallel)+ Registry + 热插拔
-只中转不落盘;落盘 = 日志订阅者(强同步三类)
+只中转不落盘;落盘 = 日志订阅者(强同步事件(`SYNC_TYPES`))
 ```
 
 ## 1.2 三件事分别解决什么问题
@@ -476,7 +476,7 @@ class EventBus:
             self._inflight.discard(s_.owner)
 ```
 
-**事件族 → 默认模式表**(emit 不带 mode 时的选择;强同步三类恒为 sequential):
+**事件族 → 默认模式表**(emit 不带 mode 时的选择;强同步事件(`SYNC_TYPES`)恒为 sequential):
 
 | 事件族 | 模式 | 理由 |
 |---|---|---|
@@ -492,14 +492,14 @@ session.append(event)                          # 唯一写入口(F009)
   → validate_envelope:信封字段/类型注册/seq 连续(§3.2)  违规→EVT-100/101/102/106 拒写
   → 分配 seq(框架唯一打点,防伪造乱序,§3.1.5)
   → bus.emit(type,payload,mode=sequential)     # 总线只中转;handler 异常 EVT-103 隔离
-  → 日志订阅者追加 JSONL;强同步三类(见下)立即 flush,成功才返回
+  → 日志订阅者追加 JSONL;强同步事件(`SYNC_TYPES`)(见下)立即 flush,成功才返回
   → 派生投影订阅者(UI/FTS/统计)可走 parallel 模式各自刷新
 ```
 
 - **顺序保证**:①seq 由 session.append 单调分配(§3.4 空洞语义);②同 sender 事件 FIFO,未完成不取下一件(F005);③订阅者同类型按注册序(精确先、通配后)。
 - **背压**:在途超阈值(默认 1000)→ **拒新不丢旧**:丢弃计数 + `bus.backpressure` 事件,禁静默(F005)。
 - **错误隔离**:订阅者异常 = EVT-103 封装+本地日志,不影响会话与他人——敢热插拔的前提(F001)。
-- **强同步三类**(§3.6):user.message / guard.rejected / approval.\* 立即写+flush;崩溃最多丢其后 ≤0.5s 普通事件,由 repair 声明。
+- **强同步事件(`SYNC_TYPES`)**(§3.6):user.message / guard.rejected / approval.\* 立即写+flush;崩溃最多丢其后 ≤0.5s 普通事件,由 repair 声明。
 
 ## 4.5 注册表(插件/工具/能力三类索引,F003)
 
@@ -630,7 +630,7 @@ class GuardChain:
                 if d == "reject":
                     await self._session.append("guard.rejected", tool=call.name,
                         guard_id=g.id, reason=policy, call_id=call.call_id,
-                        policy_ref=policy, sync=True)               # 强同步三类之一(§3.6)
+                        policy_ref=policy, sync=True)               # 原始三类族之一(§3.6)
                 return d                                            # reject/approval 都到此为止
         await self._audit(call, "allow", [g.id for g in self.chain], None)
         return Decision.ALLOW                                       # 全链 allow → Provider 执行

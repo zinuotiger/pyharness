@@ -7,13 +7,16 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from pyharness.core.session import SessionLog, open_session
 from pyharness.errors import raise_code
-from pyharness.events import EVENT_TYPES, SYNC_TYPES
+from pyharness.events import EVENT_TYPES
+from pyharness.persistence import (now_ts, session_log_paths,
+                                   session_recorder)
 
 log = logging.getLogger("pyharness.desktop.sessions")
 
@@ -110,10 +113,13 @@ class DesktopSessionManager:
     """
 
     def __init__(self, *, dir: Path, bus: Any, config: Any = None,
-                 settings: Any = None) -> None:
+                 settings: Any = None, tenant_id: Optional[str] = None) -> None:
         self.dir = Path(dir)
         self.bus = bus
         self.config = config or settings
+        # GAP-10:本管理器所服务的租户;经 open_session 盖到**每条事件**的信封上
+        # (而不是只体现在目录布局里)。恢复时以日志已落值为准(见 core/session.py)。
+        self.tenant_id = tenant_id
         self._logs: dict[str, SessionLog] = {}
         self._owners: dict[str, str] = {}
         self._stores: dict[str, Any] = {}
@@ -135,25 +141,25 @@ class DesktopSessionManager:
         return self._locks.setdefault(sid, asyncio.Lock())
 
     def _attach_persistence(self, log_: SessionLog, store: Any, sid: str) -> None:
-        """总线 → 存储订阅(事件一入内存即入真源队列;强同步三类即写即刷 F011)。
+        """总线 → 存储订阅(事件一入内存即入真源队列;强同步即写即刷 F011)。
 
         sid 过滤:桌面总线全局共享(多会话同 bus),订阅者必须只落本会话事件
         ——否则后开会话的事件会串写进先开会话文件(实测:两个 session.created
         同文件、回放错乱)。store.append 侧无 sid 校验,过滤责任在订阅者。
+        2026-09-21 R8:该订阅**改为委托唯一实现** ``persistence.session_recorder``
+        (engine 侧长期缺同一过滤 ⇒ 同一关注点两处实现、漏一处;现单点)。
         """
         if self.bus is None:
             return
-        owner = f"persistence:{sid}"
-
-        async def _record(type_: str, payload: Any) -> None:
-            if getattr(payload, "session_id", None) != sid:
-                return                       # 跨会话事件:不落本文件(多会话隔离)
-            # 强同步清单唯一真源 = events.vocab.SYNC_TYPES(ADR-019 P-3 收敛;
-            # 此前此处有一份 11 名内联副本,与 engine._record_to 各成第二真源)
-            await store.append(payload, sync=type_ in SYNC_TYPES)
+        # 属主**含租户**(2026-09-21 R12):会话目录按租户分目录 ⇒ 同名 sid 跨租户合法,
+        # 若属主只含 sid,则两租户同属主 → 关闭/删除其一即摘掉**另一租户**的落盘订阅
+        # (其会话从此静默不落盘)。同 R8-4(原生壳固定属主)的同类:属主必须含**全部**
+        # 隔离维度。
+        owner = f"persistence:{getattr(self, 'tenant_id', None) or ''}:{sid}"
+        record = session_recorder(store, sid)
 
         for t in EVENT_TYPES:               # 词表逐精确类型订阅(段通配防重复,见偏离 4)
-            self.bus.subscribe(t, _record, owner=owner)
+            self.bus.subscribe(t, record, owner=owner)
         log_._bus = self.bus                # append → 分发 → 落盘闭环
         self._owners[sid] = owner
 
@@ -162,7 +168,8 @@ class DesktopSessionManager:
         """新建会话:sid → store → open_session → 总线落盘订阅 → session.created 首事件。"""
         sid = f"s-{uuid.uuid4().hex[:12]}"  # Envelope.session_id min_length=8
         store = await self._open_store(sid)
-        log_ = await open_session(sid, store)      # 空日志回放(文件刚建)
+        log_ = await open_session(sid, store,
+                                  tenant_id=self.tenant_id)   # GAP-10
         self._attach_persistence(log_, store, sid)
         await log_.append("session.created", {"title": "", "model": self._default_model()},
                           actor="system", sync=True)
@@ -187,14 +194,60 @@ class DesktopSessionManager:
                            hint="会话不存在(日志缺失);先 `session list` 确认 sid 或新建会话")
             await self._ensure_repaired(sid)    # 损坏先修再 open(F060;未装配跳过)
             store = await self._open_store(sid)
-            log_ = await open_session(sid, store)      # 重放重建(坏行 PERS-201 记跳隔离)
+            log_ = await open_session(sid, store,
+                                      tenant_id=self.tenant_id)   # GAP-10
             self._attach_persistence(log_, store, sid)
             self._logs[sid] = log_
             self._stores[sid] = store
             return log_
 
+    # ------------------------------------------------------------ 归档(F055)
+    def archive_root(self) -> Path:
+        """归档根 = **会话目录的兄弟**下的 ``archive/sessions``。
+
+        由会话目录推导(而非另配路径)⇒ 归档与会话**同域**:默认租户落在
+        ``~/.pyharness/archive/sessions``,租户 T 落在 ``…/tenants/T/archive/sessions``
+        —— 不会把某租户的会话归档进别的租户区(R14-8 同款"派生视图与真源同域")。
+        """
+        return self.dir.parent / "archive" / "sessions"
+
+    def _archive_days(self) -> int:
+        """保留期(天):`storage.archive_days`(默认 30;**0 = 不归档,立即删**)。"""
+        from pyharness.config import DEFAULTS
+
+        default = int(DEFAULTS["storage"]["archive_days"])
+        v = getattr(getattr(self.config, "storage", None), "archive_days", None)
+        try:
+            return int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _prune_archives(self, days: int) -> list[str]:
+        """清理超过保留期的归档目录(只读判定 + 递归删除;失败只告警)。"""
+        import shutil as _sh
+
+        root = self.archive_root()
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - days * 86400
+        gone: list[str] = []
+        for entry in sorted(root.iterdir()):
+            try:
+                if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                    _sh.rmtree(entry, ignore_errors=True)
+                    gone.append(entry.name)
+            except OSError:                            # noqa: BLE001 清理尽力而为
+                log.warning("archive prune 跳过 %s", entry, exc_info=True)
+        return gone
+
     async def delete_session(self, sid: str) -> dict:
-        """永久删除会话及轮转/备份文件;先摘订阅并关闭句柄。"""
+        """删除会话及轮转/备份文件;先摘订阅并关闭句柄。
+
+        ``storage.archive_days``(R24 接线,默认 30 天;``0`` = 不归档立即删)——
+        此前该键**零读取者**且删除**直接 unlink**(L-21:误删不可恢复,而文档承诺
+        30 天窗口)。现:>0 时把该会话的**全部相关文件**移入同域归档区
+        (``{sid}-{ts}/``),再按保留期清理过期归档。
+        """
         sid = validate_session_id(sid)
         async with self._lock_for(sid):
             root = self.dir.resolve()
@@ -215,22 +268,44 @@ class DesktopSessionManager:
                 await _await(store.flush())
                 store.close()
             self._logs.pop(sid, None)
+            days = self._archive_days()
+            moved: list[str] = []
             removed: list[str] = []
+            dest: Optional[Path] = None
+            if days > 0:
+                dest = self.archive_root() / f"{sid}-{now_ts()}"
+                try:
+                    dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+                except OSError as e:                   # noqa: BLE001 归档不可用 → 拒绝删
+                    raise_code("PERS-202", op="archive", path=str(dest), why=str(e),
+                               advice="归档目录不可创建;删除**已中止**(不静默永久删)")
             for path in sorted(candidates):
                 try:
                     resolved = path.resolve()
                     resolved.relative_to(root)
-                    if resolved.is_file():
-                        resolved.unlink()
+                    if not resolved.is_file():
+                        continue
+                    if dest is not None:
+                        resolved.replace(dest / resolved.name)   # 移动(可恢复)
+                        moved.append(resolved.name)
+                    else:
+                        resolved.unlink()                # archive_days=0:立即删
                         removed.append(resolved.name)
                 except FileNotFoundError:
                     continue
-            return {"sid": sid, "removed": removed, "count": len(removed)}
+            pruned = self._prune_archives(days) if days > 0 else []
+            # 每会话串行锁随会话释放(2026-09-21 R8:此前 _locks 只增不减 ⇒
+            # 见过的每个 sid 都留一个 asyncio.Lock;此处补 create→…→release 的最后一环)
+            self._locks.pop(sid, None)
+            return {"sid": sid, "removed": removed + moved, "count": len(removed) + len(moved),
+                    "archived": str(dest) if dest is not None else None,
+                    "archive_days": days, "pruned": pruned}
 
     async def _open_store(self, sid: str) -> Any:
         """open_store 工厂(异步外壳保持调用面统一;PERS-202 上抛)。"""
-        from pyharness.persistence import open_store
-        return open_store(sid, dir=self.dir)
+        from pyharness.persistence import flush_kwargs_of, open_store
+        # N1:flush 标量由装配层解析后注入(工厂不读 config)
+        return open_store(sid, dir=self.dir, **flush_kwargs_of(self.config))
 
     async def _ensure_repaired(self, sid: str) -> None:
         """repair 前置(F060;ctx.repair.ensure_repaired 未装配 → 跳过,见偏离 8)。"""
@@ -251,10 +326,11 @@ class DesktopSessionManager:
         out: list[dict] = []
         if not self.dir.exists():
             return out
-        for path in sorted(self.dir.glob("*.jsonl")):
+        # 唯一枚举点(R14-3):此前用 ``stem.startswith("s-")`` 声称"跳过轮转段/备份",
+        # 但 ``{sid}.1.jsonl`` / ``{sid}.corrupt-*`` 的 stem **同样**以 ``s-`` 开头
+        # ⇒ 该守卫从未生效,列表混入"备份伪装成的会话"(实测:1 会话 → 列出 3 条)。
+        for path in session_log_paths(self.dir):
             sid = path.stem
-            if not sid.startswith("s-"):        # 轮转段 .N.jsonl / 备份非会话文件跳过
-                continue
             summary: dict[str, Any] = {"sid": sid, "title": "", "preview": "",
                                        "finished": False}
             try:
@@ -334,14 +410,16 @@ def _summarize_log(log_: Any) -> dict:
 
 
 def _surface_of(ctx: Any, *, bus: Any, config: Any = None,
-                sessions_dir: Optional[Path] = None) -> Any:
+                sessions_dir: Optional[Path] = None,
+                tenant_id: Optional[str] = None) -> Any:
     """会话面解析(偏离 1):门面 → 委托;绑定日志 → 单会话;None → 自装配管理器。"""
     surface = getattr(ctx, "session", None)
     if surface is None:
         if sessions_dir is None:
             raise_code("EVT-106", hint="会话未装配(ctx.session=None)且无持久化目录;"
                        "注入会话门面或先配置 storage.sessions_dir")
-        mgr = DesktopSessionManager(dir=sessions_dir, bus=bus, config=config)
+        mgr = DesktopSessionManager(dir=sessions_dir, bus=bus, config=config,
+                                    tenant_id=tenant_id)
         try:
             ctx.session = mgr               # 惰性回写:引擎门面后续可复用(acp 同款)
         except Exception:                   # noqa: BLE001 只读 ctx:仅本地持有

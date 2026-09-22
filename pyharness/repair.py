@@ -53,6 +53,7 @@ detect_truncation/default_sessions_dir);core.session.open_session 惰性导入
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -64,10 +65,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from pyharness.errors import PyHError, raise_code
-from pyharness.events import Envelope, check_seq_gap
+from pyharness.events import (DECLARE_TYPES, Envelope, check_seq_gap,
+                              declared_ranges)
 from pyharness.persistence import (acquire_session_lock, default_sessions_dir,
-                                   detect_truncation, open_store,
-                                   release_session_lock, session_lock_path)
+                                   detect_truncation,
+                                   flush_kwargs_of, is_aux_session_file,
+                                   open_store, release_session_lock,
+                                   rotated_segment_paths, session_lock_path)
 
 log = logging.getLogger("pyharness.repair")
 
@@ -75,14 +79,8 @@ log = logging.getLogger("pyharness.repair")
 _QUARANTINE_RAW_CAP: int = 8192        # 隔离档单条 raw 截断上限(防爆,spec 结构表)
 _TAIL_SEQ_PROBE: int = 2048            # 半行内 seq 探测窗口(信封序列化 seq 最先落)
 # 空洞合法化声明事件(PRD §3.4:compacted 折叠区间 / recovered 修复区间)
-_DECLARE_TYPES: frozenset = frozenset({"context.compacted", "session.recovered"})
-# 轮转/备份/隔离等辅助文件判定:不参与健康扫描
-_AUX_PATTERNS = (
-    re.compile(r"\.\d+\.jsonl$"),          # 轮转 {sid}.{n}.jsonl
-    re.compile(r"\.corrupt-"),             # 修复备份 {sid}.corrupt-{ts}.jsonl
-    re.compile(r"\.quarantine-"),          # 隔离档 {sid}.quarantine-{ts}.jsonl
-    re.compile(r"\.jsonl\.bak-"),          # persistence 草案旧备份名(只扫跳过)
-)
+# 判据唯一来源 events.DECLARE_TYPES(R14-9)
+_DECLARE_TYPES: frozenset = DECLARE_TYPES
 
 
 def now_ts() -> str:
@@ -90,9 +88,101 @@ def now_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")[:-3]
 
 
+def _rotated_segments(path: Path) -> list[Path]:
+    """本会话的轮转段 ``{sid}.{n}.jsonl``(n 升序)。
+
+    2026-09-21 R13-5:轮转段是**真源的一部分**(replay 会合并读,见 persistence
+    ``replay``),与备份/隔离档(**aux**)不同类 —— 但此前健康扫描与 repair 都按
+    "aux 跳过"处理它们 ⇒ 段内整行损坏会**静默丢事件且零告警**(实测:重放少一条、
+    `repair`/`auto_scan` 都不报)。故本函数把它们纳入**修复面**(不改扫描面,见 L-25)。
+
+    2026-09-21 R14-3:段枚举判据移交 ``persistence.rotated_segment_paths``(唯一来源,
+    与 ``session_data_paths`` / ``replay`` 同序;此前本模块自持一份 glob 判据)。
+    """
+    return rotated_segment_paths(path)
+
+
+def _segment_damage(path: Path) -> list[tuple[Path, Optional[int], list[int]]]:
+    """各轮转段的损坏面:**只读**扫描 → [(段路径, 尾部半行偏移|None, 中部坏行行号[])]。
+
+    尾部半行与中部坏行分开交付:前者按"未完成即未发生"截断,后者按"隔离不删"处理
+    (与主文件同口径)。尾部有半行时不再把它算作坏行(避免同一条被处理两次)。
+    """
+    out: list[tuple[Path, Optional[int], list[int]]] = []
+    for seg in _rotated_segments(path):
+        torn = detect_truncation(seg)
+        bad: list[int] = []
+        if torn is None:
+            bad = [no for no, text in _iter_text(seg)
+                   if _parse_or_none(text) is None]
+        if torn is not None or bad:
+            out.append((seg, torn, bad))
+    return out
+
+
+def _segment_scan(path: Path) -> tuple[list[int], int, list[tuple[int, int]]]:
+    """轮转段的 (全部 seq, 可索引内容末 seq, 声明区间) —— 供**会话级**seq 连续性判定。
+
+    只读;段文件缺失/不可读时**跳过**(不影响主文件判定)。坏行记跳(与主文件同口径)。
+    """
+    seqs: list[int] = []
+    last = 0
+    declared: list[tuple[int, int]] = []
+    for seg in _rotated_segments(path):
+        try:
+            for _no, text in _iter_text(seg):
+                if text is None:
+                    continue
+                env = _parse_or_none(text)
+                if env is None:
+                    continue
+                seqs.append(env.seq)
+                if env.type == "session.recovered":
+                    declared.extend(_declared_ranges(env))
+                    continue
+                if _indexable(env):
+                    last = max(last, env.seq)
+                if env.type in _DECLARE_TYPES:
+                    declared.extend(_declared_ranges(env))
+        except OSError as e:                         # noqa: BLE001 段不可读不放大
+            log.warning("repair: 轮转段不可读,跳过其 seq 连续性判定 file=%s why=%s",
+                        seg, e)
+    return seqs, last, declared
+
+
+def _seg_label(seg: Path) -> str:
+    """段标签(报告/审计用):``seg{n}``。"""
+    m = re.search(r"\.(\d+)\.jsonl$", seg.name)
+    return f"seg{m.group(1)}" if m else f"seg:{seg.name}"
+
+
+def _session_content_last(path: Path) -> int:
+    """**会话级**可索引内容末 seq = max(主文件, 轮转段)。
+
+    与 ``scan_session`` 的 ``last`` **同口径**(两者都按 ``_indexable`` 判据 + 轮转段
+    合并读)。2026-09-21 R14-1 二阶修:重建源 ``open_store(...).replay`` **合并读轮转段**
+    (persistence),故对账水位也必须跨段取 max —— 此前只算主文件 ⇒ 主文件被截空(整文件
+    半行)或其尾部全为非内容事件时,段内容使 ``view_last>0`` 而单文件 ``log_last=0``
+    ⇒ **假 PERS-201**(repair 已成功却被判失败:CND-06/08 判据多源必然漂移)。
+    """
+    best = 0
+    for _no, text in _iter_text(path):
+        if text is None:
+            continue
+        env = _parse_or_none(text)
+        if env is not None and _indexable(env) and env.seq > best:
+            best = env.seq
+    _seqs, seg_last, _declared = _segment_scan(path)
+    return max(best, seg_last)
+
+
 def _is_aux_file(path: Path) -> bool:
-    """辅助文件判定:轮转/备份/隔离(以及旧 .bak)不参与全会话健康扫描。"""
-    return any(p.search(path.name) for p in _AUX_PATTERNS)
+    """辅助文件判定:轮转/备份/隔离(以及旧 .bak)不参与全会话健康扫描。
+
+    2026-09-21 R14-3:判据**唯一来源**移至 ``persistence.is_aux_session_file`` ——
+    此前本模块自持一份、其余五处漏判据(见该函数 docstring)。
+    """
+    return is_aux_session_file(path)
 
 
 # ================================================================= 数据结构
@@ -186,30 +276,11 @@ def _indexable(env: Any) -> bool:
 def _declared_ranges(env: Envelope) -> list[tuple[int, int]]:
     """声明事件 → 合法空洞闭区间列表(§3.4 空洞合法化口径)。
 
-    context.compacted.ranges = [lo, hi] 折叠闭区间;session.recovered 的 lost seq
-    与 fixed 中 "seq-holes:[...]" 词条(persistence._declared_by_compaction 同款)
-    逐号声明为单点闭区间。
+    2026-09-21 R14-9:判据**唯一来源**移至 ``events.declared_ranges`` —— 此前
+    ``repair`` / ``persistence`` / ``session`` / ``governance.audit`` 各写一份,其中
+    ``session`` 那份**只认 compacted** ⇒ 已声明的修复空洞在回放时被重报为"未声明空洞"。
     """
-    out: list[tuple[int, int]] = []
-    if env.type == "context.compacted":
-        for pair in (env.payload.get("ranges") or []):
-            lo, hi = int(pair[0]), int(pair[1])
-            if lo <= hi:
-                out.append((lo, hi))
-    elif env.type == "session.recovered":
-        for s in (env.payload.get("lost") or []):
-            try:
-                out.append((int(s), int(s)))
-            except (TypeError, ValueError):
-                continue
-        for item in (env.payload.get("fixed") or []):
-            m = re.match(r"^seq-holes:\[(.*)\]$", str(item))
-            if m and m.group(1).strip():
-                for x in m.group(1).split(","):
-                    if x.strip().isdigit():
-                        s = int(x)
-                        out.append((s, s))
-    return out
+    return declared_ranges(env)
 
 
 def _iter_text(path: Path) -> Iterator[tuple[int, Optional[str]]]:
@@ -248,9 +319,12 @@ def _sessions_dir(ctx: Any) -> Path:
 
 
 def _fts_last_seq_provider(ctx: Any) -> Optional[Callable[[str], int]]:
-    """派生视图末 seq 提供者(对账用,偏离 4):ctx.session_query.max_seq 或 ctx.fts_last_seq。
+    """派生视图末 seq 提供者(对账用,偏离 4):ctx.session_query.max_seq / ctx.fts_last_seq。
 
-    本仓库 SessionQueryIndex 未暴露 max_seq → 装配层挂载面(注入后索引落后自动检测)。
+    2026-09-21 R11-2 修:此前只认前两者,而**没有任何生产调用方注入它们**(CLI 的
+    ``auto_scan`` 连 ctx 都不收)⇒ 索引落后对账**从未真正启用**。现补**第三兜底**:
+    由 ``cfg.storage.db_path`` 构造只读读数口(``session_query.read_max_seq``)——
+    repair 只需要"db 在哪",不需要 live 索引句柄。
     """
     sq = getattr(ctx, "session_query", None)
     if sq is not None:
@@ -258,7 +332,24 @@ def _fts_last_seq_provider(ctx: Any) -> Optional[Callable[[str], int]]:
         if callable(mx):
             return mx                      # type: ignore[return-value]
     fl = getattr(ctx, "fts_last_seq", None)
-    return fl if callable(fl) else None
+    if callable(fl):
+        return fl
+    db_path = _db_path_of(ctx)
+    if db_path:
+        from pyharness.core.session_query import read_max_seq
+        return lambda sid: read_max_seq(db_path, sid)
+    return None
+
+
+def _db_path_of(ctx: Any) -> Optional[str]:
+    """FTS 库路径读取(鸭子类型:ctx.settings/ctx.config → storage.db_path)。"""
+    cfg = (getattr(ctx, "settings", None) or getattr(ctx, "config", None)
+           or ctx)
+    for holder in (cfg, getattr(cfg, "storage", None)):
+        p = getattr(holder, "db_path", None)
+        if p:
+            return str(p)
+    return None
 
 
 def _log_last_seq(path: Path) -> int:
@@ -326,6 +417,16 @@ async def scan_session(path: Path, *,
             last = max(last, env.seq)
         if env.type in _DECLARE_TYPES:
             declared.extend(_declared_ranges(env))
+    # 空洞是**会话级**属性(R13-6):轮转段与主文件同属一个会话(replay 合并读),
+    # 故 seq 连续性必须**跨段**判定 —— 否则主文件从 seq N+1 起会被误判为"空洞 1..N"
+    # (实测:凡轮转过一次的会话恒判不健康;每次 repair 都报假空洞并追加一条
+    # session.recovered ⇒ 稳定态噪声 + 重复写入)。段级坏行/半行仍按**各文件**口径
+    # 分别处置(见 `_segment_damage`)。
+    seg_seqs, seg_last, seg_declared = _segment_scan(path)
+    if seg_seqs:
+        seqs = sorted(set(seqs) | set(seg_seqs))
+        declared = declared + seg_declared
+        last = max(last, seg_last)
     holes = check_seq_gap(seqs, declared) if seqs else []
     index_stale = False
     if fts_last_seq is not None:
@@ -348,13 +449,20 @@ async def scan_session(path: Path, *,
 
 
 async def auto_scan(sessions_dir: Path, *,
-                    fts_last_seq: Optional[Callable[[str], int]] = None
+                    fts_last_seq: Optional[Callable[[str], int]] = None,
+                    db_path: Optional[str] = None
                     ) -> list[SessionHealth]:
     """全会话自检(启动 bootstrap 与 repair 子命令无 sid 共用):只返回需修会话。
 
     目录不存在(首次运行)→ 零报告;轮转/备份/隔离辅助文件跳过;单文件打开失败
     (权限/竞态)→ 本地异常日志跳过,不崩启动。只读零修改。
+
+    ``db_path``(2026-09-21 R11-2):ctx-less 调用方(如 CLI 启动自检)只给库路径,
+    即可启用**索引落后对账**;``fts_last_seq`` 优先(显式注入时胜出)。
     """
+    if fts_last_seq is None and db_path:
+        from pyharness.core.session_query import read_max_seq
+        fts_last_seq = lambda sid: read_max_seq(db_path, sid)   # noqa: E731
     d = Path(sessions_dir) if sessions_dir is not None else default_sessions_dir()
     if not d.exists():
         return []
@@ -414,7 +522,8 @@ async def _repair_locked(ctx: Any, sid: str, path: Path, *,
     出现"repair 关句柄整写时他进程活句柄写的字节静默消失")。
     """
     health = await scan_session(path, fts_last_seq=_fts_last_seq_provider(ctx))
-    if health.healthy:                     # 二次 repair:无动作(幂等)
+    seg_damage = _segment_damage(path)          # 轮转段损坏面(只读;R13-5)
+    if health.healthy and not seg_damage:       # 二次 repair:无动作(幂等)
         return RepairReport(sid=sid)
     pol = policy
     if pol is None:
@@ -430,6 +539,20 @@ async def _repair_locked(ctx: Any, sid: str, path: Path, *,
     if health.bad_lines:                   # ③ 中部坏行:隔离不自动删
         kept = await quarantine_lines(path, health.bad_lines, pol)
         fixed += [f"quarantine-{e.line_no}" for e in kept if e.archived]
+    # ⑤' 轮转段同口径修复(R13-5):它们是真源的一部分,损坏必须可见且可修 ——
+    #     段级同样"修复前强制备份";尾部半行截断、中部坏行隔离(不删、字节日志保真)。
+    for seg, torn_off, bad_lines in seg_damage:
+        label = _seg_label(seg)
+        backup_file(seg)                             # 段级备份(失败即 PERS-202 中止)
+        if torn_off is not None and pol.drop_tail:
+            lost_seqs += _dropped_seqs(seg, torn_off)
+            truncate_tail(seg, torn_off or 0)
+            fixed.append(f"{label}-tail-truncated")
+        if bad_lines:
+            entries = await quarantine_lines(seg, bad_lines, pol)
+            kept += entries
+            fixed += [f"{label}-quarantine-{e.line_no}"
+                      for e in entries if e.archived]
     holes_alert = locate_holes(health)     # ④ seq 空洞:未声明 → 告警 F031 深查
     if holes_alert and not interactive:
         fixed.append("seq-holes:" + repr(holes_alert))
@@ -584,15 +707,53 @@ def locate_holes(health: SessionHealth) -> list[int]:
     return undeclared
 
 
+def _index_handle(ctx: Any) -> tuple[Any, bool]:
+    """FTS 派生视图句柄解析(**唯一入口**):返回 (句柄, 是否本函数自查构造)。
+
+    解析序(鸭子类型,逐级兜底):
+      ① ``ctx.session_query``(装配注入面;引擎**只注入在 agent ctx** 上);
+      ② 兄弟形态 ``ctx.fts`` / ``ctx.engine_spine.fts``(engine 的 spine 自带);
+      ③ 由 ``cfg.storage.db_path`` **惰性构造**(repair 只需"库在哪" —— 与 R11-2
+         的 `read_max_seq` 同款思路,自有句柄由调用方 detach 收尾)。
+
+    2026-09-21 R14-1 修:此前只认 ①,而 repair 的调用方(CLI 命令 / 桌面)传的是
+    **外壳 ctx**(无 `session_query`)⇒ "⑤派生视图整体重建"步骤**不可达** ⇒ repair
+    修完仍 `index_stale=True`(不收敛)。同 PIT-19("约定被读 ≠ 被注入")。
+    """
+    sq = getattr(ctx, "session_query", None)
+    if sq is not None and callable(getattr(sq, "rebuild", None)):
+        return sq, False
+    for holder in (ctx, getattr(ctx, "engine_spine", None)):
+        cand = getattr(holder, "fts", None) if holder is not None else None
+        if cand is not None and callable(getattr(cand, "rebuild", None)):
+            return cand, False
+    db_path = _db_path_of(ctx)
+    if not db_path:
+        return None, False
+    try:
+        from pyharness.core.session_query import SessionQueryIndex
+        return SessionQueryIndex(db_path=db_path), True
+    except Exception as e:                           # noqa: BLE001 构造失败=未装配
+        log.warning("repair: 构造 FTS 句柄失败(%s):视图重建跳过 sid=?", e)
+        return None, False
+
+
 async def rebuild_derived_views(ctx: Any, sid: str) -> bool:
     """派生视图整体重建(原则 1):FTS 与 storage KV 全部丢弃重建(重放,非增量修补)。
 
-    ctx.session_query.rebuild(session_id=sid)(async,偏离 6)+ ctx.storage.kv_rebuild
-    鸭子调用;视图未装配 → 日志降级返回 False(派生可弃,装配后自动生效);重建后
-    对账(视图暴露 max_seq(sid) 时):日志末 seq != 视图末 seq → PERS-201(视图落后
-    不静默)。索引写失败 → PERS-202(原日志不受影响,索引=派生可再建)。
+    句柄经 ``_index_handle`` 解析(装配注入面 → 兄弟形态 → cfg 惰性构造;R14-1);
+    视图未装配 → 日志降级返回 False(派生可弃,装配后自动生效);重建后对账(视图
+    暴露 max_seq(sid) 时):日志末 seq != 视图末 seq → PERS-201(视图落后不静默)。
+    索引写失败 → PERS-202(原日志不受影响,索引=派生可再建)。
     """
-    sq = getattr(ctx, "session_query", None)
+    sq, owned = _index_handle(ctx)
+    if owned and sq is not None:                 # 自建句柄须先装载(R14-1)
+        try:
+            await sq.enter(ctx)
+        except Exception as e:                   # noqa: BLE001 装载失败=视图不可用
+            log.warning("repair: 自建 FTS 句柄装载失败(%s):视图重建跳过 sid=%s",
+                        type(e).__name__, sid)
+            sq, owned = None, False
     rebuild = getattr(sq, "rebuild", None) if sq is not None else None
     storage = getattr(ctx, "storage", None)
     kv = None
@@ -603,9 +764,13 @@ async def rebuild_derived_views(ctx: Any, sid: str) -> bool:
         log.info("repair: 派生视图(FTS/storage)未装配,整体重建跳过 sid=%s", sid)
         return False
     store = None
+    view_last: Optional[int] = None
     try:
         if rebuild is not None:              # FTS 重放源:修复后的主文件
-            store = open_store(sid, dir=_sessions_dir(ctx))
+            store = open_store(
+                sid, dir=_sessions_dir(ctx),
+                **flush_kwargs_of(getattr(ctx, "config", None)
+                                  or getattr(ctx, "settings", None)))
             attach = getattr(sq, "attach_source", None)
             if callable(attach):
                 attach(sid, store)
@@ -621,36 +786,43 @@ async def rebuild_derived_views(ctx: Any, sid: str) -> bool:
             except OSError as e:
                 raise_code("PERS-202", op="kv_rebuild", sid=sid, why=str(e),
                            advice="KV 派生缓存可再建;真源不受影响")
+        # 对账读数**必须在句柄有效期内**取(R14-1 二阶):自建句柄在 finally 里
+        # detach 关库(``_db=None``),此后 ``max_seq`` 恒返 0 ⇒ 与日志水位不等 ⇒
+        # **假 PERS-201**(修复自身引出的缺陷:重建明明成功却被判不一致)。
+        mx = getattr(sq, "max_seq", None) if sq is not None else None
+        if callable(mx):
+            try:
+                view_last = mx(sid)
+            except Exception:                # noqa: BLE001 — 提供者故障降级
+                log.warning("repair: 视图 max_seq(%s) 查询失败,对账跳过", sid)
     finally:
         if store is not None:
             try:
                 store.close()                # 只读回放源句柄收尾
             except Exception:                # noqa: BLE001 — 清理不阻断
                 log.debug("repair: FTS 回放源 close 失败", exc_info=True)
-    # 对账:日志末 seq == 视图末 seq(视图挂 max_seq 提供者时;不一致 → PERS-201)
-    mx = getattr(sq, "max_seq", None) if sq is not None else None
-    if callable(mx):
-        view_last = None
-        try:
-            view_last = mx(sid)
-        except Exception:                    # noqa: BLE001 — 提供者故障降级
-            log.warning("repair: 视图 max_seq(%s) 查询失败,对账跳过", sid)
-        if view_last is not None:
-            # 对账口径:与索引 max_seq 同口径 = **可索引事件**(内容型 insert)末 seq——
-            # 排除 session.recovered 声明(不索引)与一切非内容事件(created/finished/
-            # llm.request/guard.* 等,不产索引行);否则尾部非内容即误抛 PERS-201。
-            log_last = 0
-            for _no, text in _iter_text(_sessions_dir(ctx) / f"{sid}.jsonl"):
-                if text is None:
-                    continue
-                env = _parse_or_none(text)
-                if env is not None and _indexable(env) and env.seq > log_last:
-                    log_last = env.seq
-            if log_last != view_last:
-                raise_code("PERS-201", op="view-reconcile", sid=sid,
-                           log_last=log_last, view_last=view_last,
-                           advice="索引对账不一致(视图落后不静默);重跑 repair "
-                                  "或手动重建派生视图")
+        if owned and sq is not None:         # 本函数自建的句柄:摘除并关库(R14-1)
+            try:
+                det = getattr(sq, "detach", None)
+                if callable(det):
+                    r = det(None)
+                    if inspect.isawaitable(r):
+                        await r
+            except Exception:                # noqa: BLE001 — 清理不阻断
+                log.debug("repair: 自建 FTS 句柄 detach 失败", exc_info=True)
+    # 对账判定:日志末 seq == 视图末 seq(读数已在句柄有效期内取得;不一致 → PERS-201)
+    if view_last is not None:
+        # 对账口径:与索引 max_seq 同口径 = **可索引事件**(内容型 insert)末 seq——
+        # 排除 session.recovered 声明(不索引)与一切非内容事件(created/finished/
+        # llm.request/guard.* 等,不产索引行);否则尾部非内容即误抛 PERS-201。
+        # 水位是**会话级**的(R14-1 二阶):重建源 replay 合并读轮转段 ⇒ 对账也须跨段
+        # 取 max(与 scan_session 单源),否则主文件被截空时假 PERS-201。
+        log_last = _session_content_last(_sessions_dir(ctx) / f"{sid}.jsonl")
+        if log_last != view_last:
+            raise_code("PERS-201", op="view-reconcile", sid=sid,
+                       log_last=log_last, view_last=view_last,
+                       advice="索引对账不一致(视图落后不静默);重跑 repair "
+                              "或手动重建派生视图")
     return True
 
 
@@ -677,7 +849,10 @@ async def declare_recovered(ctx: Any, sid: str, fixed: list[str],
     if lost:
         payload["lost"] = [int(x) for x in lost]
     from pyharness.core.session import open_session   # 惰性:避免装配期硬依赖
-    store = open_store(sid, dir=_sessions_dir(ctx))  # 修复先于 open(CLI 序)→ 自开
+    store = open_store(  # 修复先于 open(CLI 序)→ 自开
+        sid, dir=_sessions_dir(ctx),
+        **flush_kwargs_of(getattr(ctx, "config", None)
+                          or getattr(ctx, "settings", None)))
     log_ = await open_session(sid, store)
     log_._bus = _DirectBus(store)            # 直连落盘(无全局总线时声明仍强同步落盘)
     try:

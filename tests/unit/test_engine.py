@@ -13,9 +13,9 @@ F027 streaming / F013 fallback chain)。本文件锁定这些装配不变量,防
 """
 from __future__ import annotations
 
-import asyncio
 import pathlib
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -24,7 +24,7 @@ from pyharness.core.session import SessionLog
 from pyharness.core.task_queue import Task
 from pyharness.core.tools_guard import (FORCED_GUARDS, ToolCall, _BUILTIN_IDS,
                                         _RULE_POLICY_REFS)
-from pyharness.engine import (_activate_storage_caps, _agent_ctx_of,
+from pyharness.engine import (_agent_ctx_of,
                               _owned_task_message, assemble_real_engine,
                               attach_engine_to_ctx, build_spine)
 
@@ -132,7 +132,7 @@ async def test_assemble_real_engine_ctx_shape(tmp_path):
     cfg = _cfg(tmp_path)
     ctx = await assemble_real_engine(
         cfg, sid="s-eng-asmb-000001",
-        sessions_dir=_sessions_dir(tmp_path))
+        sessions_dir=_sessions_dir(tmp_path), channel="cli")
     try:
         spine = ctx.engine_spine
         assert ctx.counters is spine.counters
@@ -485,3 +485,39 @@ async def test_s24_engine_adapter_derives_sync_from_vocab():
         "engine 适配器的 sync 取值必须逐类型等于 SYNC_TYPES 成员资格"
     assert got["policy.updated"] is True        # 治理层策略事件:强同步(Q3)
     assert got["scope.updated"] is False        # 运行时 scope 收紧:非强同步(Q1)
+
+
+async def test_engine_recorder_filters_foreign_session_events():
+    """R8:落盘订阅**必须**按 sid 过滤 —— 共享总线上不得把他会话事件写进本会话文件。
+
+    修复前实测:两个 spine 共用一条 bus,A 的 JSONL 里出现 B 的 ``session.created``
+    (桌面壳的同款订阅一直有该过滤并注明"过滤责任在订阅者",engine 侧长期缺失 ⇒
+    同一横切关注点两处实现、漏一处)。现两处都走
+    ``persistence.session_recorder`` 唯一实现。
+    """
+    from pyharness.engine import _record_to
+
+    class _Env:
+        def __init__(self, sid: str) -> None:
+            self.session_id = sid
+            self.type = "user.message"
+
+        def model_dump_json(self) -> str:            # noqa: D102 (Envelope 形状)
+            return "{}"
+
+    class _Rec:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        async def append(self, env: Any, sync: bool = False) -> None:
+            self.calls.append((env.session_id, sync))
+
+    rec = _Rec()
+    record = _record_to(rec, "s-eng-filter-0001")
+    await record("user.message", _Env("s-eng-filter-0001"))
+    await record("user.message", _Env("s-eng-other-0002"))     # 外来:必须丢
+    assert [c[0] for c in rec.calls] == ["s-eng-filter-0001"]
+
+    # 瞬时(非 Envelope)dict 载荷仍不进 append-only JSONL
+    await record("llm.chunk", {"delta": "x"})
+    assert len(rec.calls) == 1

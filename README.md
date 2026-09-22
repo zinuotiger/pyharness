@@ -1,18 +1,25 @@
 # PyHarness — DeepSeek Harness 的 Python 全功能复刻
 
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
-> 状态: 核心主链与用户入口接地完成 — 1,751 collected / 1,749 passed / 2 skipped(快照 2026-09-17;全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。
+> 状态: 核心主链与用户入口接地完成 — 2,110 collected / 2,106 passed / 0 failed / 4 skipped(快照 2026-09-21,持续优化轮 R1-R13 后;工作区未提交);全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。**默认 `pytest` 已无需 `--ignore`**(可选依赖缺失时显式 skip,不再 collection error)。
 
 ## 从 Agent Demo 到 Governed Agent Runtime（从智能体演示到治理型智能体运行时）
 
 > 多数 Agent 仓库停在「能跑通一次对话」。本项目把**运行时治理**当成一等公民：工具执行经
-> `authorize()` **唯一授权入口**（关 2，全库仅 2 处调用），guard **g1–g7 单调拒绝**
-> （可拒绝、不可放行），每次授权留下 `decision.issued` **决策留痕**；**放行或拒绝**时另发
-> `receipt.emitted` **可校验凭证**（带 `prev_hash` 链）；校验面为**库级 API**
-> （`pyharness.governance.verify_receipt`），**未接 CLI / HTTP / 工具外壳**。5 条架构不变量（INV-01~05）
-> 被转成**可执行断言**，并以 mutation 反证测试自身的鉴别力 —— 此处 INV-01~05 为
-> **运行时事实来源（runtime inventory）**，`docs/INVARIANT_REGISTRY.md` 的 INV-01~09 为编号层 / 历史记录。
-> 治理边界、残余风险与未实现项**如实公开**：[LIMITATIONS.md](LIMITATIONS.md)。
+> `authorize()` **唯一授权入口**（关 2，**AST 判定恰 1 处调用**），guard **g1–g7 单调拒绝**
+> （可拒绝、不可放行），每次授权留下 `decision.issued` **决策留痕**与 `receipt.emitted`
+> **可校验凭证**（带 `prev_hash` 链）。
+>
+> **读侧同样可达**：决策因果还原、被拒清单（含"拦了且没执行"的证据位）、一致性对账
+> （`SEQ-GAP` / `NO-GUARD-EVENT` / `NO-RECEIPT-FOR-GRANT`）、**凭证逐条重算核验**
+> ——全部经 `ApplicationService` → Web 路由 `/api/sessions/{sid}/governance-audit` 与原生壳
+> 审计页可达（`/api/sessions/{sid}/governance-evidence` 另有证据归档面）。LLM 出网有**单一闸**
+> （`LLMClient._egress_guard`，五个出口的唯一汇点）约束会话预算。
+>
+> 5 条架构不变量（INV-01~05）被转成**可执行断言**，并以 mutation 反证测试自身的鉴别力 ——
+> 此处 INV-01~05 为**运行时事实来源（runtime inventory）**，`docs/INVARIANT_REGISTRY.md` 的
+> INV-01~09 为编号层 / 历史记录。
+> 治理边界、**负空间**（明确"不治理"的部分）与未实现项**如实公开**：[LIMITATIONS.md](LIMITATIONS.md)。
 
 ## 从这里开始(Current State)
 
@@ -84,7 +91,7 @@
 - Web 顶栏 `⚙ 设置`、原生壳 `设置` 页都可以创建/切换租户并配置任意 OpenAI 兼容模型。
 - 每个租户拥有独立会话目录、技能目录、插件根目录和模型档案；同名模型使用独立适配器，禁止复用其他租户的 Key。
 - API Key 是只写字段：Windows 使用当前用户 DPAPI 加密，其他平台回退为 0600 文件；查询接口只返回 `has_api_key`，永不回显明文。
-- Web 通过 `X-PyHarness-Tenant` 请求头隔离会话，SSE 通过 `tenant` 查询参数绑定租户。
+- Web 通过 `X-PyHarness-Tenant` 声明租户、SSE 通过 `tenant` 查询参数绑定租户；`default` 之外的租户还须出示**该租户的令牌**（`~/.pyharness/tenants/<tenant>/token`，见 `docs/CFG.md` §9 与 ADR-023）。
 - Web 左侧会话列表支持右键删除：右键会话后在鼠标位置出现“删除会话”，二次确认后清理主 JSONL、轮转段和备份文件；运行中或队列有待处理任务的会话拒绝删除。
 - 模型配置修改后建议重启已有桌面进程；新启动的引擎按当前租户活动模型装配。
 - 当前隔离范围是应用级逻辑租户；插件/MCP 的进程级配置仍由部署者管理，不应把它当作恶意本地用户的强安全边界。
@@ -180,3 +187,7 @@ pyharness-native
 - 需求文档.md / 架构设计.md(早期草案,PRD-Core.md 为准)
 - TECH-ANCHOR.md(根目录,技术锚定 + 变更记录)
 - pyharness/(代码,按 specs/ 顺序实现中)
+
+---
+
+_文档时间戳：2026-09-21T13:45:00+08:00_

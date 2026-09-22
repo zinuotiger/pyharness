@@ -10,6 +10,14 @@
 3. **子任务执行与回收**:`_run_child` 把子意图交给 `agent_loop.run(sub_session, intent=spec.task, tools=spec.tools_subset)`(F007;子 session 有自己 idle/running 三态,不占用父会话 running);成功→`summarize(out, 2_000)` 摘要→父会话写 `subagent.joined(sub_id, summary)`;失败(PyHError/LLM-310/预算耗尽)→父会话写 `subagent.failed(sub_id, summary=含错误码原因)`。`join(sub_id, timeout)` 供主循环 await 回收结果,超时返回 None 由调用方决定继续/取消。
 4. **安全边界(子=分工非特权,SECURITY §3.5/§6.2)**:①子会话 scope = 父策略**快照且只可更紧**(继承 deny_tools/allowed_domains;spec.tools_subset/deny_extra 只收窄,无\"父级担保\"通道);②子任务内任何危险操作照走 F014/F015(同权 guard,审批照样弹);③凭据最小权限:spec.creds_allowed 列出子任务所需凭据名子集,未列出者子侧不可读(F016 读口按 spec 过滤);④子摘要(≤2KB)回主会话后以 tool-result 同等**数据身份**进入派生历史,永远成不了 system 指令;⑤child-first 清理:任何拆除路径(用户取消/父会话关闭/模块 detach)先终止全部在途子任务,防止子任务在父会话 finished 后回写 joined → EVT-104。
 5. **约束常量**:`MAX_DEPTH=3`、`MAX_CONCURRENT=8`(并发满→BUSY 拒新,语义同 JOB-001 族)、`DEFAULT_BUDGET_RATIO=0.25`(读 config `budget.subagent_ratio`)、`SUMMARY_MAX_CHARS=2_000`、child workspace 根=`~/.pyharness/workspaces/{sub_id}/`(F055 每会话独立根)。
+6. **子 workspace 契约补充(2026-09-21 补齐,M5.5 记为"N10-a 契约缺失")**:上文只给了**根的值**,未定义**谁供给该目录**。现冻结为:
+   - **落点**:`{storage.workspaces_dir}/{sub_id}` —— 与父根**同树**(不取兄弟目录),子树外一律不允许;派生经唯一函数 `scope.session_workspace`(禁止就地拼接)。
+   - **供给方**:子 scope 工厂 `_default_child_scope` 在构造子 scope 时**立即 mkdir**(与 `engine` 为会话根建目录同处),不依赖 guard/executor 隐式创建;建目录失败只告警**不降级** scope(否则子会话获得更宽的父策略)。
+   - **归属**:子会话独占写权;父会话**不**自动获得子根写权(子 `workspace_root` 被整体替换,父根不在其可见面)。
+   - **生命周期**:与子会话同生灭但**保留**目录（与证据保留一致);删除须走显式策略(H-1 类操作),不随子任务终态自动清理。
+   - **边界**:`resolve_in_workspace` 三闸(POL-FS-1/2/3)以**子** `workspace_root` 为唯一边界;越界 fail-closed `GRD-401`。
+   - **隔离**:多子任务按 `sub_id` 分根;`sub_id` 复用同一根即冲突(故 id 单调生成)。
+   - 回归锚:`tests/invariants/test_inv_context_and_paths.py`(落点/存在性/包含关系/消费者真跑)+ `tests/e2e/test_subagent_evidence_e2e.py`(子 `tool.result` 非 `tool.error`)。
 
 ## 依赖
 

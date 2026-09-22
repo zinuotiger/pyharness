@@ -190,7 +190,7 @@ async def create_message(sid, body):
     text = (body.get("text") or "").strip()
     if not text: raise_code("EVT-100", ctx={"advice": "消息不能为空"})        # 空消息拒写
     seq = await ctx.session.append("user.message", content=text, actor="user",
-                                   origin="desktop", sync=True)               # 强同步三类(F009)
+                                   origin="desktop", sync=True)               # 强同步事件(`SYNC_TYPES`)(F009)
     for ref in body.get("attachments", []):                                   # F061 图片附件寻址
         await ctx.session.append("user.attachment.image", ref=ref, actor="user")
     task_id = await ctx.task_queue.submit(text, meta={"channel": "desktop", "session_id": sid})
@@ -255,7 +255,7 @@ class DesktopBridge:
 关联测试:test_f065_desktop.py(bridge 方法可达性/无特权)。
 
 ### `def shutdown_gracefully(self) -> None` — 窗口关闭=优雅停服(F065 边界)
-功能:stopping 置位→停新订阅→hub 关闭→server.should_exit=True 停 uvicorn→webview.destroy→进程退出;强同步三类事件已在 append 时落盘(此处不依赖未 flush 数据,再兜底 flush 一次 persistence);SSE 客户端收到 close 事件。参数表:无。返回:None。
+功能:stopping 置位→停新订阅→hub 关闭→server.should_exit=True 停 uvicorn→webview.destroy→进程退出;强同步事件(`SYNC_TYPES`)已在 append 时落盘(此处不依赖未 flush 数据,再兜底 flush 一次 persistence);SSE 客户端收到 close 事件。参数表:无。返回:None。
 伪代码:
 ```python
 def shutdown_gracefully(self):

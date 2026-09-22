@@ -7,12 +7,15 @@ import json
 import logging
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyharness.errors import PyHError
 
 from .constants import BRIDGE_TIMEOUT_S
 from .projection import _jsonable
+
+if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需要)
+    from .app import DesktopApp
 
 log = logging.getLogger("pyharness.desktop.bridge")
 

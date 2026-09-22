@@ -268,13 +268,28 @@ class EvidenceCollector:
                         artifact_path=p.get("artifact_path"), ts="")
 
     def _task_at(self, seq: int) -> Optional[str]:
-        """该事件 seq 落在哪个段内(闭区间;未闭合段视为右端开放)。"""
+        """该事件 seq 落在哪个段内(闭区间;未闭合段**不得**向右无限延伸)。
+
+        段在时间轴上互不重叠且按 seq 递增开合,故判据 = **起点 ≤ seq 的最近一段**
+        (未闭合段的右界由此天然止于下一段起点之前)。
+
+        2026-09-21 R14-10:此前把未闭合段(崩溃现场:进程被杀 → ``_run_task`` 的
+        ``finally`` 未执行 → 无 ``segment.end``)的右界当作**无穷**,又按插入序遍历
+        ``_segments`` ⇒ 该段**吞掉其后所有任务的证据**(实测:未闭合的 taskA 之后,
+        taskB 的证据被算到 taskA 上,``collect_for_task("taskB")`` 返回空)。属**恢复
+        一致性**缺陷:崩溃重启后证据按任务查错。
+        """
+        best_task: Optional[str] = None
+        best_start = -1
         for task, (s, e) in self._segments.items():
-            if s is None or seq < int(s):
+            if s is None:
                 continue
-            if e is None or seq <= int(e):
-                return task
-        return None
+            s = int(s)
+            if s > seq or (e is not None and seq > int(e)):
+                continue
+            if s > best_start:                       # 起点最近者胜(段不重叠)
+                best_task, best_start = task, s
+        return best_task
 
     def _tasks_of(self, ev: Evidence) -> set[str]:
         """该证据归属的 task 集合(按引用解析;无法解析的引用被忽略)。"""

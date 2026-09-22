@@ -1,7 +1,6 @@
 """probe_scene3_roundA.py — 单回合 A 批准验证(隔离回合间干扰)。"""
 import asyncio, os, sys, shutil
 from pathlib import Path
-sys.path.insert(0, r'C:/Users/<user>/Desktop/mini-harness')
 from pyharness.config import load_settings
 from pyharness import engine
 from pyharness.core.task_queue import TaskQueue
@@ -25,7 +24,8 @@ async def main():
     await ctx.session.append("session.created",
                              {"title": "A批准", "model": cfg.llm.model},
                              actor="system", sync=True)
-    prompt = f"把 {SID}/{TARGET} 的内容改成 'v2 已更新'"
+    # 会话根即 agent 的 fs 根(F055:{workspaces_dir}/{sid}),目标用相对路径
+    prompt = f"把 {TARGET} 的内容改成 'v2 已更新'"
     await ctx.session.append("user.message", {"content": prompt},
                              actor="user", sync=True)
     q = TaskQueue(session=ctx.session, runner=ctx.make_runner())

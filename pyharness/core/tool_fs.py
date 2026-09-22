@@ -63,7 +63,7 @@ import stat as stat_mod
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pyharness.core.tools_registry import ToolDefinition  # noqa: F401 五要素字段源
 from pyharness.errors import PyHError, raise_code
@@ -105,10 +105,22 @@ _DOT_HIDDEN: tuple[str, ...] = (".", "..")
 
 # ---------------------------------------------------------------- 配置辅助
 def _cfg_get(ctx: Any, dotted: str, default: Any) -> Any:
-    """读 ctx.cfg 点分键(偏离 1:属性链与 dict 访问双兼容;未接线/缺键回落默认)。"""
-    cfg = getattr(ctx, "cfg", None)
+    """读 ctx 配置点分键(属性链与 dict 访问双兼容;未接线/缺键回落默认)。
+
+    2026-09-21 R11-7 修:此前**只认 `ctx.cfg`**,而装配层设的是 **`ctx.config`**
+    (`create_agent`)⇒ 本模块**所有配置阈值恒回落模块默认**:`loop.content.
+    file_spill_bytes`(读阈值)与 `security.policy.read_extra_dirs`(**只读例外目录**)
+    都不生效 —— 后者是安全相关面:运维配了例外目录仍会被拒(方向 fail-closed,但
+    文档承诺的授权能力不可达)。同族三处(session_query/spill/tool_web)一直兼容
+    `("cfg","config")` 两名字,**仅本处漏了一处判据**(同类第五次)。
+    """
+    cfg = None
+    for name in ("cfg", "config", "settings"):
+        cfg = getattr(ctx, name, None)
+        if cfg is not None:
+            break
     if cfg is None:
-        log.debug("ctx.cfg 未接线,配置键 %s 回落默认 %r", dotted, default)
+        log.debug("ctx 配置面未接线,配置键 %s 回落默认 %r", dotted, default)
         return default
     cur: Any = cfg
     for part in dotted.split("."):
@@ -215,16 +227,21 @@ def resolve_in_workspace(raw: str, ctx: Any, *, writable: bool = False) -> Path:
     root = _workspace_root(ctx)
     p = Path(str(raw)).expanduser()
     if p.is_absolute():
-        if not _under(p, root):                # POL-FS-1:绝对路径越界
+        # POL-FS-1:绝对路径越界 —— **只读例外目录**(security.policy.read_extra_dirs)
+        # 命中且本调用为只读时放行(A2/R24:此前该例外在 provider 层也不可达 ⇒ 配了仍拒)。
+        if not _under(p, root) and not (not writable
+                                        and _in_extra_read(p, ctx)):
             raise_code("GRD-401", reason="POL-FS-1", path=str(raw),
-                       advice="只允许 workspace 内路径(绝对路径越界)")
+                       advice="只允许 workspace 内路径(绝对路径越界;"
+                              "只读例外目录未命中)")
         cand = p
     else:
         cand = root / p                          # 相对路径锚定 workspace 根
     norm = Path(os.path.normpath(cand))
-    if not _under(norm, root):                   # POL-FS-2:".." 规范化逃逸
+    if not _under(norm, root) and not (not writable
+                                       and _in_extra_read(norm, ctx)):
         raise_code("GRD-401", reason="POL-FS-2", path=str(raw),
-                   advice="路径含 .. 越界")
+                   advice="路径含 .. 越界(只读例外目录未命中)")
     try:
         real = norm.resolve()                    # 解开 symlink/junction
     except OSError:

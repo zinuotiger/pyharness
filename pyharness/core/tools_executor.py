@@ -49,12 +49,12 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
    事件结构合法可审计(工具名非法/缺失时 name 回落 "?")。tool.result 的 spill_ref
    为完整 spill 引用 dict {ref, chars, lines, preview}(ToolResultPayload 模型锁定),
    ExecResult.spill_ref 同型;spec 伪码以 sp["ref"] 字符串作 spill_ref 弃用。
-5. _reject(scope-hidden 等 executor 侧终局拒)summary 统一 "guard 拒绝:…" 前缀
-   (DIS-CORE §7.3.2 的 "scope 拒绝" 弃用):F026 连败计数与审计 grep "guard 拒绝"
-   同口径,scope 前置拒绝本就属 GRD-401 守卫族。
-   **当前不在运行路径上**:S3-2-2 把 scope 前置的运行时所有权上提到
-   ``GuardChain._evaluate_full``,executor 不再自算 scope.can_use ⇒ ``self._reject(``
-   调用点为 0 处。本方法保留待独立处置(删除/接线),**不得视为第二条拒绝路径**。
+5. 终局拒的 summary 统一 "guard 拒绝:…" 前缀(DIS-CORE §7.3.2 的 "scope 拒绝"
+   弃用):F026 连败计数与审计 grep "guard 拒绝" 同口径,scope 前置拒绝本就属
+   GRD-401 守卫族。
+   **该路径的唯一所有者是 ``GuardChain._evaluate_full``**(S3-2-2 上提)。executor
+   侧原有的 ``_reject()`` 实现已于 2026-09-20 **删除**(GAP-12):它零调用点,且
+   保留会让 ``guard.rejected`` 出现第二个发射点,违反 INV-05 的唯一出口要求。
 6. 取消(F025)partial 事件以 ok=False + truncated=True + summary 标注 partial
    表达(ExecResult/ToolResultPayload 均无 partial 字段);EVENT-SCHEMA §3.4.6 注的
    "ok=True,truncated=True" 为另一口径,以 executor spec 职责 4(ok=False,
@@ -76,8 +76,7 @@ tools_guard(链),一切工具调用必经 execute——无旁路(INV-04)。
     PARAMETER-ANCHOR 的 64KB 行指 F034 读入截断/事件 payload 安全线 N3,非 executor
     摘要阈值);summary 上限 2000 字符(ToolResultPayload max_length=2048 留余量)。
 11. GRD-402 用 raise_code 上抛(spec 伪码直接构造 PyHError;码已登记,统一抛出入口
-    纪律);guard 链 reject 与审批重入新拒同样记入 _rejected(职责 6 广义防重放,
-    spec 伪码仅 scope-hidden/_reject 路径落记)。
+    纪律);guard 链 reject 与审批重入新拒同样记入 _rejected(职责 6 广义防重放)。
 12. 超时/异常消息用动态实际超时值(spec 伪码字面 "60s" 在 timeout_s 覆盖时失真),
    错误文本经 e.to_model_message()(errors.py 落地名;spec 伪码 to_llm_text 为
    ERR.md 文档名,同一函数两处命名,以实现为准)。
@@ -121,6 +120,9 @@ log = logging.getLogger("pyharness.tools_executor")
 DEFAULT_TOOL_TIMEOUT: int = 60          # F017 工具默认超时(PARAMETER-ANCHOR 锁定)
 SPILL_THRESHOLD: int = 2048             # 结果文本 >2KB → spill(F039,DIS-SEAM §6.1 G1)
 SUMMARY_MAX_CHARS: int = 2000           # tool.result summary ≤2KB(payload max 2048)
+# F026 轮内同工具连败终止阈值(CFG `loop.max_arg_failures_per_round` 默认 2;装配层注入,
+# 未注入时用本常量——保持"未装配=默认"语义,与 flush_interval_s 同款)
+DEFAULT_MAX_ARG_FAILURES: int = 2
 PARSE_FAIL_NAME: str = "?"              # 解析失败事件 name 回落值(缺工具名时,审计占位)
 _ZOMBIE_POOL_LIMIT: int = 32            # 僵尸线程池保留上限(超出即裁剪已空闲池)
 
@@ -271,10 +273,14 @@ class ToolExecutor:
     在途镜像(registry._running 是唯一真源,spec 结构表 _Running 由此兑现)。
     """
 
-    def __init__(self, registry: Optional[ToolRegistry] = None) -> None:
+    def __init__(self, registry: Optional[ToolRegistry] = None, *,
+                 max_arg_failures: int = DEFAULT_MAX_ARG_FAILURES) -> None:
         self._r: ToolRegistry = registry if registry is not None else ToolRegistry()
         self._rejected: set[str] = set()        # GRD-402 防重放(拒绝裁决记忆)
         self._fail: dict[str, int] = {}         # F026 轮内连败计数
+        # F026 终止阈值:装配层从 cfg.loop.max_arg_failures_per_round 注入
+        # (2026-09-21 修:此前恒硬编码 2,该配置键声明可调却零读取者)
+        self._max_arg_failures: int = max(1, int(max_arg_failures))
         self._out_models: dict[int, Any] = {}   # 输出契约编译缓存(id(defn) 键)
         self._active: Optional[asyncio.Future] = None   # cancel_current 在途句柄
         # 超时/取消后被驱逐的同步 Provider 线程池(线程仍在后台跑完副作用);
@@ -309,15 +315,18 @@ class ToolExecutor:
         self._fail.clear()
 
     def mark_turn_failure(self, name: str) -> int:
-        """同工具失败一次并返回累计次数(≥2 由批量入口终止该轮,F026)。"""
+        """同工具失败一次并返回累计次数(达阈值由批量入口终止该轮,F026)。"""
         key = str(name)
         n = self._fail.get(key, 0) + 1
         self._fail[key] = n
         return n
 
     def _check_fail_streak(self, name: str) -> bool:
-        """轮内同工具连败 ≥2 判定(spec 速览表;调用方终止该轮)。"""
-        return self._fail.get(str(name), 0) >= 2
+        """轮内同工具连败达阈值判定(F026;调用方终止该轮)。
+
+        阈值来自装配层注入(CFG `loop.max_arg_failures_per_round`,缺省 2)。
+        """
+        return self._fail.get(str(name), 0) >= self._max_arg_failures
 
     def rejected_ids(self) -> set[str]:
         """已裁决(拒绝)call_id 集(F031 自检/审计;GRD-402 防重放)。"""
@@ -640,23 +649,18 @@ class ToolExecutor:
                             "拒绝执行")
         return ApprovalRoundResult(decision=d2, approved=True, executed=True)
 
-    async def _reject(self, ctx: Any, call: ToolCall, guard_id: str,
-                      policy_ref: str) -> ExecResult:
-        """终局拒(executor 侧,如 scope-hidden):guard.evaluated + guard.rejected
-        (sync=True,强同步)+ 记 _rejected call_id(GRD-401 单调语义,INV-05)。
-        """
-        policy = policy_ref or "GRD-401"
-        await self._append(ctx, "guard.evaluated",
-                           {"tool": call.name, "decision": "deny",
-                            "guard_ids": [guard_id], "reasons": [policy]},
-                           actor="tool", trace={"call_id": call.call_id})
-        await self._append(ctx, "guard.rejected",
-                           {"tool": call.name, "guard_id": guard_id,
-                            "reason": policy, "policy_ref": policy},
-                           actor="tool", sync=True, trace={"call_id": call.call_id})
-        self._rejected.add(call.call_id)
-        return ExecResult(ok=False,
-                          summary=f"guard 拒绝:{guard_id}({policy}),未执行")
+    # ------------------------------------------------------------ 已删除:_reject
+    # GAP-12(2026-09-20):原 ``_reject()`` 已删除。取证口径:
+    #   ① 全库**零调用点**(仅有自身定义与三处说明性引用);
+    #   ② 它的语义(scope-hidden 终局拒 → guard.evaluated + guard.rejected +
+    #      记 _rejected)自 S3-2-2 起**已整体上移**到
+    #      ``GuardChain._evaluate_full``,由关 2 的唯一治理入口
+    #      ``authorize()`` 触发;
+    #   ③ 保留它的**风险**大于价值:它使 ``guard.rejected`` 存在**第二个发射点**,
+    #      而 INV-05 要求拒绝留痕只有一个出口;一旦有人"顺手接线",就会造出
+    #      绕过 ``decision.issued`` 的第二条拒绝路径(与 P2/P3 冲突)。
+    # 删除后 ``guard.rejected`` 的生产发射点**唯一** = ``tools_guard._append_rejected``,
+    # 由 ``tests/invariants/test_inv_context_and_paths.py`` 中的结构断言钉死。
 
     async def _on_error(self, ctx: Any, call: Any, code: str, message: str, *,
                         name: Optional[str] = None, call_id: Optional[str] = None,

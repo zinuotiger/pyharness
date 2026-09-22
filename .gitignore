@@ -21,6 +21,10 @@ dist/
 _commit_msg.txt
 collect_only.txt
 pytest_final.txt
+# 本机运行残留/私人记忆(预提交审计发现原先未被忽略 ⇒ git add -A 会误入库)
+sessions/
+archive/
+.mcp
 
 # S0/S1 临时证据产物(含本机路径与 junit XML,勿入库:仓库是 PUBLIC)
 tmp/
@@ -28,3 +32,14 @@ tmp/
 # portfolio 作品集资产(归属 zinuotiger/portfolio,非 PyHarness 仓库;勿入库)
 docs/governance.html
 docs/RUNTIME_GOVERNANCE_METHODOLOGY_v0.1.md
+
+# Audit Run 运行状态(M1-M5 orchestrator 的本地运行态,非项目产物;勿入库)
+.audit/
+
+# 技能资产:第三方/专有材料不入库(仓库是 PUBLIC)
+skills/pdf/
+skills/douyin/
+skills/office/
+skills/coding/
+skills/make-skill/
+skills/.skills

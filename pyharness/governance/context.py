@@ -60,21 +60,47 @@ class GovernanceContext:
     def principal_of(ctx: Any) -> Principal:
         """正式主体派生(M5/S4-P1-3):取自运行时**真实 caller/channel identity**。
 
-        ``ctx.channel`` 由各外壳在装配时**框架侧**写入(非客户端自报):
+        ``ctx.channel`` 由各外壳在装配时**框架侧**写入(非客户端自报),经
+        ``EngineSpine.channel`` → ``create_agent`` / ``_runtime_ctx`` 落到 agent
+        ctx(GAP-11 修复:此前该跳缺失,agent ctx 无 ``channel`` 属性,致每次授权
+        都静默降级为 SYSTEM):
 
         - CLI:``"cli"``;headless → ``None``(``cli.py``)
         - ACP:``"acp:<client_id>"``(``acp.py``;显式忽略客户端自报 ``by``)
-        - Desktop:``"desktop"``(``application/service.py``)
+        - Desktop:``"desktop"``(``application/service.py`` / ``desktop/app.py``)
 
         经**既有** ``Principal.from_legacy_by`` 统一解析(HUMAN + 通道 + id)。
 
-        ``channel`` 缺失/为空(headless、无人类通道)⇒ **明确的 SYSTEM 主体**
-        ——沿用 approval 侧 ``by="system"`` 的既有语义(非新规则),**绝不伪装**
-        HUMAN/AGENT,也不按 tool/verdict/approval 反推身份。未知通道格式 ⇒
-        ``APR-503`` fail-closed(**不静默降级**)。
+        **五态语义(N5 冻结;规范表见 ``core/channel.py`` 模块 docstring)**——
+        本层因 ADR-018:308 不得 import ``pyharness.core.*``,故**消费**本包已有的
+        ``Principal.from_legacy_by`` 分类,并由 ``tests/invariants`` 的真值表断言
+        与 ``core.channel.resolve_channel`` **逐状态一致**(沿用 ``HUMAN_CHANNELS``
+        的"受守卫的重复"先例):
+
+        1. ``channel="cli|web|acp:<id>|desktop"`` ⇒ HUMAN 主体(前缀匹配,``acp:<id>``
+           **保留 ACP 身份**,不降级);
+        2. ``channel`` **显式声明为 ``None``** ⇒ headless / 无人类通道 ⇒
+           **明确的 SYSTEM 主体**(沿用 approval 侧 ``by="system"`` 既有语义,
+           **绝不伪装** HUMAN/AGENT);
+        3. ``channel`` **属性缺失(从未声明)** ⇒ **``APR-503`` fail-closed**
+           ——"没人声明过这是什么通道"与"已声明无通道"是两件事;
+        4. ``channel`` 为**非白名单字符串**(如 ``"hacker"``)⇒ ``APR-503``;
+        5. ``channel`` 为**空串/非字符串**(如 ``""``)⇒ ``APR-503``
+           ——**修复点**:此前 ``ch or _FRAMEWORK_BY`` 的 falsy 短路会把 ``""``
+           **静默降级为 system**,与第 3/4 条的 fail-closed 精神相悖。
         """
+        if not hasattr(ctx, "channel"):
+            raise_code("APR-503",
+                       why="ctx.channel 未声明:通道身份缺失,禁止静默降级为 "
+                           "system(fail-closed)。外壳须显式声明 "
+                           "channel='cli'|'acp:<id>'|'desktop',或显式声明 "
+                           "headless(channel=None)。")
         ch = getattr(ctx, "channel", None)
-        return Principal.from_legacy_by(ch or _FRAMEWORK_BY)
+        if ch is None:                       # 显式 headless:唯一合法的无通道声明
+            return Principal.from_legacy_by(_FRAMEWORK_BY)
+        # 其余一律交既有分类:白名单/前缀合法 ⇒ HUMAN;空串/非白名单 ⇒ APR-503。
+        # 不再做 falsy 合并 —— 声明就是声明,不得被 `or` 改写。
+        return Principal.from_legacy_by(ch)
 
     async def authorize(self, call: Any, ctx: Any, *,
                         principal: Optional[Principal] = None,

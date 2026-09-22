@@ -3,20 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import inspect
-import json
 import logging
-import os
-import pathlib
 import re
 import secrets
+import stat
 import threading
-import time
-import uuid
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -24,13 +17,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pyharness.application import ApplicationService, ApplicationServiceRegistry
 from pyharness.core.approval import ApprovalProvider
-from pyharness.core.tenant_settings import (normalize_tenant_id,
+from pyharness.core.tenant_settings import (TenantSettingsStore,
+                                            normalize_tenant_id,
                                             session_tenants,
-                                            tenant_of_log)
+                                            tenant_of_log,
+                                            tenants_dir)
 from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 from pyharness.errors import PyHError, raise_code
-from pyharness.events import EVENT_TYPES, Envelope
-from pyharness.events.vocab import TRANSIENT_TYPES, validate_payload
+from pyharness.events import EVENT_TYPES
 
 # 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)
 # 字符集必须与 SessionLog 的 sid 合法面一致(sessions.validate_session_id =
@@ -41,38 +35,21 @@ _SESSION_ID_IN_PATH = re.compile(
     r"/(?:sessions|budget|approvals|asks)/(s-[0-9A-Za-z._-]+)")
 
 from .constants import (
-    BRIDGE_TIMEOUT_S,
-    CHANNEL,
-    HOST,
-    LISTEN_TIMEOUT_S,
     SSE_HEARTBEAT_S,
-    WARN_RATIO,
-    WINDOW_HEIGHT,
-    WINDOW_TITLE,
-    WINDOW_WIDTH,
     _STATUS_FOR_CODE,
 )
-from .net import pick_free_port, run_uvicorn, wait_listening_async, wait_until_listening
 from .projection import (
     EventStreamHub,
     StreamClient,
-    TimelineNode,
-    _env_dict,
-    approval_node,
-    derive_timeline,
     redact,
-    redact_args,
-    render_timeline_node,
 )
 from .sessions import (
     DesktopSessionManager,
     _SID_RE,
     _await,
     _cfg_of,
-    _plugin_within,
     _resolve_secret_value,
     _sessions_dir_of,
-    _surface_of,
     validate_session_id,
 )
 
@@ -110,6 +87,7 @@ class DesktopApp:
             allowed_hosts=["127.0.0.1", "localhost"],
             www_redirect=False)
         self._api_token = self._resolve_api_token()
+        self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)
         self.api.middleware("http")(self._tenant_middleware)
         self.mount_api()
         bus = getattr(ctx, "bus", None)
@@ -210,12 +188,10 @@ class DesktopApp:
         HEAD 版在 default 分区(即全局 sessions 目录)按目录归属放行,不认信封租户;
         本轮前版(按权威目录改判)更彻底 —— **任意头甚至不带头**都返回真实归属的数据
         (实测 `header=alpha/default/无` 于 beta 会话一律 200 + `BETA-ONLY`)。
-        头本身未认证(全局单 token)不是本函数能解决的边界(见 LIMITATIONS L-1),
-        但**服务端主动跨租户改判**是本函数必须守住的不变式。
+        **鉴权不由本函数负责**:R31-2 在中间件里先行把关(``_tenant_authorized``),
+        本函数只回答"这个会话的**权威归属**是谁",不回答"该主体**能否**用这个租户"。
         """
-        declared = normalize_tenant_id(
-            request.headers.get("x-pyharness-tenant")
-            or request.query_params.get("tenant") or "default")
+        declared = self._declared_tenant(request)
         sid = self._request_sid(request)
         if not sid:
             return declared                      # ① 无会话语境:头即声明
@@ -227,7 +203,101 @@ class DesktopApp:
             return declared                      # ⑤ 查无此会话(路由只会 404)
         return declared if declared in owners else None   # ④ 声明≠权威归属 ⇒ 拒
 
+    # ------------------------------------------------ 租户鉴权(R31-2)
+    def bootstrap_url(self, host: str, port: int) -> str:
+        """壳加载 UI 的 URL(**带操作者令牌**,R31-2)。
+
+        ``/`` 不再无条件发放全局令牌,故壳必须自证持有它。令牌走 URL 查询串而非页面
+        meta:它随即被换成 HttpOnly cookie(JS 不可读、不进 DOM/日志),与既有 P1-2
+        口径一致。URL 构造收在此处,供两处启动路径共用(免第二份实现漂移)。
+        """
+        base = f"http://{host}:{port}/"
+        return f"{base}?token={self._api_token}" if self._api_token else base
+
+    @staticmethod
+    def _declared_tenant(request: Request) -> str:
+        """客户端**声明**的租户(头优先,其次 ``?tenant=``,缺省 ``default``)。"""
+        return normalize_tenant_id(
+            request.headers.get("x-pyharness-tenant")
+            or request.query_params.get("tenant") or "default")
+
+    def _tenant_store(self) -> Optional[TenantSettingsStore]:
+        """租户令牌库;派生点与 ``ApplicationService`` 同为 ``tenants_dir(root)``。
+
+        拿不到 ``storage.root``(鸭子类型 ctx / 无配置)⇒ ``None`` ⇒ 调用方按
+        **无法校验** 处理(fail-closed),而不是回落放行。
+        """
+        if self._tstore is None:
+            root = self._storage_root()
+            if root is None:
+                return None                 # fail-closed:无 root 即无法校验
+            self._tstore = TenantSettingsStore(tenants_dir(root))
+        return self._tstore
+
+    def _verify_tenant_token(self, tenant: str, given: str) -> bool:
+        """校验租户令牌;无令牌库 ⇒ ``False``(**fail-closed**)。"""
+        store = self._tenant_store()
+        return bool(store) and store.verify_token(tenant, given)
+
+    @staticmethod
+    def _presented_token(request: Request) -> str:
+        """请求出示的**全局**令牌(头 / Bearer / cookie / ``?token=``)。"""
+        hdrs = getattr(request, "headers", None) or {}
+        given = hdrs.get("x-pyharness-token") or ""
+        auth = hdrs.get("authorization") or ""
+        if not given and auth.lower().startswith("bearer "):
+            given = auth[7:].strip()
+        if not given:
+            given = (getattr(request, "cookies", None) or {}).get(
+                "pyharness_token", "") or ""
+        if not given:
+            given = str((getattr(request, "query_params", None) or {}).get("token") or "")
+        return str(given)
+
+    @staticmethod
+    def _presented_tenant_token(request: Request) -> str:
+        """请求出示的**租户**令牌:头 / 同名 cookie / ``?token=``(壳加载 URL)。"""
+        hdrs = getattr(request, "headers", None) or {}
+        cookies = getattr(request, "cookies", None) or {}
+        qp = getattr(request, "query_params", None) or {}
+        return str(hdrs.get("x-pyharness-tenant-token")
+                   or cookies.get("pyharness_tenant_token")
+                   or qp.get("token") or "")
+
+    def _operator_ok(self, request: Request) -> bool:
+        """是否持有全局(操作者)令牌;未配置令牌时视为放行(沿用既有语义)。"""
+        expected = self._api_token
+        if not expected:
+            return True
+        given = self._presented_token(request)
+        return bool(given) and secrets.compare_digest(given, expected)
+
+    def _tenant_authorized(self, request: Request, tenant: str) -> bool:
+        """**鉴权(R31-2)**:声明 ``default`` 沿用全局令牌(路由依赖再强制一次);
+        声明非 default ⇒ 必须出示**该租户**的令牌。
+
+        为什么 default 放行:它是**兼容口** —— 桌面壳与既有客户端只持全局令牌,
+        若 default 也要租户令牌,引导页与全部既有流程即刻断。收益全在非 default:
+        此前任何人只要**报对租户名**即可进入(只有归属校验 R31-1,没有资格校验)。
+        """
+        if tenant == "default":
+            return True
+        return self._verify_tenant_token(
+            tenant, self._presented_tenant_token(request))
+
     async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
+        # ① 鉴权先行:未出示 / 出示错误的本租户令牌 ⇒ 401。**先于**归属判定,故不会向
+        #    未授权方泄露"该租户下是否存在某会话"(403 与 404 之差即是信息)。
+        declared = self._declared_tenant(request)
+        # 引导页 ``/`` **自带**更细的凭证规则(持操作者令牌者可铸所声明租户的令牌),
+        # 故此处放行 —— 否则中间件先 401,铸令牌那条路径根本到不了(实测)。
+        if request.url.path != "/" and not self._tenant_authorized(request, declared):
+            return JSONResponse(status_code=401, content={
+                "code": "CRED-701",
+                "advice": f"租户 {declared} 需要该租户的 API 令牌"
+                          "(X-PyHarness-Tenant-Token,或 /?tenant= 下发的 cookie);"
+                          "default 租户沿用全局令牌"})
+        # ② 归属判定(R31-1):不可得 / 歧义 / 与声明不符 ⇒ 403
         tenant = self.resolve_request_tenant(request)
         if tenant is None:
             # 归属不可得 / 歧义 / 声明与权威归属不符 ⇒ **拒绝**;一律不按客户端自报头
@@ -300,8 +370,58 @@ class DesktopApp:
         self.service._surface = value
 
     # ------------------------------------------------ API 鉴权
+    def _storage_root(self) -> Optional[Path]:
+        """``storage.root``;鸭子类型 ctx / 无配置 ⇒ ``None``(调用方 fail-closed)。"""
+        try:
+            return Path(str(_cfg_of(self.ctx).storage.root)).expanduser()
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def publish_operator_token(self) -> Optional[Path]:
+        """把**本进程生成**的操作者令牌落盘,供浏览器/外部客户端取用。
+
+        ``R31-2`` 的配套。引导页按 ADR-023 不再向无凭证调用方发放令牌,而
+        ``shell.web.token`` 未配置时令牌是**进程随机**且从不打印 ⇒ 浏览器用户无从
+        取得,该入口等于关闭(实测:改动后浏览器访问 401 且无处可查)。故生成态令牌
+        落盘到 ``<storage.root>/web.token``(与租户令牌 ``tenants/<t>/token`` 同口径)。
+        **不写日志、不进 API 响应**;调用方只应记录**路径**。
+
+        **权限(2026-09-21 UI 验收实测更正)**:代码调用 ``chmod(0o600)``,但
+
+        - **POSIX**:生效,文件为 ``0600``。
+        - **Windows**:``chmod`` **不生效** —— 实测 ``stat.S_IMODE`` 仍为 ``0o666``
+          (NTFS 不存 POSIX 权限位)。实际可读面由**父目录 ACL 继承**决定:
+          ``%USERPROFILE%`` 下的 ``.pyharness`` 默认只含当前用户 + SYSTEM +
+          Administrators(等效"仅属主");若该目录被外部工具**额外授权**给别的组(本机实测存在
+          一条 ``CodexSandboxUsers:(OI)(CI)(RX)``),本文件会**继承**该授权。
+          故 Windows 上**不得**声称"0600";要收紧须显式改 ACL(未做,见 ADR-023
+          的已知边界)。
+
+        配置了 ``shell.web.token`` 时**不落盘** —— 用户已知该值,没必要多一份副本。
+        返回落盘路径;非生成态 / 取不到 ``storage.root`` ⇒ ``None``。
+        """
+        if not (self._api_token and self._api_token_generated):
+            return None
+        root = self._storage_root()
+        if root is None:
+            return None
+        p = root / "web.token"
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(self._api_token, encoding="utf-8")
+            tmp.replace(p)                                # pathlib 原子替换
+            p.chmod(stat.S_IRUSR | stat.S_IWUSR)          # POSIX 0600;Windows 无效(见 docstring)
+        except OSError:
+            return None
+        return p
+
     def _resolve_api_token(self) -> str:
-        """API token:配置 shell.web.token(env:/file: 引用)优先,缺省进程级随机令牌。"""
+        """API token:配置 shell.web.token(env:/file: 引用)优先,缺省进程级随机令牌。
+
+        同时记录 ``_api_token_generated``:随机态下该令牌**无处可查**,须由
+        :meth:`publish_operator_token` 落盘,否则浏览器/外部客户端无从取得。
+        """
         raw = ""
         cfg = _cfg_of(self.ctx)
         try:
@@ -310,6 +430,7 @@ class DesktopApp:
         except Exception:                                # noqa: BLE001 非 Settings 形状
             raw = ""
         val = _resolve_secret_value(raw)
+        self._api_token_generated = not bool(val)
         return val if val else secrets.token_hex(16)
 
     def _require_api_auth(self, request: Request,
@@ -331,10 +452,20 @@ class DesktopApp:
             given = authorization[7:].strip()
         if not given:
             given = (request.cookies or {}).get("pyharness_token", "") or ""
-        if not given or not secrets.compare_digest(given, expected):
+        ok = bool(given) and secrets.compare_digest(given, expected)
+        if not ok:
+            # ``R31-2``:非 default 租户可用**该租户令牌**通过本依赖。租户**授权**已在
+            # 中间件强制(它先跑);此处只是第二层,不代替它 —— 只有租户令牌、没有全局
+            # 令牌的浏览器因此可用,而它拿不到全局令牌,故换不到别的租户的 cookie。
+            tenant = self.current_tenant()
+            ok = (tenant != "default"
+                  and self._verify_tenant_token(
+                      tenant, self._presented_tenant_token(request)))
+        if not ok:
             raise_code("CRED-701", reason="api-token",
                        hint="缺少或非法 API token"
-                            "(X-PyHarness-Token / Bearer / pyharness_token cookie)")
+                            "(X-PyHarness-Token / Bearer / pyharness_token cookie;"
+                            "非 default 租户亦可出示该租户令牌)")
 
     # ------------------------------------------------ 总线订阅(偏离 4)
     def _subscribe_all(self, bus: Any) -> list:
@@ -544,15 +675,45 @@ class DesktopApp:
                                      "detail": {"type": type(exc).__name__}})
 
     # ------------------------------------------------ 页面(前端入口)
-    def _index_page(self) -> HTMLResponse:
+    def _index_page(self, request: Request) -> HTMLResponse:
         """根路由:加载内嵌前端页(会话列表/对话/轨迹时间线/审批/预算)。
 
         前端文件打包为 data 资源:源码运行读 pyharness/ui/index.html;PyInstaller
         打包时 --add-data 携带同相对路径(_MEIPASS 下亦命中);缺失 → 兜底提示页。
         API token 不再明文注入页面 meta(P1-2 收紧,防 DOM/日志泄漏):改 HttpOnly
-        cookie 下发,JS 不可读、同源 fetch/SSE 自动携带;cookie 化/SSO 迁移留待
-        下一批(前端仍兼容读取 meta 的旧逻辑,缺口即无 token 时回落 cookie)。
+        cookie 下发,JS 不可读、同源 fetch/SSE 自动携带。
+
+        ``R31-2``:本页**不再无条件发放**全局令牌 —— 它此前是"任何本机进程 GET / 即
+        得令牌"的免费发放点,而有了租户令牌后,拿到全局令牌即可换取**任意租户**的
+        cookie,授权面当场作废。现在必须出示凭证之一:全局(操作者)令牌,或**所声明
+        租户**的租户令牌。声明了非 default 租户且校验通过时,一并下发该租户 cookie,
+        前端无需改动即可继续用 ``X-PyHarness-Tenant`` 走查(租户令牌随 cookie 自动
+        携带)。凭证既可走头/cookie,也可走 ``?token=``(壳加载 URL 用)。
+
+        ``R31-2 创建路径``:**持操作者令牌 + 声明某租户 ⇒ 铸/取该租户令牌**。
+        没有这一条,非 default 租户既无令牌可出示、又无任何生产路径可生成
+        (``api_token()`` 在别处零调用)⇒ 该租户**永远 401**(UI 验证实测:租户
+        边界用例只能靠手工创建令牌文件才能跑起来)。
+        这**不放宽**边界:操作者令牌本就等同"同用户文件访问"这一既成信任级
+        (能读 ``~/.pyharness/web.token`` 者本就能直读全部会话与租户令牌);
+        租户令牌的价值仍在**可外发的最小凭证** —— 可单独交给外部客户端,
+        而它**换不到**别的租户(见 :meth:`_tenant_authorized`)。
         """
+        declared = self._declared_tenant(request)
+        tenant_tok = self._presented_tenant_token(request)
+        operator = self._operator_ok(request)
+        tenant_ok = (declared != "default"
+                     and self._verify_tenant_token(declared, tenant_tok))
+        if operator and declared != "default":
+            store = self._tenant_store()        # 操作者 ⇒ 可铸所声明租户的令牌
+            if store is not None:
+                tenant_tok = store.api_token(declared)
+                tenant_ok = True
+        if not (operator or tenant_ok):
+            return JSONResponse(status_code=401, content={
+                "code": "CRED-701",
+                "advice": "引导页需要凭证:全局 API token,或所声明租户的租户令牌"
+                          "(?token=/头/cookie);见 docs/CFG.md 租户模型设置"})
         try:
             import importlib.resources as _ir
             html = _ir.files("pyharness.ui").joinpath("index.html").read_text(
@@ -569,8 +730,11 @@ class DesktopApp:
                         "<div><h2>PyHarness Desktop</h2>"
                         "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
         resp = HTMLResponse(html)
-        if self._api_token:
+        if self._api_token and operator:
             resp.set_cookie("pyharness_token", self._api_token,
+                            httponly=True, samesite="strict", path="/")
+        if tenant_ok:
+            resp.set_cookie("pyharness_tenant_token", tenant_tok,
                             httponly=True, samesite="strict", path="/")
         return resp
 

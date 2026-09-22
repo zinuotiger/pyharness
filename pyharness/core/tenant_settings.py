@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 from ctypes import wintypes
 from datetime import datetime, timezone
@@ -43,6 +44,16 @@ def normalize_profile_id(value: Any) -> str:
         raise_code("EVT-100", field="profile_id", profile=profile,
                    advice="profile_id 仅允许 1-64 位字母/数字/._-")
     return profile
+
+
+def tenants_dir(storage_root: Any) -> Path:
+    """**租户根目录的唯一派生点**:``<storage.root>/tenants``。
+
+    R31-2:此前该表达式在 ``TenantSettingsStore`` 的构造处各写一遍;而 per-tenant
+    鉴权也要定位同一目录下的 ``token`` 文件,再抄一遍就又是一个"同源规则多份实现"
+    (R14-3 教训)。故收口到此,读写两侧共用。
+    """
+    return Path(str(storage_root)).expanduser() / "tenants"
 
 
 class _DataBlob(ctypes.Structure):
@@ -86,6 +97,64 @@ class TenantSettingsStore:
 
     def tenant_dir(self, tenant_id: str) -> Path:
         return self.root / normalize_tenant_id(tenant_id)
+
+    # ---------------------------------------------------------- per-tenant 令牌
+    def token_path(self, tenant_id: str) -> Path:
+        """本租户 API 令牌文件(**读写唯一落点**):``<tenants>/<t>/token``。"""
+        return self.tenant_dir(tenant_id) / "token"
+
+    def api_token(self, tenant_id: str) -> str:
+        """读取本租户令牌;不存在则**生成**(32 字节 hex,原子写 + ``chmod 0600``,后者仅 POSIX 生效)。
+
+        R31-2:per-tenant 鉴权的凭证。**创建路径 = 引导页持操作者令牌时铸/取**
+        (``DesktopApp._index_page``);运维也可直接读取该文件交给外部客户端。
+        **不落日志、不进 API 响应**。
+
+        权限:POSIX 上为 0600;**Windows 上 ``chmod`` 不生效**,可读面由父目录 ACL
+        继承决定(见 ``DesktopApp.publish_operator_token`` 的实测说明)。
+
+        ``default`` 租户**不使用**本机制(沿用全局 ``shell.web.token``,保兼容),
+        故调用方只对非 default 租户取用。
+        """
+        p = self.token_path(tenant_id)
+        try:
+            if p.is_file():
+                tok = p.read_text(encoding="utf-8").strip()
+                if tok:
+                    return tok
+        except OSError:
+            pass
+        tok = secrets.token_hex(32)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)   # 生成=显式行为,可建目录
+        except OSError:
+            pass
+        self._atomic_write(p, tok.encode("utf-8"))
+        try:
+            os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)     # POSIX 0600;Windows 无效(见 docstring)
+        except OSError:
+            pass
+        return tok
+
+    def verify_token(self, tenant_id: str, given: str) -> bool:
+        """常数时间比对;未出示 / 无令牌文件 / 不匹配 → ``False``(**只读**)。
+
+        刻意**不调用** :meth:`api_token`:校验发生在**未认证**的请求路径上,若在那里
+        "读不到就生成",任意人报一个租户名即可凭空造出令牌与目录(且能读到自己的
+        Set-Cookie),整条授权即为空转。故校验只读,生成只走壳/运维。
+        """
+        if not given:
+            return False
+        p = self.token_path(tenant_id)
+        try:
+            if not p.is_file():
+                return False
+            expected = p.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        if not expected:
+            return False
+        return secrets.compare_digest(str(given), expected)
 
     def _paths(self, tenant_id: str) -> tuple[Path, Path]:
         d = self.tenant_dir(tenant_id)
@@ -365,7 +434,6 @@ def tenant_of_log(path: Any) -> str:
     客户端自报头。
     """
     import json as _json
-    import os as _os
     from pathlib import Path as _Path
 
     p = _Path(str(path))
@@ -475,6 +543,7 @@ __all__ = [
     "register_tenant_store",
     "resolve_tenant_secret",
     "tenant_for_session",
+    "tenants_dir",
     "unregister_session_tenant",
     # 租户事件可见性唯一判据与派生点(两壳共用,2026-09-21)
     "event_tenant_of",

@@ -1,7 +1,6 @@
 """probe_tools_call.py — 真 LLM + tools 参数探测(看 DeepSeek 拒绝原因)。"""
 import asyncio, json, os, sys, tempfile
 from pathlib import Path
-sys.path.insert(0, r'C:/Users/<user>/Desktop/mini-harness')
 from pyharness.config import load_settings
 from pyharness import engine
 

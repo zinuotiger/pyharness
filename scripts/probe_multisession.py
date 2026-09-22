@@ -1,7 +1,6 @@
 """probe_multisession.py — 验证桌面多会话不串文件。"""
 import asyncio, os, sys, tempfile
 from pathlib import Path
-sys.path.insert(0, r'C:/Users/<user>/Desktop/mini-harness')
 from pyharness.bus import EventBus
 from pyharness.core.session import SessionLog, open_session
 from pyharness.core.approval import ApprovalProvider

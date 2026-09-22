@@ -62,7 +62,7 @@ class TodoManager:
                        advice=f"op ∈ {_OPS}")
         if op == "list":
             return self._render(tid)
-        sess = self._require_session()
+        self._require_session()
         items = self._todos.setdefault(tid, [])
         if op == "add":
             text = str(text or "").strip()

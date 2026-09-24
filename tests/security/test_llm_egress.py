@@ -154,5 +154,5 @@ async def test_tool_governance_chain_untouched(llm_env, authorize_call_sites):
     仓库已实际踩过这个坑)。
     """
     sites = authorize_call_sites()
-    assert sites == ["pyharness/core/tools_executor.py"], \
+    assert len(sites) == 1 and sites[0]["file"] == "pyharness/core/tools_executor.py", \
         f"governance.authorize() 调用点被改动: {sites}"

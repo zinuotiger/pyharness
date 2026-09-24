@@ -29,6 +29,58 @@ from pyharness.config import Settings, load_settings          # noqa: E402
 from pyharness.core import llm as llm_mod                     # noqa: E402
 from pyharness.core.task_queue import TaskQueue                # noqa: E402
 from pyharness.engine import assemble_real_engine              # noqa: E402
+from tests.support import isolated_settings                   # noqa: E402
+
+
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'controlled_process: explicitly permits test-owned subprocesses')
+
+
+@pytest.fixture(autouse=True)
+def isolated_process_environment(tmp_path_factory, monkeypatch, request):
+    """Every test starts without host configuration or external capabilities."""
+    import ipaddress
+    import socket
+    import subprocess
+    root = tmp_path_factory.mktemp('test-environment')
+    for key in list(os.environ):
+        if key.startswith('PH_'):
+            monkeypatch.delenv(key)
+    for name in ('HOME', 'USERPROFILE', 'TMP', 'TEMP', 'XDG_CACHE_HOME'):
+        path = root / name.lower()
+        path.mkdir()
+        monkeypatch.setenv(name, str(path))
+    cfg = root / 'config.yaml'
+    cfg.write_text('{}\n', encoding='utf-8')
+    monkeypatch.setenv('PH_CFG_PATH', str(cfg))
+    connect, connect_ex, resolve = socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo
+    def check(host):
+        if isinstance(host, bytes):
+            host = host.decode('ascii')
+        if host == 'localhost':
+            return
+        try:
+            if ipaddress.ip_address(host.split('%')[0]).is_loopback:
+                return
+        except (ValueError, AttributeError):
+            pass
+        raise PermissionError('test boundary: non-loopback network denied')
+    def guarded_connect(sock, address):
+        if isinstance(address, tuple): check(address[0])
+        return connect(sock, address)
+    def guarded_connect_ex(sock, address):
+        if isinstance(address, tuple): check(address[0])
+        return connect_ex(sock, address)
+    def guarded_resolve(host, *args, **kwargs):
+        if host is not None: check(host)
+        return resolve(host, *args, **kwargs)
+    monkeypatch.setattr(socket.socket, 'connect', guarded_connect)
+    monkeypatch.setattr(socket.socket, 'connect_ex', guarded_connect_ex)
+    monkeypatch.setattr(socket, 'getaddrinfo', guarded_resolve)
+    if request.node.get_closest_marker('controlled_process') is None:
+        def denied(*args, **kwargs):
+            raise PermissionError('test requires explicit controlled_process marker')
+        monkeypatch.setattr(subprocess, 'Popen', denied)
 
 
 class ScriptedAdapter:
@@ -86,12 +138,7 @@ class ScriptedAdapter:
 
 
 def e2e_settings(tmp: Path, *, preset: str | None = None) -> Settings:
-    cfg = load_settings()
-    cfg.storage.root = str(tmp)
-    cfg.storage.sessions_dir = str(tmp / "sessions")
-    cfg.storage.workspaces_dir = str(tmp / "workspaces")
-    cfg.storage.spill_dir = str(tmp / "spill")
-    cfg.storage.db_path = str(tmp / "index.db")
+    cfg = isolated_settings(tmp)
     if preset is not None:
         cfg.security.policy.preset = preset      # 例:"standard" 让 exec.* 可达
     return cfg
@@ -149,7 +196,7 @@ class E2ESession:
     async def run(self, intent: str, *, timeout: float = 25.0):
         await self.ctx.session.append("user.message", {"content": intent},
                                       actor="user", sync=True)
-        q = TaskQueue(self.ctx.session, runner=self.ctx.task_runner, max_queue=8)
+        q = self.ctx.task_queue
         tid = await q.submit(intent)
         self.last_task_id = tid
         return await asyncio.wait_for(q.wait_for(tid), timeout=timeout)
@@ -157,26 +204,29 @@ class E2ESession:
     # ------------------------------------------------------------ 持久化读回
     async def replay(self) -> list[str]:
         from pyharness.core.session import open_session
-        from pyharness.persistence import open_store
+        from pyharness.persistence import SessionReader
         store = self.ctx.engine_spine.persistence
         flush = getattr(store, "flush", None)
         if callable(flush):
             r = flush()
             if hasattr(r, "__await__"):
                 await r
-        store2 = open_store(self.sid, dir=self.tmp / "sessions")
+        store2 = SessionReader(self.sid, dir=self.tmp / "sessions")
         log2 = await open_session(self.sid, store2)
         return [e.type for e in log2.events_after(0)]
 
     async def close(self) -> None:
+        errors = []
         try:
             await self.ctx.engine_spine.close()
-        except Exception:                        # noqa: BLE001 收尾尽力
-            pass
+        except BaseException as exc:
+            errors.append(exc)
         try:
             self.ctx.scope.release()
-        except Exception:                        # noqa: BLE001 收尾尽力
-            pass
+        except BaseException as exc:
+            errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup('E2E resource cleanup failed', errors)
 
 
 @pytest.fixture
@@ -187,24 +237,8 @@ def authorize_call_sites():
     grep 误判为调用点(本仓库已实际发生一次)。AST 只看真实 Call 节点,且要求
     接收者是名为 ``governance`` 的属性 ⇒ 既不会漏,也不会被文档字符串骗过。
     """
-    import ast as _ast
-
-    def _scan(root: Path | None = None) -> list[str]:
-        base = (root or Path(__file__).resolve().parents[1]) / "pyharness"
-        out: set[str] = set()
-        for p in sorted(base.rglob("*.py")):
-            tree = _ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
-            for n in _ast.walk(tree):
-                if not isinstance(n, _ast.Call):
-                    continue
-                f = n.func
-                if (isinstance(f, _ast.Attribute) and f.attr == "authorize"
-                        and isinstance(f.value, _ast.Attribute)
-                        and f.value.attr == "governance"):
-                    out.add(str(p.relative_to(base.parent)).replace("\\", "/"))
-        return sorted(out)
-
-    return _scan
+    from scripts.check_authorization import scan
+    return scan
 
 
 @pytest.fixture
@@ -228,5 +262,11 @@ async def e2e_factory(tmp_path, adapter_factory):
         return s
 
     yield _make
+    errors = []
     for s in made:
-        await s.close()
+        try:
+            await s.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup('E2E factory cleanup failed', errors)

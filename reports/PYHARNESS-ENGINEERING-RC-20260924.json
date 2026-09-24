@@ -1,0 +1,649 @@
+{
+  "candidate_branch": "codex/pyharness-engineering-rc-20260924",
+  "base_commit": "41d74db15f47bee5813976bd11435dff1be166ef",
+  "final_commits": [
+    "HEAD (resolve with git rev-parse HEAD after local commit)"
+  ],
+  "verification_stage": "reviewed-precommit-source",
+  "candidate_manifest_sha256": "dc1680b2ca310e9de505252a1d130a039a17c4bd1a1da19ec85f29754951ea26",
+  "candidate_manifest_scope": "Canonical JSON [{path,sha256}] sorted by path, excluding reports/ to avoid self-reference; full private classification manifest is separate.",
+  "source_test_manifest_sha256": "63ee6897655b2c1a4120c7667e043a11d958910f5d75db46ce0cd9558c5842e0",
+  "source_test_manifest_scope": "Canonical sorted JSON mapping of pyharness/, tests/, scripts/, .github/, pyproject.toml and uv.lock from actual tested export.",
+  "pytest": {
+    "collected": 2383,
+    "passed": 2364,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 19,
+    "warnings": 5,
+    "duration": 138.884,
+    "exit_code": 0
+  },
+  "skip_details": [
+    {
+      "test": "tests.integration.test_evleven_r1::test_real_handshake_allowlist_and_graceful_shutdown",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_configured_denial_survives_assembly_and_preset",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[deny]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[timeout]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[cancel]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[memory_create-args0-TLB-803-False]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[not_a_tool-args1-TLB-802-False]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[memory_read-args2-TLB-805-True]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_protocol_errors_and_server_validation_remain_distinct",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[missing]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[bad_start]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[disconnect]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_cancelled_inflight_request_retires_connection",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_real_http_fresh_process_cross_session_memory",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_lost_write_ack_is_unknown_and_reconciled_without_retry[timeout]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.integration.test_evleven_r1::test_lost_write_ack_is_unknown_and_reconciled_without_retry[cancel]",
+      "reason": "Provision pinned local evleven R1 wheel first"
+    },
+    {
+      "test": "tests.unit.test_llm::test_cred702_loose_credential_permission_is_rejected",
+      "reason": "Windows mode 位无安全含义（ACL 尽力而为），本检查仅 POSIX 生效"
+    },
+    {
+      "test": "tests.unit.test_spill.TestEnter::test_mode_600",
+      "reason": "Windows ACL 尽力而为(spec)"
+    },
+    {
+      "test": "tests.unit.test_spill.TestRead::test_symlink_escape_zero_read",
+      "reason": "无符号链接权限(Windows 需管理员/开发者模式)"
+    }
+  ],
+  "coverage": {
+    "percent": 83.41711019120835,
+    "gate": 75,
+    "passed": true
+  },
+  "evleven_r1": {
+    "collected": 16,
+    "passed": 16,
+    "failed": 0,
+    "skipped": 0,
+    "duration": 42.689,
+    "exit_code": 0,
+    "artifacts": {
+      "evleven-1.1.0-py3-none-any.whl": "40d5cbd5ae312b4bb3af133405807fb9764653b95145a80e4633bed17039ea2e",
+      "delivery-manifest.json": "73b0614848d54546d4d1cf89e6f37649a9126e516eec0d2dc9b67ca1a07bdc80",
+      "constraints.txt": "f1dfe007e5296cf0d3120d8cfab6cf73d1841e39dac8375ad559c8d14984fd5e"
+    },
+    "counting": "Separate dedicated suite; 16 ordinary-suite skips are not counted as passes."
+  },
+  "high_risk": {
+    "collected": 161,
+    "passed": 161,
+    "test_ids": [
+      "tests.unit.test_rc_ownership_regressions::test_stdio_close_survives_repeated_cancellation",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_workspace_failure_releases_store",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[False-False]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[False-True]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[True-False]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[True-True]",
+      "tests.unit.test_rc_ownership_regressions::test_assemble_activation_failure_rolls_back_owned_spine[False]",
+      "tests.unit.test_rc_ownership_regressions::test_assemble_activation_failure_rolls_back_owned_spine[True]",
+      "tests.unit.test_rc_ownership_regressions::test_attach_activation_failure_does_not_close_borrowed_store",
+      "tests.unit.test_rc_ownership_regressions::test_stdio_failed_cleanup_can_be_retried",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[False]",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[True]",
+      "tests.unit.test_remediation_credentials::test_F01_unconfigured_tenant_cannot_inherit_host_model",
+      "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-env:SYNTHETIC_HOST]",
+      "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-file:synthetic-host]",
+      "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key-env:SYNTHETIC_HOST]",
+      "tests.unit.test_remediation_credentials::test_F01_old_unsafe_profile_denied_before_secret_read",
+      "tests.unit.test_remediation_credentials::test_F13_direct_to_reference_and_clear",
+      "tests.unit.test_remediation_credentials::test_F13_metadata_failure_keeps_old_secret",
+      "tests.unit.test_remediation_credentials::test_F13_endpoint_change_cannot_reuse_secret",
+      "tests.unit.test_remediation_credentials::test_R02_atomic_write_uses_exclusive_private_temp",
+      "tests.unit.test_remediation_credentials::test_F13_stale_lazy_and_cached_adapter_do_not_read_new_secret",
+      "tests.unit.test_remediation_credentials::test_missing_committed_generation_preserves_metadata",
+      "tests.unit.test_remediation_credentials::test_retired_secret_cleanup_retries_all_generations",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[None]",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[mode]",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[replace]",
+      "tests.unit.test_remediation_credentials::test_F13_all_update_states[direct]",
+      "tests.unit.test_remediation_credentials::test_F13_all_update_states[reference]",
+      "tests.unit.test_remediation_credentials::test_F01_HTTP_tenant_boundary_and_F13_cached_binding",
+      "tests.unit.test_remediation_credentials::test_rejected_public_spine_cannot_cache_host_credentials",
+      "tests.unit.test_remediation_credentials::test_borrowed_primary_does_not_authorize_host_fallback",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files0-0]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files1-1]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files2-2]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files3-2]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files4-0]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files5-1]",
+      "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files6-1]",
+      "tests.unit.test_remediation_delivery::test_F11_native_import_does_not_require_web_stack",
+      "tests.unit.test_remediation_delivery::test_F12_ipv6_url",
+      "tests.unit.test_remediation_delivery::test_F12_readiness_probes_configured_host",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[127.0.0.1:12345-200]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[localhost:12345-200]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[[::1]:12345-200]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[evil.example-400]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[[::2]:12345-400]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[user@localhost-400]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[[::1]:bad-400]",
+      "tests.unit.test_remediation_delivery::test_F12_host_validation[localhost/evil-400]",
+      "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[127.0.0.1]",
+      "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[localhost]",
+      "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[::1]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+      "tests.unit.test_remediation_delivery::test_native_controller_uses_real_application_channel",
+      "tests.unit.test_remediation_isolation::test_shared_fixture_ignores_host_configuration",
+      "tests.unit.test_remediation_isolation::test_offline_boundary_blocks_network_without_dns",
+      "tests.unit.test_remediation_isolation::test_default_process_boundary",
+      "tests.unit.test_remediation_lifecycle::test_child_ids_do_not_collide_across_manager_lifetimes",
+      "tests.unit.test_remediation_lifecycle::test_F05_job_cancel_removes_real_queued_work",
+      "tests.unit.test_remediation_lifecycle::test_F07_acp_switch_reuses_session_runtime",
+      "tests.unit.test_remediation_lifecycle::test_F04_service_stops_writers_before_store_close",
+      "tests.unit.test_remediation_lifecycle::test_F04_shutdown_waits_for_admitted_initialization",
+      "tests.unit.test_remediation_lifecycle::test_F04_two_shutdown_waiters_wait_for_writer_finally",
+      "tests.unit.test_remediation_lifecycle::test_R04_failed_transport_close_can_retry",
+      "tests.unit.test_remediation_lifecycle::test_subagent_bootstrap_failure_closes_owned_store",
+      "tests.unit.test_remediation_lifecycle::test_acp_failed_attach_keeps_borrowed_store_usable",
+      "tests.unit.test_remediation_lifecycle::test_job_cancel_waits_for_real_terminal_without_timeout",
+      "tests.unit.test_remediation_lifecycle::test_acp_eof_reaps_two_running_sessions_and_stores",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts0]",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts1]",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts2]",
+      "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[False]",
+      "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[True]",
+      "tests.unit.test_remediation_lifecycle::test_job_cancel_audit_failure_waits_for_real_cleanup",
+      "tests.unit.test_remediation_lifecycle::test_independent_services_do_not_mutate_shared_model_configuration",
+      "tests.unit.test_remediation_lifecycle::test_independent_standalone_engines_preserve_shared_configuration",
+      "tests.unit.test_remediation_lifecycle::test_registry_shutdown_failure_still_closes_other_tenants",
+      "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[False]",
+      "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[True]",
+      "tests.unit.test_remediation_lifecycle::test_web_shutdown_reaps_active_sse_and_task",
+      "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[RuntimeError]",
+      "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[CancelledError]",
+      "tests.unit.test_remediation_lifecycle::test_optional_index_cleanup_preserves_new_cancellation",
+      "tests.unit.test_remediation_process::test_process_cleanup_failure_remains_retryable",
+      "tests.unit.test_remediation_process::test_close_all_processes_even_if_first_cleanup_fails",
+      "tests.unit.test_remediation_process::test_R01_pty_without_tree_ownership_fails_before_spawn",
+      "tests.unit.test_remediation_process::test_F06_cancel_stops_test_owned_parent_and_child",
+      "tests.unit.test_remediation_process::test_R01_closed_process_does_not_kill_recycled_pid",
+      "tests.unit.test_remediation_process::test_F09_nonzero_exec_is_not_tool_success",
+      "tests.unit.test_remediation_process::test_F06_timeout_has_no_surviving_owned_process",
+      "tests.unit.test_remediation_process::test_R01_posix_group_is_killed_before_leader_reaped",
+      "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[assign]",
+      "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[second-reader]",
+      "tests.unit.test_remediation_process::test_process_wait_failure_keeps_reap_retryable",
+      "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[False]",
+      "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[True]",
+      "tests.unit.test_remediation_properties::test_property_restart_preserves_independent_messages",
+      "tests.unit.test_remediation_properties::test_property_partial_retry_exact_suffix",
+      "tests.unit.test_remediation_properties::test_property_close_owner_once",
+      "tests.unit.test_remediation_properties::test_property_secret_four_states",
+      "tests.unit.test_remediation_properties::test_property_tenant_id_cannot_escape",
+      "tests.unit.test_remediation_properties::test_windows_real_lock_survives_duplicate_close",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-before]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-after]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-replay]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-subscribe]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-before]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-after]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-replay]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-subscribe]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[../outside]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[a/b]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[a\\\\b]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[.]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[..]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[\\u540d\\u5b57]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]",
+      "tests.unit.test_remediation_properties::test_tenant_identifier_grammar_is_rejected_before_path_use[C:drive]",
+      "tests.unit.test_remediation_properties::test_property_unicode_settings_serialization",
+      "tests.unit.test_remediation_runtime::test_F15_cancel_current_owns_task",
+      "tests.unit.test_remediation_runtime::test_F15_sync_success_releases_pool",
+      "tests.unit.test_remediation_runtime::test_F14_replay_does_not_acquire_writer",
+      "tests.unit.test_remediation_runtime::test_F08_counter_belongs_to_current_context",
+      "tests.unit.test_remediation_runtime::test_F08_same_model_different_endpoint_has_distinct_adapter",
+      "tests.unit.test_remediation_runtime::test_R04_standalone_spine_closes_owned_transport",
+      "tests.unit.test_remediation_storage::test_repair_close_failure_never_starts_rewrite",
+      "tests.unit.test_remediation_storage::test_rewrite_preserves_primary_when_temporary_cleanup_fails",
+      "tests.unit.test_remediation_storage::test_F03_close_consumes_only_own_lease",
+      "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[1]",
+      "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-2]",
+      "tests.unit.test_remediation_storage::test_F02_close_commits_pending",
+      "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[flush]",
+      "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_pending_all]",
+      "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_batch]",
+      "tests.unit.test_remediation_storage::test_F02_invalid_envelope_does_not_block_valid_append",
+      "tests.unit.test_remediation_storage::test_F02_rewrite_invalidates_scan_cache",
+      "tests.unit.test_remediation_storage::test_F02_fsync_after_visible_batch_is_not_success_or_duplicate"
+    ],
+    "counting": "Subset of full pytest; groups overlap and must not be added to full result"
+  },
+  "fault_injection": {
+    "collected": 61,
+    "passed": 61,
+    "test_ids": [
+      "tests.unit.test_desktop::test_main_bootstrap_failure_returns_1",
+      "tests.unit.test_engine::test_build_spine_components_present",
+      "tests.unit.test_engine::test_assemble_real_engine_ctx_shape",
+      "tests.unit.test_rc_ownership_regressions::test_stdio_close_survives_repeated_cancellation",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_workspace_failure_releases_store",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[False-False]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[False-True]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[True-False]",
+      "tests.unit.test_rc_ownership_regressions::test_build_spine_open_failure_preserves_primary_and_releases_store[True-True]",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[False]",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[True]",
+      "tests.unit.test_remediation_credentials::test_F13_metadata_failure_keeps_old_secret",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[None]",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[mode]",
+      "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[replace]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+      "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+      "tests.unit.test_remediation_lifecycle::test_R04_failed_transport_close_can_retry",
+      "tests.unit.test_remediation_lifecycle::test_subagent_bootstrap_failure_closes_owned_store",
+      "tests.unit.test_remediation_lifecycle::test_acp_failed_attach_keeps_borrowed_store_usable",
+      "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[False]",
+      "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[True]",
+      "tests.unit.test_remediation_lifecycle::test_job_cancel_audit_failure_waits_for_real_cleanup",
+      "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[RuntimeError]",
+      "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[CancelledError]",
+      "tests.unit.test_remediation_process::test_process_cleanup_failure_remains_retryable",
+      "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[assign]",
+      "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[second-reader]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-before]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-after]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-replay]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-subscribe]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-before]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-after]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-replay]",
+      "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-subscribe]",
+      "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[1]",
+      "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-2]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-0]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-1]",
+      "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-2]",
+      "tests.unit.test_remediation_storage::test_F02_fsync_after_visible_batch_is_not_success_or_duplicate"
+    ],
+    "counting": "Subset of full pytest; groups overlap and must not be added to full result"
+  },
+  "property_tests": {
+    "collected": 6,
+    "passed": 6,
+    "test_ids": [
+      "tests.unit.test_remediation_properties::test_property_restart_preserves_independent_messages",
+      "tests.unit.test_remediation_properties::test_property_partial_retry_exact_suffix",
+      "tests.unit.test_remediation_properties::test_property_close_owner_once",
+      "tests.unit.test_remediation_properties::test_property_secret_four_states",
+      "tests.unit.test_remediation_properties::test_property_tenant_id_cannot_escape",
+      "tests.unit.test_remediation_properties::test_property_unicode_settings_serialization"
+    ],
+    "counting": "Subset of full pytest; groups overlap and must not be added to full result"
+  },
+  "concurrency_tests": {
+    "collected": 19,
+    "passed": 19,
+    "test_ids": [
+      "tests.e2e.test_multisession_isolation_e2e::test_concurrent_tasks_and_close_do_not_cross_sessions",
+      "tests.unit.test_rc_ownership_regressions::test_stdio_close_survives_repeated_cancellation",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[False]",
+      "tests.unit.test_rc_ownership_regressions::test_activation_rollback_resists_second_cancel_and_preserves_primary[True]",
+      "tests.unit.test_remediation_lifecycle::test_F05_job_cancel_removes_real_queued_work",
+      "tests.unit.test_remediation_lifecycle::test_F07_acp_switch_reuses_session_runtime",
+      "tests.unit.test_remediation_lifecycle::test_F04_shutdown_waits_for_admitted_initialization",
+      "tests.unit.test_remediation_lifecycle::test_F04_two_shutdown_waiters_wait_for_writer_finally",
+      "tests.unit.test_remediation_lifecycle::test_job_cancel_waits_for_real_terminal_without_timeout",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts0]",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts1]",
+      "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts2]",
+      "tests.unit.test_remediation_lifecycle::test_job_cancel_audit_failure_waits_for_real_cleanup",
+      "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[False]",
+      "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[True]",
+      "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[False]",
+      "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[True]",
+      "tests.unit.test_remediation_properties::test_windows_real_lock_survives_duplicate_close",
+      "tests.unit.test_remediation_storage::test_F03_close_consumes_only_own_lease"
+    ],
+    "counting": "Subset of full pytest; groups overlap and must not be added to full result"
+  },
+  "mutation_tests": {
+    "total": 10,
+    "killed": 10,
+    "assertion_kills": 9,
+    "timeout_kills": 1,
+    "equivalent": 0,
+    "scope": "10 selected mutants in isolated external copies; not whole-project mutation score",
+    "mutants": [
+      {
+        "id": "M1-result",
+        "file": "pyharness/core/tools_executor.py",
+        "test": "tests/unit/test_remediation_process.py::test_F09_nonzero_exec_is_not_tool_success",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M2-lock",
+        "file": "pyharness/persistence.py",
+        "test": "tests/unit/test_remediation_storage.py::test_F03_close_consumes_only_own_lease",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M2-prefix",
+        "file": "pyharness/persistence.py",
+        "test": "tests/unit/test_remediation_storage.py::test_F02_retry_preserves_exact_physical_events",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M3-cancel",
+        "file": "pyharness/core/orchestration.py",
+        "test": "tests/unit/test_remediation_lifecycle.py::test_F05_job_cancel_removes_real_queued_work",
+        "killed": true,
+        "timed_out": true,
+        "exit_code": 124
+      },
+      {
+        "id": "M3-cleanup",
+        "file": "pyharness/core/subagent.py",
+        "test": "tests/unit/test_remediation_lifecycle.py::test_subagent_bootstrap_failure_closes_owned_store",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M4-deny",
+        "file": "pyharness/core/tools_executor.py",
+        "test": "tests/unit/test_tools_executor.py::TestExecutePipeline::test_guard_reject_critical_zero_side_effects",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M4-meter",
+        "file": "pyharness/core/llm.py",
+        "test": "tests/unit/test_remediation_runtime.py::test_F08_counter_belongs_to_current_context",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M4-secret",
+        "file": "pyharness/core/tenant_settings.py",
+        "test": "tests/unit/test_remediation_credentials.py::test_F01_tenant_cannot_select_host_secret",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M-R04-close",
+        "file": "pyharness/core/llm.py",
+        "test": "tests/unit/test_remediation_runtime.py::test_R04_standalone_spine_closes_owned_transport",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      },
+      {
+        "id": "M-R03-isolation",
+        "file": "tests/support.py",
+        "test": "tests/unit/test_remediation_isolation.py::test_shared_fixture_ignores_host_configuration",
+        "killed": true,
+        "timed_out": false,
+        "exit_code": 1
+      }
+    ]
+  },
+  "base_install": {
+    "passed": true,
+    "editable": false,
+    "source_import": false,
+    "gui_web_dependencies": false
+  },
+  "native_install": {
+    "passed": true,
+    "qt_offscreen": true,
+    "web_dependencies": false,
+    "manual_gui": false
+  },
+  "desktop_install": {
+    "passed": true,
+    "loopback_http": true,
+    "port_released": true,
+    "manual_webview2": false
+  },
+  "installation_steps": {
+    "total": 24,
+    "failed": 0,
+    "python": "3.13.13",
+    "platform": "Windows",
+    "wheel_version": "0.1.0"
+  },
+  "windows": {
+    "passed": true,
+    "scope": [
+      "file locks and duplicate close",
+      "owned process tree cancellation",
+      "Unicode and spaced working directory",
+      "UTF-8 and CRLF",
+      "loopback IPv4/localhost/IPv6",
+      "PowerShell R1 setup",
+      "wheel installations",
+      "port release"
+    ]
+  },
+  "posix": {
+    "status": "environment-blocked",
+    "controlled_syscall_tests": true,
+    "real_linux_wsl": false,
+    "docker_desktop_excluded": true
+  },
+  "reviewer_findings": [
+    {
+      "id": "A01",
+      "severity": "Medium",
+      "status": "fixed",
+      "summary": "MCP repeated cancellation retains process ownership until cleanup completes",
+      "files": [
+        "pyharness/core/mcp.py"
+      ]
+    },
+    {
+      "id": "A02",
+      "severity": "Medium",
+      "status": "fixed",
+      "summary": "Standalone engine assembly rolls back owned resources before transfer",
+      "files": [
+        "pyharness/engine.py"
+      ]
+    },
+    {
+      "id": "B1",
+      "severity": "Medium",
+      "status": "fixed",
+      "summary": "Historical limitation snapshot distinguished from current candidate"
+    },
+    {
+      "id": "B2",
+      "severity": "Low",
+      "status": "fixed",
+      "summary": "Machine ACL detail removed from public documents"
+    },
+    {
+      "id": "B3",
+      "severity": "Low",
+      "status": "fixed",
+      "summary": "Candidate navigation no longer points to excluded documents"
+    },
+    {
+      "id": "B4",
+      "severity": "Low",
+      "status": "fixed",
+      "summary": "Root archive ignore no longer excludes formal docs/archive README"
+    },
+    {
+      "id": "B5",
+      "severity": "Low",
+      "status": "fixed",
+      "summary": "R1 reproduction instructions explicitly require the existing isolated interpreter layout and declared test dependencies"
+    }
+  ],
+  "reviewers": {
+    "independent_read_only": 2,
+    "critical": 0,
+    "high": 0
+  },
+  "artifacts": {
+    "wheel": {
+      "file": "pyharness-0.1.0-py3-none-any.whl",
+      "sha256": "e296494e0d4aba276abb4b38d167a0f1d7906e29af816b3dbaef677d912941ba"
+    },
+    "sdist": {
+      "file": "pyharness-0.1.0.tar.gz",
+      "sha256": "16357af0b90a97ca5a56cb7f66fb9514debaed700a5638c1d06cb1705d64e95c"
+    },
+    "metadata_license_readme_entries": "passed",
+    "source_payloads_match": true
+  },
+  "artifact_sha256": {
+    "wheel": "e296494e0d4aba276abb4b38d167a0f1d7906e29af816b3dbaef677d912941ba",
+    "sdist": "16357af0b90a97ca5a56cb7f66fb9514debaed700a5638c1d06cb1705d64e95c"
+  },
+  "artifact_scope": "Precommit installation artifacts only; final rebuilt artifact hashes are in external postcommit attestation",
+  "remediation": {
+    "F01": "confirmed-fixed",
+    "F02": "confirmed-fixed",
+    "F03": "confirmed-fixed",
+    "F04": "confirmed-fixed",
+    "F05": "confirmed-fixed",
+    "F06": "confirmed-fixed",
+    "F07": "confirmed-fixed",
+    "F08": "confirmed-fixed",
+    "F09": "confirmed-fixed",
+    "F10": "confirmed-fixed",
+    "F11": "confirmed-fixed",
+    "F12": "confirmed-fixed",
+    "F13": "confirmed-fixed",
+    "F14": "confirmed-fixed",
+    "F15": "confirmed-fixed",
+    "R01": "safely-constrained",
+    "R02": "environment-blocked",
+    "R03": "confirmed-fixed",
+    "R04": "confirmed-fixed",
+    "G01": "confirmed-fixed",
+    "G02": "confirmed-fixed"
+  },
+  "limitations": [
+    "Engineering Release Candidate only; no push, remote tag, GitHub Release or remote CI run.",
+    "Package version remains 0.1.0; branch and Git commit identify this engineering candidate.",
+    "R01 unsafe PTY entry points remain disabled; no unsupported process-tree ownership guarantee.",
+    "R02 environment-blocked: no independent Linux/WSL environment; docker-desktop is not used as a POSIX acceptance environment. Controlled syscall tests do not establish actual POSIX permissions.",
+    "Windows local single-trust-domain acceptance only. No other-machine, Linux, WSL or Docker production guarantee.",
+    "Deterministic model substitutes only; no real conversational model, paid API or model download.",
+    "evleven R1 is an external real MCP process and persistent service; it is not an embedded model or PyHarness storage implementation. Deterministic keyword/ID recovery does not establish semantic retrieval.",
+    "No complete manual GUI/WebView2 interaction validation; native Qt offscreen and desktop loopback HTTP were exercised.",
+    "Synchronous-tool cancellation and remote MCP timeout do not guarantee stopping remote work or reversing side effects; unknown writes must not be blindly retried.",
+    "Ruff is undeclared and unavailable, so it was not run; no formal type-check gate is configured.",
+    "Dependency installation can need the configured package source or an existing cache; not an offline portable package.",
+    "Review scope does not prove transactional rollback for every possible component constructor, nor preservation of every original MCP request exception if cleanup itself fails.",
+    "Precommit report cannot embed its own future commit or the hash of an archive containing itself. Resolve HEAD in the committed checkout; exact postcommit evidence and rebuilt artifact checksums are provided alongside distribution artifacts."
+  ],
+  "pushed": false,
+  "published": false,
+  "commands": [
+    "$PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests/unit/test_remediation_isolation.py",
+    "$PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests --cov=pyharness --cov-report=json --cov-fail-under=75",
+    "$PYTHON -B scripts/check_authorization.py",
+    "$PYTHON -B -m hatchling build -t wheel -t sdist -d $OUT",
+    "$PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests/integration/test_evleven_r1.py",
+    "git diff --check"
+  ],
+  "command_context": "All execution used isolated configuration/home/temp/cache and external source copies. pytest commands require declared dev dependencies and explicit synthetic fixtures; do not use real user configuration."
+}

@@ -1,6 +1,6 @@
 # KEY-FINDINGS — 关键发现与经验沉淀
 
-> **项目**:PyHarness——用 Python 3.11 全功能复刻 DeepSeek Harness(DSH)架构思想的单进程 Agent 框架(目录沿用 mini-harness)
+> **项目**:PyHarness——用 Python 3.11 全功能复刻 DeepSeek Harness(DSH)架构思想的单进程 Agent 框架
 > **文档类型**:跨阶段经验沉淀(设计期收尾,供代码阶段开工前预读 + 面试前回顾)
 > **版本**:v1.0 | **日期**:2026-09-06 | **状态**:定稿(设计期 60 份文档 + 33 份 specs 已齐,待代码实现)
 > **读者**:①作者(开发者/面试者——把 ADR 与 6 条原则讲成"人话"的底稿)②AI 编码 Agent(实现前先读第 3 节坑位清单)

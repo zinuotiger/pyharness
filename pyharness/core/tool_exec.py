@@ -74,7 +74,8 @@ async def exec_shell(args: dict, ctx: Any) -> str:
     from pyharness.core import proc
     r = await proc.wait_result_async(_sandbox_dir(ctx), command,
                                      timeout_s=_wallclock(ctx))
-    return r["summary"]
+    from pyharness.core.provider_result import ProviderOutcome
+    return ProviderOutcome(r)
 
 
 async def exec_python(args: dict, ctx: Any) -> str:
@@ -86,7 +87,8 @@ async def exec_python(args: dict, ctx: Any) -> str:
     from pyharness.core import proc
     r = await proc.wait_result_async(_sandbox_dir(ctx), code,
                                      timeout_s=_wallclock(ctx), python=True)
-    return r["summary"]
+    from pyharness.core.provider_result import ProviderOutcome
+    return ProviderOutcome(r)
 
 
 async def exec_pty(args: dict, ctx: Any) -> str:

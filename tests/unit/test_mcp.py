@@ -103,6 +103,7 @@ async def test_provider_text_content():
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_stdio_transport_real_subprocess_notification_and_timeout_path():
     """真实 stdio 子进程可握手;notification 不应错误等待响应。"""
     server = r'''
@@ -144,3 +145,25 @@ def test_register_into_rolls_back_on_bad_schema():
         client.register_into(reg)
     with pytest.raises(PyHError):
         reg.lookup("mcp.bad.good")
+
+
+async def test_allowlist_is_local_and_unknown_selection_fails_closed():
+    client = McpClient('calc', _transport())
+    await client.connect()
+    registry = ToolRegistry()
+    assert client.register_into(registry, allowed_tools=['add']) == ['mcp.calc.add']
+    assert not registry.has('mcp.calc.upper')
+    assert registry.lookup('mcp.calc.add').danger == 'high'
+    empty = ToolRegistry()
+    assert client.register_into(empty, allowed_tools=[]) == []
+    with pytest.raises(PyHError):
+        client.register_into(empty, allowed_tools=['not-discovered'])
+    assert empty.count() == 0
+
+
+async def test_unsupported_protocol_is_not_registered():
+    client = McpClient('unknown', _transport(initialize={
+        'protocolVersion': '2099-01-01', 'serverInfo': {'name': 'future'}}))
+    with pytest.raises(PyHError):
+        await client.connect()
+    assert not client.connected and client._tools == []

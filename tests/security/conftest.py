@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyharness.config import load_settings
+from tests.support import isolated_settings
 from pyharness.core import llm as llm_mod
 from pyharness.core import tool_fs
 from pyharness.core.scope import BudgetLimits, Scope, ScopePolicy
@@ -86,7 +86,7 @@ class SecHarness:
         self.tmp = tmp
         self.ws = tmp / "workspaces"
         self.ws.mkdir(parents=True, exist_ok=True)
-        cfg = load_settings()
+        cfg = isolated_settings(tmp)
         cfg.storage.root = str(tmp)
         cfg.storage.workspaces_dir = str(self.ws)
         self.session = FakeSession()

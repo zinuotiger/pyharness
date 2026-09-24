@@ -40,8 +40,10 @@ config.DEFAULTS(轮转/攒批参数)、log。
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -179,16 +181,17 @@ class _FileLock:
         """释放锁(幂等);不删锁文件。"""
         if self._fd is None:
             return
-        _os_unlock_fd(self._fd)
         try:
-            os.close(self._fd)
+            _os_unlock_fd(self._fd)
         finally:
-            self._fd = None
+            fd, self._fd = self._fd, None
+            os.close(fd)
 
 
 # 进程内锁注册表:{resolved lock path -> [_FileLock, refcount]}。同进程多 store 打开
 # 同一会话(如桌面 + 进程内 repair)复用同一 OS 锁,不误判为跨进程冲突。
 _LOCKS: dict[str, list] = {}
+_LOCKS_MUTEX = threading.RLock()
 
 
 def acquire_session_lock(lock_path: Path) -> None:
@@ -196,29 +199,30 @@ def acquire_session_lock(lock_path: Path) -> None:
 
     调用方须在 finally 里配对 release_session_lock(lock_path)。
     """
-    key = str(lock_path)
-    ent = _LOCKS.get(key)
-    if ent is not None:
-        ent[1] += 1                                # 同进程已持有:重入
-        return
-    lock = _FileLock(lock_path)
-    if not lock.try_acquire():
-        raise_code("PERS-202", op="lock", path=str(lock_path),
-                   advice="另一进程正在写/修复该会话(单写者 INV-07);"
-                          "先结束该进程再打开/修复")
-    _LOCKS[key] = [lock, 1]
+    with _LOCKS_MUTEX:
+        key = str(lock_path)
+        ent = _LOCKS.get(key)
+        if ent is not None:
+            ent[1] += 1
+            return
+        lock = _FileLock(lock_path)
+        if not lock.try_acquire():
+            raise_code("PERS-202", op="lock", path=str(lock_path),
+                       advice="另一进程正在写/修复该会话;先结束该进程再打开")
+        _LOCKS[key] = [lock, 1]
 
 
 def release_session_lock(lock_path: Path) -> None:
     """释放会话日志独占锁(引用计数归零才真正解锁;幂等)。"""
-    key = str(lock_path)
-    ent = _LOCKS.get(key)
-    if ent is None:
-        return
-    ent[1] -= 1
-    if ent[1] <= 0:
-        ent[0].release()
-        del _LOCKS[key]
+    with _LOCKS_MUTEX:
+        key = str(lock_path)
+        ent = _LOCKS.get(key)
+        if ent is None:
+            return
+        ent[1] -= 1
+        if ent[1] <= 0:
+            del _LOCKS[key]
+            ent[0].release()
 
 
 def session_lock_held(lock_path: Path) -> bool:
@@ -493,6 +497,11 @@ class SessionStore:
         self.path = path
         self._fh = fh                             # 追加句柄(append,UTF-8,单写者)
         self._lock_path = lock_path               # 跨进程独占锁文件(open_store 持有)
+        self._close_mutex = threading.RLock()
+        self._scan_offset = 0
+        self._committed_rows: dict[int, dict] = {}
+        self._segments_scanned = False
+        self._closing = False
         self.rotate_bytes = rotate_bytes or _ROTATE_BYTES
         self.flush_batch = flush_batch or _FLUSH_BATCH
         self.flush_interval_s = flush_interval_s or _FLUSH_INTERVAL_S
@@ -509,15 +518,38 @@ class SessionStore:
     # ------------------------------------------------------------ 关闭
     def close(self) -> None:
         """收尾:flush + 关追加句柄 + 释放跨进程锁(会话终态/进程退出前调用)。"""
-        try:
-            if not self._fh.closed:               # 已关(如编码坏块 .corrupt 分支)
+        with self._close_mutex:
+            self._closing = True
+            errors = []
+            lock_path, self._lock_path = self._lock_path, None
+            if not self._fh.closed:
                 try:
+                    rows = _resolve_by_seq(list(self._retry_q) + list(self._pending))
+                    if rows:
+                        self._write_batch(rows)
+                        self._retry_q.clear()
+                        self._pending.clear()
                     self._fh.flush()
-                finally:
+                except BaseException as exc:
+                    errors.append(exc)
+                try:
                     self._fh.close()
-        finally:
-            if self._lock_path is not None:       # 解锁(引用计数;幂等)
-                release_session_lock(self._lock_path)
+                except BaseException as exc:
+                    errors.append(exc)
+            if lock_path is not None:
+                try:
+                    release_session_lock(lock_path)
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                for exc in errors[1:]:
+                    errors[0].add_note(f'additional cleanup failure: {type(exc).__name__}')
+                raise errors[0]
+
+    def ensure_writable(self) -> None:
+        """写入前置检查；调用方在分配事件前调用，避免总线隔离拒写异常。"""
+        if self._closing or self._suspended or self._fh.closed:
+            raise_code("PERS-202", hint="会话写通道暂停或已关闭;恢复后再提交")
 
     # ------------------------------------------------------------ 落盘主路径
     async def append(self, env: Envelope, sync: bool = False) -> None:
@@ -530,8 +562,7 @@ class SessionStore:
         异常:强同步 OSError → PERS-202 直接抛;异步 3 次重试仍败 → PERS-202 +
         会话暂停;暂停中(拒新不丢旧)→ PERS-202。
         """
-        if self._suspended:                       # 拒新不丢旧:暂停期拒绝新事件
-            raise_code("PERS-202", hint="会话暂停(落盘通道故障),repair 后恢复;拒新不丢旧")
+        self.ensure_writable()                   # 拒新不丢旧:暂停期拒绝新事件
         line = env.model_dump_json() + "\n"       # 信封+payload 拍平单行(§3.6)
         if sync:                                  # 强同步点:成功才返回
             # 入 pending + 立即 flush:物理序 = 入队序 = seq 序。若直接 write,
@@ -589,7 +620,7 @@ class SessionStore:
             self._fh.flush()
             self._fail_streak = 0
             self._retry_q.clear()
-        except OSError:
+        except BaseException:
             self._retry_q = deque(retry_old)
             self._retry_q.extend(pending_now)     # F-SYNC-1:本批完整回填(保序)
             raise
@@ -631,9 +662,11 @@ class SessionStore:
                 self._suspended = False
                 log.warning("会话写通道恢复:解除暂停(重试队列已落盘)path=%s",
                             self.path)
-        except OSError as e:
+        except BaseException as e:
             self._retry_q = deque(retry_original)  # 旧行原样保序保留
             self._retry_q.extend(take)            # 新取入队:不重不漏
+            if not isinstance(e, OSError):
+                raise
             self._fail_streak += 1
             if self._failure_state_reached():     # GAP-2:公开 flush 同样受阈值约束
                 await self._enter_failure_state(why=str(e))
@@ -682,30 +715,87 @@ class SessionStore:
         """
         if not self._torn_tail:
             return
+        self._fh.write("\n")
+        self._fh.flush()
         self._torn_tail = False
-        try:
-            self._fh.write("\n")
-            log.warning("崩溃残片后补行尾分隔(避免新事件与残片拼接) path=%s",
-                        self.path)
-        except OSError as e:                      # 失败照常由调用方按 PERS-202 处置
-            log.error("补行尾分隔失败(%s):新事件可能不可解析", e)
 
     def _write_batch(self, rows: list) -> None:
-        """批量写(**三个 flush 入口共用**;写前自愈崩溃残片)。
+        """Commit actual missing rows, reconciling uncertain writes before retry.
 
-        失败时**重新武装残片标记**(R13-3 二阶):写失败可能停在**一行中间**(磁盘满/
-        中断),而标记已被本轮清除 ⇒ 下一次写会与残行**拼接**(与 R13-2 同类缺陷)。
-        无法知道实际写入多少 ⇒ 保守重武装,下轮写前补 `\\n` 兜底;调用方照旧做队列回填。
+        The cache is derived from complete physical rows, never from write()'s
+        return value. Drain uncertain TextIO buffers before reading the file;
+        flush/fsync failure cannot cause a visible prefix to be appended twice.
         """
-        self._heal_torn_tail()
-        try:
-            for _seq, line in rows:
-                self._fh.write(line)
-        except OSError:
-            # 只在**文件确实停在行中**时重武装(按事实,不猜):失败可能发生在
-            # "一个字都没写"的场合(如写前即抛),那时补 `\n` 会平白多出空行。
-            self._torn_tail = self._tail_looks_torn()
-            raise
+        rows = _resolve_by_seq(rows)
+        self._fh.flush()
+        self._reconcile_rows()
+        if self._torn_tail:
+            self._heal_torn_tail()
+            # A short write may contain the entire JSON object except its newline.
+            # Reconcile the now complete row before deciding which suffix to retry.
+            self._reconcile_rows()
+        missing = []
+        for seq, line in rows:
+            expected = json.loads(line)
+            actual = self._committed_rows.get(seq)
+            if actual is not None:
+                if actual != expected:
+                    raise_code('PERS-202', op='seq_conflict', seq=seq)
+            else:
+                if self._committed_rows and seq <= max(self._committed_rows):
+                    raise_code('PERS-202', op='out_of_order', seq=seq)
+                missing.append((seq, line))
+        # An fsync failure is an unknown durability result, never business success.
+        os.fsync(self._fh.fileno())
+        for _seq, line in missing:
+            if self._fh.write(line) != len(line):
+                raise OSError('short JSONL write')
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+        self._reconcile_rows()
+
+    def _reconcile_rows(self) -> None:
+        if not self._segments_scanned:
+            for path in self._rotated_paths():
+                for env in _iter_replay([path], self._quarantine):
+                    self._remember_committed(env.model_dump(mode='json'))
+            self._segments_scanned = True
+        with self.path.open('rb') as source:
+            if source.seek(0, os.SEEK_END) < self._scan_offset:
+                raise_code('PERS-202', op='unexpected_truncation')
+            source.seek(self._scan_offset)
+            while True:
+                start = source.tell()
+                line = source.readline()
+                if not line:
+                    self._torn_tail = False
+                    break
+                if not line.endswith(b'\n'):
+                    self._torn_tail = True
+                    self._scan_offset = start
+                    break
+                try:
+                    env = Envelope.model_validate_json(line)
+                    validate_payload(env.type, env.payload)
+                    value = env.model_dump(mode='json')
+                except Exception:
+                    self._scan_offset = source.tell()
+                    continue  # damaged bytes remain for explicit repair
+                self._remember_committed(value)
+                self._scan_offset = source.tell()
+
+    def _remember_committed(self, value):
+        seq = value['seq']
+        if seq in self._committed_rows:
+            raise_code('PERS-202', op='duplicate_physical_seq', seq=seq)
+        if self._committed_rows and seq <= next(reversed(self._committed_rows)):
+            raise_code('PERS-202', op='out_of_order', seq=seq)
+        self._committed_rows[seq] = value
+
+    def _invalidate_scan(self):
+        self._scan_offset = 0
+        self._committed_rows.clear()
+        self._segments_scanned = False
 
     def _tail_looks_torn(self) -> bool:
         """写失败后判定"文件是否停在行中"(R13-3)。
@@ -739,9 +829,11 @@ class SessionStore:
             self._fh.flush()
             self._fail_streak = 0                 # 成功:复位失败计数
             self._retry_q.clear()
-        except OSError as e:
+        except BaseException as e:
             self._retry_q = deque(retry)
             self._retry_q.extend(batch)           # 拒新不丢旧:全部回重试队列
+            if not isinstance(e, OSError):
+                raise
             self._fail_streak += 1
             if self._failure_state_reached():
                 await self._enter_failure_state(why=str(e))
@@ -792,19 +884,25 @@ class SessionStore:
         await self.flush()                        # ① 攒批先落盘
         close = getattr(self._fh, "close", None)
         if callable(close):
-            try:
-                close()                           # ② 关本句柄(防委托期间 inode 失同步)
-            except OSError:                       # noqa: BLE001 关闭失败仍继续(重开会覆盖)
-                log.warning("repair 委托前句柄关闭失败 path=%s", path, exc_info=True)
+            close()  # Do not rewrite while ownership of the old handle is uncertain.
         from pyharness.repair import repair_session     # 惰性:避免模块级回边
         ctx = SimpleNamespace(
             storage=SimpleNamespace(sessions_dir=path.parent))
+        primary = None
         try:
             rep = await repair_session(ctx, sid, interactive=False)
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            self._fh = open(path, "a", encoding="utf-8", newline="\n")   # ④ 重开追加句柄
-            self._torn_tail = detect_truncation(path) is not None
-            self._suspended = False               # ⑤ 写通道随修复恢复
+            self._invalidate_scan()
+            try:
+                self._fh = open(path, "a", encoding="utf-8", newline="\n")
+                self._torn_tail = detect_truncation(path) is not None
+                if primary is None: self._suspended = False
+            except BaseException as exc:
+                if primary is None: raise
+                primary.add_note(f'repair reopen failed: {type(exc).__name__}')
         kept = [int(getattr(e, "line_no", 0)) for e in
                 (getattr(rep, "quarantined", None) or [])]
         self._quarantine.clear()
@@ -822,23 +920,33 @@ class SessionStore:
         句柄再 rename(持开句柄 replace 会 PermissionError),失败不留临时残留。
         """
         tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}")
+        primary = None
+        cleanup_errors = []
         try:
-            self._fh.close()                      # Windows:先关旧句柄再替换
-            with open(self.path, "rb") as src, open(tmp, "wb") as dst:
-                src.seek(0)
-                dst.write(src.read(cut_offset))   # 保留全部完整行(字节级切点)
-                dst.flush()
-                os.fsync(dst.fileno())            # 数据落盘再换名
-            os.replace(tmp, self.path)            # 原子 rename:旧完整或新完整
-        except OSError as e:
-            raise_code("PERS-202", op="rewrite_without_tail", why=str(e),
-                       advice="原子截断失败;备份仍在 .bak-{ts},重跑 repair")
+            try:
+                self._fh.close()
+                with open(self.path, "rb") as src, open(tmp, "wb") as dst:
+                    dst.write(src.read(cut_offset))
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                os.replace(tmp, self.path)
+            except OSError as exc:
+                raise_code("PERS-202", op="rewrite_without_tail", why=str(exc),
+                           advice="原子截断失败；保留原文件及故障证据")
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)       # 失败清理,不留临时残留
+            try: tmp.unlink(missing_ok=True)
+            except BaseException as exc: cleanup_errors.append(exc)
             if self._fh.closed:
-                # 成败皆重开追加句柄:成功续写;失败也不留坏句柄(异常照常上抛)
-                self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
+                try: self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
+                except BaseException as exc: cleanup_errors.append(exc)
+            self._invalidate_scan()
+            if primary is not None:
+                for exc in cleanup_errors: primary.add_note(f'cleanup failed: {exc!r}')
+            elif cleanup_errors:
+                raise BaseExceptionGroup('rewrite cleanup failed', cleanup_errors)
 
     # ------------------------------------------------------------ 轮转(内部)
     def _rotated_paths(self) -> list[Path]:
@@ -863,6 +971,8 @@ class SessionStore:
         轮转失败只记日志不抛(数据无损:事件已先落主文件;rename 原子性保证主文件
         仍在),下次 append 再触发——避免在 append 成功路径上叠加二次异常。
         """
+        if self._retry_q or self._pending:
+            return
         try:
             size = os.fstat(self._fh.fileno()).st_size
             if size > self.rotate_bytes:
@@ -873,7 +983,7 @@ class SessionStore:
     def _rotate(self) -> None:
         """主文件 >50MB → 原子 rename 为 {sid}.{n}.jsonl → 开新主句柄。"""
         self._fh.flush()
-        n = len(self._rotated_paths()) + 1
+        n = max((int(p.stem.rsplit('.', 1)[1]) for p in self._rotated_paths()), default=0) + 1
         target = self.path.with_name(f"{self.session_id}.{n}.jsonl")
         self._fh.close()                          # Windows:先关句柄再 rename
         try:
@@ -883,6 +993,7 @@ class SessionStore:
             raise                                # 主文件未动,恢复句柄
         self._fh = open(self.path, "a", encoding="utf-8", newline="\n")
         self._torn_tail = False                   # 新文件无残片(R13-2)
+        self._invalidate_scan()
         log.info("jsonl rotated: %s (size_mb=%d)",
                  target, self.rotate_bytes // 1_048_576)
 
@@ -1015,21 +1126,26 @@ def open_store(session_id: str, *, dir: Optional[Path] = None,
     except Exception as e:                        # noqa: BLE001 非预期锁故障:拒开
         raise_code("PERS-202", op="lock", path=str(lock_path), why=str(e),
                    advice="会话锁获取异常;查磁盘/权限")
-    trunc = detect_truncation(path)               # 只读检测:崩溃遗留尾部半行?
-    if trunc is not None:
-        log.warning("PERS-201 域:尾部半行待 repair(open 不修,先备份再修 F060) "
-                    "file=%s offset=%s", path, trunc)
+    fh = None
     try:
+        trunc = detect_truncation(path)
+        if trunc is not None:
+            log.warning("PERS-201:尾部半行待 repair file=%s offset=%s", path, trunc)
         # newline="\n":JSONL 统一 \n 行尾,Windows 下禁 \r\n 翻译(半行检测按字节)
         fh = open(path, "a", encoding="utf-8", newline="\n")
-    except OSError as e:
-        release_session_lock(lock_path)           # 开失败:释放已取锁
-        raise_code("PERS-202", op="open", path=str(path), why=str(e),
-                   advice="查磁盘/权限;repair 后恢复")
-    return SessionStore(session_id=session_id, path=path, fh=fh,
-                        lock_path=lock_path,
-                        flush_interval_s=flush_interval_s,
-                        flush_batch=flush_batch)
+        return SessionStore(session_id=session_id, path=path, fh=fh,
+                            lock_path=lock_path, flush_interval_s=flush_interval_s,
+                            flush_batch=flush_batch)
+    except BaseException as primary:
+        for cleanup in ([fh.close] if fh is not None else []) + [lambda: release_session_lock(lock_path)]:
+            try:
+                cleanup()
+            except BaseException as secondary:
+                primary.add_note(f'initialization cleanup failed: {type(secondary).__name__}')
+        if isinstance(primary, OSError):
+            raise_code('PERS-202', op='open', path=str(path), why=str(primary),
+                       advice='查磁盘/权限;repair 后恢复')
+        raise
 
 
 __all__ = [

@@ -853,19 +853,28 @@ async def declare_recovered(ctx: Any, sid: str, fixed: list[str],
         sid, dir=_sessions_dir(ctx),
         **flush_kwargs_of(getattr(ctx, "config", None)
                           or getattr(ctx, "settings", None)))
-    log_ = await open_session(sid, store)
-    log_._bus = _DirectBus(store)            # 直连落盘(无全局总线时声明仍强同步落盘)
+    primary = None
     try:
+        log_ = await open_session(sid, store)
+        log_._bus = _DirectBus(store)
         env = await log_.append("session.recovered", payload,
                                 actor="system", sync=True)
     except PyHError as e:
+        primary = e
         if e.code in ("EVT-104", "EVT-106"):  # 终态/未 created:声明不适用
+            primary = None  # suppressed contract result must not suppress cleanup errors
             log.warning("repair: recovered 声明跳过(session=%s %s,审计以备份+"
                         "报告为准) fixed=%s", sid, e.code, fixed)
             return None
         raise                                  # PERS-202 等:上抛(声明可下次补)
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        store.close()
+        try: store.close()
+        except BaseException as exc:
+            if primary is None: raise
+            primary.add_note(f"repair close failed: {type(exc).__name__}")
     log.info("repair: session.recovered 声明 sid=%s seq=%d fixed=%s lost=%s",
              sid, env.seq, fixed, lost or [])
     return env.seq

@@ -40,9 +40,8 @@ def _create_window(wv: Any, app: DesktopApp, bridge: DesktopBridge):
 
 def _bootstrap_desktop(cfg_path: Optional[str]) -> Any:
     """装配桌面 ctx(配置 → 总线 → 门面;CFG-601 失败即中止,不弹窗)。"""
-    from pyharness import cli as _cli                   # 复读 cli 装配管线(偏离 3)
-    cfg = _cli._load_settings(cfg_path)
-    return _cli.assemble_ctx(cfg)
+    from pyharness.application.bootstrap import assemble_desktop_ctx as assemble
+    return assemble(cfg_path)
 
 
 def assemble_desktop_ctx(cfg_path: Optional[str] = None) -> SimpleNamespace:
@@ -75,7 +74,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     app.url = app.bootstrap_url(host, port)   # R31-2:带操作者令牌
     threading.Thread(target=run_uvicorn, args=(app, port, host),
                      name="desktop-uvicorn", daemon=True).start()
-    if not wait_until_listening(port):
+    if not wait_until_listening(port, host=host, app=app):
         log.error("uvicorn 就绪超时 port=%s(不弹空窗,退出 1)", port)
         app.shutdown_gracefully()
         return 1
@@ -87,8 +86,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     bridge = DesktopBridge(app)
     app.bridge = bridge
-    _create_window(wv, app, bridge)
     try:
+        _create_window(wv, app, bridge)
         wv.start(debug=False)                           # 阻塞至全部窗口关闭
     except Exception:                                   # noqa: BLE001 窗口生命周期未预期
         log.exception("webview.start 未预期退出")
@@ -112,16 +111,15 @@ async def run_desktop(ctx: Any) -> int:
     app.url = app.bootstrap_url(host, port)   # R31-2:带操作者令牌
     threading.Thread(target=run_uvicorn, args=(app, port, host),
                      name="desktop-uvicorn", daemon=True).start()
-    await wait_listening_async(app, port)
-    wv = _load_webview()
-    if wv is None:
-        app.shutdown_gracefully()
-        raise_code("CYC-999", hint="pywebview 不可用(需 WebView2 Runtime)")
-    bridge = DesktopBridge(app)
-    app.bridge = bridge
-    _create_window(wv, app, bridge)
     try:
-        wv.start(debug=False)                           # 阻塞至全部窗口关闭(主线程)
+        await wait_listening_async(app, port, host=host)
+        wv = _load_webview()
+        if wv is None:
+            raise_code('CYC-999', hint='pywebview 不可用(需 WebView2 Runtime)')
+        bridge = DesktopBridge(app)
+        app.bridge = bridge
+        _create_window(wv, app, bridge)
+        wv.start(debug=False)
     finally:
         app.shutdown_gracefully()
     return 0

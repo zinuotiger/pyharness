@@ -185,12 +185,13 @@ def test_resolve_dotdot_inside_normalizes_ok(tmp_path: Path):
 
 def _make_junction(link: Path, target: Path) -> bool:
     """Windows junction 免管理员;创建失败 → False(调用方跳过)。"""
-    rc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+    rc = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL).returncode
     return rc == 0
 
 
+@pytest.mark.controlled_process
 def test_resolve_polfs3_junction_escape(tmp_path: Path):
     """POL-FS-3:junction 终解析越界(词法在界内,真实在界外)→ 拒。
 
@@ -215,6 +216,7 @@ def test_resolve_polfs3_junction_escape(tmp_path: Path):
             os.rmdir(link)
 
 
+@pytest.mark.controlled_process
 def test_resolve_extra_read_dir_exception(tmp_path: Path):
     """只读例外目录(security.policy.read_extra_dirs):junction 终解析落点 ∈ 例外
     目录 → writable=False 放行;writable=True(写/删)仍拒。"""

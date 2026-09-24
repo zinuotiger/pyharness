@@ -768,6 +768,8 @@ class McpServerCfg(BaseModel):
     command: list[str] = Field(min_length=1, max_length=64)
     enabled: bool = True
     timeout_s: int = Field(30, ge=1, le=600)
+    # None preserves existing registrations; [] exposes no tools. Local policy only.
+    allowed_tools: Optional[list[str]] = None
 
 
 class SkillsCfg(BaseModel):

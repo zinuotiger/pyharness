@@ -144,6 +144,7 @@ class TaskQueue:
         self._running: Optional[Task] = None
         self._pause_reasons: Counter[str] = Counter()
         self._resume_evt = asyncio.Event()               # 泵挂起唤醒(非忙等)
+        self._enqueue_ready = asyncio.Event()            # 入队事件写完后才允许泵消费
         self._pump_task: Optional[asyncio.Task] = None   # 泵单例句柄(防多泵)
         self._exec: Optional[asyncio.Task] = None        # 执行子任务(取消目标)
         self._futures: dict[str, asyncio.Future] = {}    # 在途等待(task_id → Future)
@@ -221,9 +222,27 @@ class TaskQueue:
         t = Task(id=task_id or self._next_id(),   # 显式 task_id 供 plan/schedule 溯源
                  intent=intent, meta=meta)
         self._q.append(t)                         # FIFO:尾插
-        env = await self._session.append(
-            "task.enqueued", {"task_id": t.id, "pos": len(self._q)}, actor="system")
-        t.enqueued_seq = env.seq
+        try:
+            env = await self._session.append(
+                "task.enqueued", {"task_id": t.id, "pos": len(self._q)}, actor="system")
+            t.enqueued_seq = env.seq
+        except BaseException as exc:
+            # 拒写/取消不可遗留可执行任务；其容量预留也必须释放。
+            # 泵等待 enqueued_seq，故不会在此 await 窗口提前执行。
+            if t in self._q:
+                self._q.remove(t)
+            code = "cancelled" if isinstance(exc, asyncio.CancelledError) else \
+                getattr(exc, "code", "CYC-999")
+            self._settle(t.id, TaskResult(ok=False, code=code, summary=code))
+            try:
+                await self._terminal_event("task.failed", {
+                    "task_id": t.id, "reason": "cancelled" if code == "cancelled"
+                    else "error", "error": code})
+            except Exception:
+                log.warning("入队失败终态无法落盘 task=%s", t.id, exc_info=True)
+            raise
+        finally:
+            self._enqueue_ready.set()
         # 泵单例(防重入):running 非空或泵仍在跑(含 done 的旧句柄)不重启
         if self._running is None and (self._pump_task is None
                                       or self._pump_task.done()):
@@ -254,6 +273,10 @@ class TaskQueue:
             if not self._q:                       # 队空:泵退场;下次 submit 重启泵
                 self._pump_task = None
                 return
+            if not self._q[0].enqueued_seq:
+                await self._enqueue_ready.wait()
+                self._enqueue_ready.clear()
+                continue
             t = self._q.popleft()
             self._running = t                     # 队首接跑
             try:
@@ -340,11 +363,16 @@ class TaskQueue:
 
         会话可在任务在途时收尾(`session.finished` 落盘 + 终态位置位)⇒ 本任务的
         终态事件被 EVT-104 拒写。拒写只应损失"事件留痕",**不得**让 `_settle` 被
-        跳过(等待者永久悬挂)——故此处只吞 EVT-104 并告警,其余错照抛。
+        跳过(等待者永久悬挂)。失败终态也允许在磁盘故障时结算失败，但成功终态
+        的 PERS-202 必须上抛，转为失败，禁止把落盘故障报告为成功。
         """
         try:
             await self._session.append(type_, payload, actor="system")
         except PyHError as e:
+            if type_ == "task.failed" and e.code == "PERS-202":
+                log.warning("失败终态无法落盘 task=%s code=%s;仍向等待者报告失败",
+                            payload.get("task_id"), e.code)
+                return
             if e.code == "EVT-104":
                 log.warning("终态事件被拒(会话已终态)type=%s task=%s;"
                             "结算继续(以 _done 缓存为准)",
@@ -353,7 +381,7 @@ class TaskQueue:
             raise
 
     async def _close_segment_guarded(self, task_id: str, start_seq: int) -> None:
-        """关段(**终态会话不炸泵**):EVT-104 只告警,不让 finally 抛出。
+        """终态会话/磁盘故障关段失败时告警并释放内存段标记，不伪造落盘成功。
 
         此前 `close_segment` 直调 append ⇒ 会话已终态时在 finally 中抛出,泵记
         "task pump crash" 且段锚永久不闭合(证据生产者不触发 ⇒ 该任务零证据)。
@@ -361,8 +389,9 @@ class TaskQueue:
         try:
             await self.close_segment(task_id, start_seq)
         except PyHError as e:
-            if e.code == "EVT-104":
-                log.warning("段锚未闭合(会话已终态)task=%s code=EVT-104", task_id)
+            if e.code in {"EVT-104", "PERS-202"}:
+                self._segments.discard(task_id)
+                log.warning("段锚未落盘闭合 task=%s code=%s", task_id, e.code)
                 return
             raise
 
@@ -431,9 +460,13 @@ class TaskQueue:
 
         超时/异常路径不放弃:仍在途等待者统一按 `cancelled` 结算(绝不悬挂)。
         """
-        if self._closing:
-            return
-        self._closing = True
+        task = getattr(self, '_shutdown_task', None)
+        if task is None:
+            self._closing = True
+            task = self._shutdown_task = asyncio.create_task(self._shutdown_owned(reason))
+        await asyncio.shield(task)
+
+    async def _shutdown_owned(self, reason):
         # ① 队内等待任务:直接摘除并记 failed(cancelled)(不执行 —— 收尾不是"继续跑")
         for t in list(self._q):
             try:
@@ -452,15 +485,18 @@ class TaskQueue:
         # `_resume_evt.wait()` ⇒ 直接 await 会走 5s 超时兜底才退场(会话收尾平白
         # 多等 5 秒)。置位唤醒后泵醒来即见空队退场。
         self._resume_evt.set()
+        self._enqueue_ready.set()                 # 也唤醒等待入队提交完成的泵
         pump = self._pump_task
         if pump is not None and not pump.done():
             try:
                 await asyncio.wait_for(asyncio.shield(pump), timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pump.cancel()
-                log.warning("queue shutdown:泵未在 5s 内退场,已取消")
-            except Exception:                     # noqa: BLE001 泵异常已事件化
-                log.warning("queue shutdown:泵退出异常", exc_info=True)
+            except asyncio.TimeoutError:
+                if not pump.cancelling(): pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("queue shutdown: pump failed", exc_info=True)
         # 兜底:任何仍未结算的等待者不得悬挂(泵被外部取消/超时/崩溃路径)
         for tid in list(self._futures):
             self._settle(tid, TaskResult(ok=False, code="cancelled",
@@ -471,22 +507,23 @@ class TaskQueue:
         waiting → 直接摘除并记 failed(cancelled);不存在/已终态 → 幂等 False。
         """
         if self._running is not None and self._running.id == task_id:
-            # running:取消审计留痕(强同步语义由调用方/日志层保证;失败不阻断取消)
-            try:
-                await self._session.append("system.cancelled",
-                    {"what": f"task:{task_id}", "reason": by}, actor="system")
-            except PyHError as e:                      # 审计失败不阻塞取消传播
-                log.error("cancel audit failed code=%s task=%s", e.code, task_id)
-            self._cancel_pending = task_id             # 先置旗标再触发(见 _run_task)
+            if self._cancel_pending == task_id:
+                return False
+            self._cancel_pending = task_id
             await self._request_cancel(task_id)
+            # Cancellation must survive any audit failure; the error remains visible.
+            await self._session.append("system.cancelled",
+                {"what": f"task:{task_id}", "reason": by}, actor="system")
             return True
         for i, w in enumerate(self._q):                # waiting:摘除,无需通知循环
             if w.id == task_id:
                 del self._q[i]
-                await self._session.append("task.failed", {"task_id": task_id,
-                    "reason": "cancelled"}, actor="system")   # 取消归一化 failed(cancelled)
-                self._settle(task_id, TaskResult(ok=False, code="cancelled",
-                    summary="cancelled"))
+                try:
+                    await self._session.append("task.failed", {"task_id": task_id,
+                        "reason": "cancelled"}, actor="system")
+                finally:
+                    self._settle(task_id, TaskResult(ok=False, code="cancelled",
+                        summary="cancelled"))
                 return True
         return False                                   # 已终态/不存在:幂等 False(防重放)
 

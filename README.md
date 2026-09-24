@@ -1,7 +1,7 @@
 # PyHarness — DeepSeek Harness 的 Python 全功能复刻
 
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
-> 状态: 核心主链与用户入口接地完成 — 2,110 collected / 2,106 passed / 0 failed / 4 skipped(快照 2026-09-21,持续优化轮 R1-R13 后;工作区未提交);全量测试口径见 S6-2b_FINAL_SUMMARY.md §5.1;治理不变量口径以 docs/INVARIANT_REGISTRY.md 为准;复跑治理不变量测试:`pytest tests/invariants`),事件词表 77 型(append-only 唯一真源)。CLI chat/run/plan/search/session/fork/schedule/job、ACP、jobs/schedule/subagent 编排、Web 与 PySide6 两套桌面壳均已接真实引擎。Web 和原生壳现在共享 `ApplicationService` 能力契约,两端均提供会话、消息编辑/重发/反馈、附件、权限档位、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow、审批/反问和审计;真实 LLM、审批执行、MCP stdio、Bing RSS 搜索、流式 chunk 探针均 PASS。MCP/Web 仍按外部配置与网络可用性启用。**默认 `pytest` 已无需 `--ignore`**(可选依赖缺失时显式 skip,不再 collection error)。
+> 当前被测代码、测试统计与安装证据见 [STATUS.md](STATUS.md)。2026-09-21 的 2,110 collected / 2,106 passed / 4 skipped 及历史真实模型探针，仅适用于当时报告的版本和环境，不能代替当前验收。项目包含真实运行时、治理、持久化、CLI、ACP、Web 和原生入口；确定性模型测试不证明真实模型自主规划。
 
 ## 从 Agent Demo 到 Governed Agent Runtime（从智能体演示到治理型智能体运行时）
 
@@ -24,7 +24,7 @@
 ## 从这里开始(Current State)
 
 > ⚠️ **当前能力与已知限制见 [LIMITATIONS.md](LIMITATIONS.md) —— 建议先读它。**
-> 仓库根目录下的 `S1_*`~`S6_*` 是**治理期阶段报告**(历史记录);`docs/baseline/*` 与 `REFACTOR_PLAN.md` 是 **S0 时点快照**。它们描述的是**当时**的形态,**不代表当前状态**。
+> 历史治理阶段报告及本机基线快照未纳入 Engineering RC 分发文件。保留的规格中如引用历史报告，属于历史来源说明；当前候选范围与运行证据见 `STATUS.md` 和 `reports/PYHARNESS-ENGINEERING-RC-20260924.md`。
 
 | 想了解 | 读 |
 |---|---|
@@ -32,15 +32,15 @@
 | 架构总览(视图) | [docs/MAP.md](docs/MAP.md) |
 | 架构决策(22 条 ADR,每条含"违反后果") | [docs/ADD.md](docs/ADD.md) |
 | 治理型运行时:目标架构与逐模块迁移映射 | [GOVERNED_AGENT_RUNTIME_DESIGN.md](GOVERNED_AGENT_RUNTIME_DESIGN.md) |
-| 面试向单点导览(不变量测试面) | [S6-2b_RELEASE_README.md](S6-2b_RELEASE_README.md) |
-| 开发过程(阶段报告) | 根目录 `S1_*`~`S6_*`(按需翻阅,**非入门必读**) |
+| 面试向单点导览(不变量测试面) | [治理不变量索引](docs/INVARIANT_REGISTRY.md) |
+| 开发过程(阶段报告) | 历史阶段记录保留于 Git 历史；当前验收见候选报告 |
 
 
 ## 治理不变量测试面(S6-2b,已冻结)
 
 > **S6-2b 是什么**:把「治理型 Agent 运行时」的 5 条架构不变量(INV-01~INV-05)转成 **31 条可执行断言**,用「若该性质被破坏,测试是否必然失败」的口径逐条证伪,并以 **14 次 mutation** 反证测试自身的鉴别力。
 > **完成了什么 / 为什么值得看**:它不只补了测试 —— 这套方法**真的抓出一条 P0 生产违约**(`auto_title` 越过 Agent Loop 直调对话出口,违反 INV-02),根因是规格指定的 `mini` 出口在实现中缺失;修复**仅 +15 行生产代码**,并以类别式出口边界(而非例外名单)固化。
-> 冻结锚点 `a0c0917` · 完整导览:**[S6-2b_RELEASE_README.md](S6-2b_RELEASE_README.md)**
+> 冻结锚点 `a0c0917` · 完整导览:**[治理不变量索引](docs/INVARIANT_REGISTRY.md)**
 
 ## 架构图
 
@@ -90,10 +90,12 @@
 
 - Web 顶栏 `⚙ 设置`、原生壳 `设置` 页都可以创建/切换租户并配置任意 OpenAI 兼容模型。
 - 每个租户拥有独立会话目录、技能目录、插件根目录和模型档案；同名模型使用独立适配器，禁止复用其他租户的 Key。
-- API Key 是只写字段：Windows 使用当前用户 DPAPI 加密，其他平台回退为 0600 文件；查询接口只返回 `has_api_key`，永不回显明文。
+- API Key 是只写字段；接口返回配置状态和来源类别，不返回明文或宿主秘密引用。Windows 内容使用当前用户 DPAPI 加密，文件访问取决于目录 ACL；POSIX 在写入秘密前以 0600 创建临时文件，不能把 POSIX 权限位当作 Windows 访问隔离。
+- 普通租户模型档案禁止宿主 `env:` / `file:` 引用；只有 `default` 操作者档案保留此能力。普通租户未配置活动档案时不会继承宿主真实模型凭据。历史不安全引用会被拒绝。
+- 凭据字段未提供或为空表示保留；新直接值或允许的引用表示替换；`clear_api_key: true` 表示清除。更换端点须同时明确替换或清除凭据。元数据指向已提交的秘密代；`cleanup_pending` 表示旧代文件尚待清理，不能理解为物理删除已完成。
 - Web 通过 `X-PyHarness-Tenant` 声明租户、SSE 通过 `tenant` 查询参数绑定租户；`default` 之外的租户还须出示**该租户的令牌**（`~/.pyharness/tenants/<tenant>/token`，见 `docs/CFG.md` §9 与 ADR-023）。
-- Web 左侧会话列表支持右键删除：右键会话后在鼠标位置出现“删除会话”，二次确认后清理主 JSONL、轮转段和备份文件；运行中或队列有待处理任务的会话拒绝删除。
-- 模型配置修改后建议重启已有桌面进程；新启动的引擎按当前租户活动模型装配。
+- Web 左侧会话列表支持右键删除：右键会话后在鼠标位置出现“删除会话”，二次确认后按 `storage.archive_days` 归档主 JSONL、轮转段和备份；默认保留 30 天，设为 0 才永久删除；运行中或队列有待处理任务的会话拒绝删除。
+- 凭据修改/撤销后，旧端点或旧版本绑定拒绝继续发送请求；按 `restart_required` 重启应用或创建采用新配置的会话。这不能撤回已发送的请求或远端副作用。
 - 当前隔离范围是应用级逻辑租户；插件/MCP 的进程级配置仍由部署者管理，不应把它当作恶意本地用户的强安全边界。
 
 ## 2026-09-08 增量(砍掉项复活 + UI 波)
@@ -153,18 +155,22 @@
 | 文档站 | [交互式架构图](https://zinuotiger.github.io/pyharness/architecture.html) | 在线查看(一页看全) |
 
 ## 技术栈
-Python 3.11 · pydantic · JSONL 事件溯源 · DeepSeek + qwen-max 降级 · pytest · asyncio · SQLite FTS(查询) · **pywebview 桌面壳 + FastAPI(外壳)**
+Python 元数据要求 >=3.11（本轮具体被测版本见 STATUS）· pydantic · JSONL 事件溯源 · DeepSeek + qwen-max 降级 · pytest · asyncio · SQLite FTS(查询) · **pywebview 桌面壳 + FastAPI(外壳)**
 
-安装桌面运行依赖:`uv sync --all-extras`,或用 `pip install ".[desktop]"`。
+基础包仅需 pydantic、PyYAML、httpx。独立环境按入口安装：基础包用于 CLI/ApplicationService；`.[desktop]` 用于 Web；`.[native]` 用于原生桌面。`uv sync --all-extras` 的开发环境不能替代最小安装验收。依赖未缓存时安装需要网络。
 
 ## PySide6 原生桌面(MVP)
 
 ```powershell
-pip install -e ".[native]"
+python -m pip install ".[native]"
 pyharness-native
 ```
 
 原生版直接运行 `QApplication + qasync + ApplicationService`,不启动 FastAPI、uvicorn、SSE 或 WebView2。当前包含会话、聊天、流式草稿、消息编辑/重发/反馈、附件、权限档位、轨迹、Jobs、定时任务、子 Agent、技能 Registry、插件、Workflow 和审计面板。技能页支持 Registry 搜索、SHA-256 校验、quarantine 安装、卸载和版本回滚。Web 桌面仍可用:`pyharness-desktop`;两套壳共享同一业务服务和能力契约。
+
+当前暂时禁用 `exec.pty` 及底层 PTY 启动，返回 `TLB-807`；安装 pywinpty 不会重新启用。命令执行可用受治理的 `exec.shell_run`、`exec.python_run`、`proc.*`。这不是操作系统沙箱；同步工具取消不能保证停止线程，超时/取消不代表副作用撤销。
+
+Web 仅监听 `127.0.0.1`、`localhost`、`::1`；localhost 归一到 IPv4，IPv6 URL 使用方括号。就绪须同时满足本次服务已启动和实际地址可连接。evleven 是单独安装与运行的外部 MCP 服务，不属于 PyHarness 内存实现。
 
 ## 核心架构(一句话版)
 单进程插件架构: 自研插件总线(地基)→ 8 模块核心脊柱(agent-loop/session/tools/llm/system-prompt/scope/agent/persistence,不可换)→ 40+ 能力挂 ctx.*(可插拔)→ CLI/**Windows 桌面程序(pywebview)**/ACP 外壳。会话日志 append-only 是唯一真源,消息历史从日志派生。guard 单调拒绝,LLM 零信任。
@@ -184,9 +190,9 @@ pyharness-native
 "我完整分析了 DeepSeek Harness(9,044 文件),然后用 Python 全功能复刻了它的架构——事件溯源会话日志、guard 单调拒绝的工具管道、能力 seam 三件套、自研插件总线,66 项功能分 6 阶段推进,产出 60 份文档 1.24MB(含 32 份编码规格/313 函数),每阶段可运行可演示,最终形态是双击即用的 Windows 桌面程序,带 Agent 干活轨迹回放。代码和全套规格文档都在 GitHub。"
 
 ## 关联
-- 需求文档.md / 架构设计.md(早期草案,PRD-Core.md 为准)
+- [需求基线](docs/PRD-Core.md) / [架构决策](docs/ADD.md)
 - TECH-ANCHOR.md(根目录,技术锚定 + 变更记录)
-- pyharness/(代码,按 specs/ 顺序实现中)
+- pyharness/（当前实现；具体已验证范围见 STATUS.md）
 
 ---
 

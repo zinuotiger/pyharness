@@ -1,0 +1,52 @@
+{
+  "status": "verified_local_mvp_environment_blocks_recorded",
+  "base_commit": "ad9a0e8591999b6c81766b05f98ebceca93fd56e",
+  "branch": "feat/pyharness-platform-web-v1",
+  "design_agents": 3,
+  "reviewers": 2,
+  "review_status": "all_reported_high_medium_closed",
+  "changed_files": 42,
+  "modified_files": 14,
+  "new_files": 28,
+  "real_docker": "environment_blocked_daemon_unavailable",
+  "real_model": "environment_blocked_no_safe_connection_in_isolated_validation",
+  "isolated_fallback": "forbidden_and_tested",
+  "code_change_e2e": "fake_model_and_backend_real_governance_queue_approval_patch_export_restart",
+  "browser": {
+    "pages": 12,
+    "checks": 14,
+    "uncaught_errors": 0
+  },
+  "webview": "real_hidden_window_passed",
+  "pushed": false,
+  "published": false,
+  "pre_final_suite": {
+    "collected": 2505,
+    "passed": 2464,
+    "failed": 0,
+    "skipped": 41,
+    "coverage": 82.73774828498408
+  },
+  "final_commit_evidence": "external_delivery_manifest",
+  "limitations": [
+    "no_interactive_pty",
+    "no_network_allowlist",
+    "host_approved_not_os_isolation",
+    "one_shot_approval_ui",
+    "provider_capabilities_unknown_without_probe",
+    "no_power_loss_atomicity_for_multifile_patch"
+  ],
+  "precommit_suite": {
+    "collected": 2508,
+    "passed": 2467,
+    "failed": 0,
+    "skipped": 41,
+    "exit_code": 0,
+    "coverage": 82.94563219936354
+  },
+  "targeted_platform": {
+    "passed": 59,
+    "skipped": 1,
+    "failed": 0
+  }
+}

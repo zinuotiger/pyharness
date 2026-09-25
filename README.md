@@ -3,6 +3,13 @@
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
 > 当前被测代码、测试统计与安装证据见 [STATUS.md](STATUS.md)。2026-09-21 的 2,110 collected / 2,106 passed / 4 skipped 及历史真实模型探针，仅适用于当时报告的版本和环境，不能代替当前验收。项目包含真实运行时、治理、持久化、CLI、ACP、Web 和原生入口；确定性模型测试不证明真实模型自主规划。
 
+## Platform Web V1
+
+`pyharness-desktop` 的 Web 首页现为真实数据驱动的中文工作台，原管理界面保留在 `/classic`。
+新平台包括会话、Run、审批、Agent 版本、Artifact、知识检索、连接与计划任务，以及默认拒绝执行的 Sandbox 策略。
+参阅 [工作台指南](docs/user-guide/web-workbench.md)、[架构与 API](docs/architecture/platform-web-v1.md)、[安全边界](docs/security/sandbox-boundary.md) 和 [本轮报告](reports/PYHARNESS-PLATFORM-WEB-V1.md)。
+当前机器的 Docker daemon 不可用；本轮没有读取用户模型凭据，真实模型和真实容器验收均准确记录为环境阻塞。`host_approved` 不具备 OS 级隔离。
+
 ## 从 Agent Demo 到 Governed Agent Runtime（从智能体演示到治理型智能体运行时）
 
 > 多数 Agent 仓库停在「能跑通一次对话」。本项目把**运行时治理**当成一等公民：工具执行经

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from pyharness.errors import raise_code
 from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册引用
+    PlatformResourcePayload,
     AgentMessagePayload,
     ApprovalOutcomePayload,
     ApprovalRequestedPayload,
@@ -285,6 +286,9 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # 治理层证据事件(M6;S5-1:只存引用,不复制事件内容,INV-G4;**普通攒批,
     # 不入 SYNC_TYPES**——证据是索引,丢失可由既有事件再派生,INV-E3)
     ("evidence.archived", EvidenceArchivedPayload, False),
+    ("platform.artifact", PlatformResourcePayload, False),
+    ("platform.sandbox", PlatformResourcePayload, False),
+    ("platform.knowledge", PlatformResourcePayload, False),
 )
 
 

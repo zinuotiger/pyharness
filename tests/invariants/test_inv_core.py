@@ -262,6 +262,8 @@ def test_inv01_append_only_predicate_detects_rewrite(tmp_path):
 # 白名单为**文件级**(不锁行号 ⇒ 不因文件上方增删而误报),且**双向校验**:
 # 既查"有写站点但未登记",也查"已登记但已无写站点"(防白名单过期)。
 _WRITE_ALLOWLIST = {
+    'core/sandbox.py': 'Bounded private Git input extraction, never a message history store.',
+    "application/platform_service.py": "Platform V1 uploaded artifact bytes; metadata is recorded in the existing owning SessionLog, never a second message history",
     "core/pty.py": "已禁用 PTY 的遗留 fd 写入是终端管道，非会话历史",
     "persistence.py": "SessionStore 追加句柄(open 'a')+ repair 专用原子截断重写"
                       "(_rewrite_without_tail:临时文件+fsync+rename,逐字节保留全部完整行)",

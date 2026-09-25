@@ -1083,7 +1083,16 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
         prev_src = getattr(ag_ctx, "turn_source", None)
         ag_ctx.turn_source = _turn_source_of(task)
         try:
-            res = await loop.wake(env, ctx=ag_ctx)
+            platform_runtime = getattr(ag_ctx, 'platform_runtime', None)
+            if platform_runtime is None:
+                res = await loop.wake(env, ctx=ag_ctx)
+            else:
+                try:
+                    res = await asyncio.wait_for(loop.wake(env, ctx=ag_ctx),
+                        timeout=platform_runtime.definition.timeout)
+                    await platform_runtime.finish(ag_ctx)
+                finally:
+                    await platform_runtime.release(ag_ctx)
         finally:
             ag_ctx.task_id = prev_task_id
             ag_ctx.turn_source = prev_src

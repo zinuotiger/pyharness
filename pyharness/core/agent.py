@@ -477,6 +477,7 @@ def create_agent(session_id: str, spine: Any, cfg: Any) -> Agent:
     ag.ctx.bus = spine.bus                       # 事件总线(留痕/订阅出口)
     ag.ctx.registry = spine.registry             # 注册表(F003 寻址)
     ag.ctx.config = cfg
+    ag.ctx.platform_runtime = getattr(spine, 'platform_runtime', None)
     # 出口脱敏单口(F016/INV-09):tool_fs / tool_web / spill 三处读 ``ctx.redact``,
     # 但 2026-09-21 R10 前**全库无注入点** ⇒ 生产恒缺失 ⇒ fs/web 出口静默降级为
     # 不打码(实测 read_file 输出的 `API_KEY=sk-AAAA…` 原文进事件与 LLM 上下文)。

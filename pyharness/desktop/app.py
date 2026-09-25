@@ -105,6 +105,8 @@ class DesktopApp:
         self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)
         self.api.middleware("http")(self._tenant_middleware)
         self.mount_api()
+        from .platform_api import mount_platform
+        mount_platform(self)
         bus = getattr(ctx, "bus", None)
         if bus is not None:
             self._sub = self._subscribe_all(bus)
@@ -500,6 +502,7 @@ class DesktopApp:
         """注册全部端点(只读投影 + 引擎门面写 + SSE)+ PyHError 统一错误体(ADR-011)。"""
         a = self.api
         a.add_api_route("/", self._index_page, methods=["GET"])
+        a.add_api_route("/classic", self._index_page, methods=["GET"])
         a.add_api_route("/api/sessions", self.create_session, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"],
@@ -730,13 +733,14 @@ class DesktopApp:
                 "code": "CRED-701",
                 "advice": "引导页需要凭证:全局 API token,或所声明租户的租户令牌"
                           "(?token=/头/cookie);见 docs/CFG.md 租户模型设置"})
+        page = 'index.html' if getattr(getattr(request, 'url', None), 'path', '/') == '/classic' else 'platform.html'
         try:
             import importlib.resources as _ir
-            html = _ir.files("pyharness.ui").joinpath("index.html").read_text(
+            html = _ir.files("pyharness.ui").joinpath(page).read_text(
                 encoding="utf-8")
         except Exception:                       # noqa: BLE001 资源缺失兜底
             from pathlib import Path as _P
-            p = _P(__file__).resolve().parent / "ui" / "index.html"
+            p = _P(__file__).resolve().parent.parent / "ui" / page
             try:
                 html = p.read_text(encoding="utf-8")
             except Exception:                   # noqa: BLE001

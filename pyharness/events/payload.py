@@ -115,6 +115,12 @@ class LlmResponsePayload(_PayloadBase):
         return self
 
 
+class PlatformResourcePayload(_PayloadBase):
+    """Platform resource lifecycle fact, stored in its owning SessionLog."""
+    action: str = Field(min_length=1, max_length=40)
+    record: dict
+
+
 class LlmUsagePayload(_PayloadBase):
     """llm.usage:计量事件;in/out_tokens ≥0(预算硬闸只用 token)。"""
     model: str = Field(min_length=1)

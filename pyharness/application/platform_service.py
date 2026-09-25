@@ -362,7 +362,7 @@ class PlatformService:
             fail('artifact_integrity_failed')
         return item, raw
 
-    async def record_generated(self, ctx, name, raw, *, manifest=None):
+    async def record_generated(self, ctx, name, raw, *, manifest=None, validation_status='not_run'):
         from pyharness.config import redact
         text=raw.decode('utf-8')
         if redact(text)!=text:
@@ -374,7 +374,7 @@ class PlatformService:
             run_id=f'{ctx.session.sid}~{ctx.task_id}',filename=name,size=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),storage_path=ident,
             media_type='text/x-diff' if manifest else 'application/json',
-            preview_type='patch' if manifest else 'json')
+            preview_type='patch' if manifest else 'json',validation_status=validation_status)
         path=safe_path(root,ident)
         from pyharness.core.tenant_settings import TenantSettingsStore
         TenantSettingsStore._atomic_write(path,raw)
@@ -397,6 +397,8 @@ class PlatformService:
         sid=item['session_id']
         if action not in {'apply','export'} or (action=='apply' and not item['manifest_sha256']):
             fail('invalid_artifact_action')
+        if action=='apply' and item.get('validation_status')=='failed':
+            fail('patch_validation_failed')
         queue=self.service._queues.get(sid)
         if queue is not None and (queue.status().depth or queue.status().running):
             fail('session_busy')
@@ -431,6 +433,8 @@ class PlatformService:
             action='export_approved'
             result={'download_allowed':True}
         else:
+            if item.get('validation_status')=='failed':
+                fail('patch_validation_failed')
             if not item['manifest_sha256']:
                 fail('invalid_patch')
             data=safe_path(self.root/'artifacts',item['storage_path']+'.manifest').read_bytes()

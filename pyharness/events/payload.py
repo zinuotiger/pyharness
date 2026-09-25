@@ -119,6 +119,8 @@ class PlatformResourcePayload(_PayloadBase):
     """Platform resource lifecycle fact, stored in its owning SessionLog."""
     action: str = Field(min_length=1, max_length=40)
     record: dict
+    command_summary: str | None = None
+    exit_code: int | None = None
 
 
 class LlmUsagePayload(_PayloadBase):

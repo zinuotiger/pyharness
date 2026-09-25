@@ -109,6 +109,7 @@ class ArtifactRecord(Model):
     retention_until: str | None = None
     created_at: str = Field(default_factory=utcnow)
     manifest_sha256: str | None = None
+    validation_status: Literal['not_run', 'passed', 'failed'] = 'not_run'
 
 
 class SandboxRecord(Model):
@@ -138,6 +139,7 @@ class TraceSpan(Model):
     token_usage: int = 0
     cost: float | None = None
     input_summary: str = ''
+    sandbox_id: str | None = None
     output_summary: str = ''
     error_code: str | None = None
 

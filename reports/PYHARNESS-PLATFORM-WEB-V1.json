@@ -48,5 +48,31 @@
     "passed": 59,
     "skipped": 1,
     "failed": 0
+  },
+  "remote_acceptance": {
+    "status": "pending_first_pr_workflow",
+    "base_branch": "codex/pyharness-engineering-rc-20260924",
+    "head_branch": "feat/pyharness-platform-web-v1",
+    "starting_commit": "40b80541c41038c161e73b96be6f6ab0e7d9e6fa",
+    "pr_url": null,
+    "windows": "pending",
+    "ubuntu_3_11": "pending",
+    "ubuntu_3_13": "pending",
+    "real_docker": "pending_ubuntu_real_container_job",
+    "real_model": "environment-blocked / manual acceptance pending",
+    "max_remote_fix_rounds": 3,
+    "exact_head_evidence": "CI summary and PR head SHA",
+    "pre_push_local": {
+      "collected": 2523,
+      "passed": 2482,
+      "failed": 0,
+      "skipped": 41,
+      "coverage": 83.08484441459592,
+      "platform_passed": 74,
+      "platform_skipped": 1,
+      "browser": "passed",
+      "package": "passed",
+      "review_confirmed_medium_fixed": 3
+    }
   }
 }

@@ -49,3 +49,13 @@ Protected workspace verification is read-only: RC retains the baseline commit wi
 ## Final precommit verification
 
 2508 collected, 2467 passed, 0 failed, 41 skipped, coverage 82.94563219936354%; exit 0. The final targeted Platform suite has 59 passed and 1 privilege-dependent skip. These results include local Git cloning and default/non-default tenant service-owned HTTP shutdown. Postcommit results and the exact commit SHA are recorded in the external delivery manifest to avoid a self-referential commit hash in this file.
+
+## Remote acceptance follow-up
+
+Starting Platform commit: `40b80541c41038c161e73b96be6f6ab0e7d9e6fa`. The stacked Draft PR targets `codex/pyharness-engineering-rc-20260924` from `feat/pyharness-platform-web-v1`. Remote acceptance is pending the first PR workflow; no real Docker pass is claimed yet.
+
+The existing RC Windows/Ubuntu matrix and layered gates are preserved. Added checks cover Platform APIs, system-browser automation at 1440x900 and 1280x900, 204/404/409/422/503 handling, public path/secret scans, and an independent real Docker job. Docker acceptance uses the fixed versioned Python image and a deterministic model with real queue/governance/approval/artifacts. Missing Docker/image, skipped Docker cases or owned container residue fail the job. The runner records actual image ID, daemon version, non-root user, mount/network/resource policy, process cleanup, artifact integrity and restart replay. Failed or incomplete foreground/background validation blocks patch application.
+
+Linux package acceptance validates base installation/import/CLI; HTTP and browser checks use the isolated source environment. Windows additionally checks installed native/desktop entry points, local HTTP and an actual hidden WebView. Artifact uploads are allowlisted with seven-day retention. Exact tested commit SHA is recorded in each CI summary and the PR head; it is not self-embedded in a commit that contains this report.
+
+Real-model status remains `environment-blocked / manual acceptance pending`. The optional explicit one-call smoke and its budget/billing boundary are documented in [remote acceptance guide](../docs/user-guide/platform-remote-acceptance.md). CI uses fake transport only. No model credentials are added to Actions. Host-approved execution is not OS isolation; no Windows Docker Desktop, microVM, hostile multi-tenant formal proof, network allowlist, PTY or power-loss atomicity claim is made.

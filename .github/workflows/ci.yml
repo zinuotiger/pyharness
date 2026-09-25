@@ -60,6 +60,12 @@ jobs:
       - name: High-risk remediation regression (including real loopback listeners)
         if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         run: python -B scripts/ci_verify.py test --suite high-risk --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Platform APIs, approval/artifact contracts, fail-closed and model smoke safety
+        run: python -B scripts/ci_verify.py test --suite platform --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Twelve Web pages in existing Edge or Chrome; real API and SSE
+        run: python -B scripts/platform_ci.py browser --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Python syntax, public path, secret and fixed-demo-data scan
+        run: python -B scripts/platform_ci.py scan --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: R02 real POSIX permissions; non-root; umask 022; no skipped cases
         if: ${{ !cancelled() && steps.prepare.outcome == 'success' && runner.os == 'Linux' }}
         run: python -B scripts/ci_verify.py test --suite posix --output-dir "${{ runner.temp }}/pyharness-ci"
@@ -78,6 +84,66 @@ jobs:
             ${{ runner.temp }}/pyharness-ci/artifacts/packages/*.whl
             ${{ runner.temp }}/pyharness-ci/artifacts/packages/*.tar.gz
             ${{ runner.temp }}/pyharness-ci/artifacts/packages/SHA256SUMS.txt
+            ${{ runner.temp }}/pyharness-ci/artifacts/browser/*.png
+          retention-days: 7
+          if-no-files-found: warn
+
+  docker:
+    name: Ubuntu 24.04 / real Docker Sandbox / governed code-change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.12"
+          enable-cache: false
+      - name: Real daemon evidence and controlled versioned image
+        run: |
+          docker version
+          docker info
+          docker pull python:3.13.2-slim-bookworm
+          docker image inspect python:3.13.2-slim-bookworm --format '{{json .RepoDigests}}'
+      - name: Minimal Linux Qt libraries for shared locked test environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0
+      - name: Locked isolated test environment
+        run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-docker"
+      - name: Real containers, isolation, bounded resources, cancellation and governed patch E2E; no skips
+        run: python -B scripts/ci_verify.py test --suite docker --output-dir "${{ runner.temp }}/pyharness-docker"
+      - name: Patch rollback/baseline, APIs and approval regression
+        run: python -B scripts/ci_verify.py test --suite platform --output-dir "${{ runner.temp }}/pyharness-docker"
+      - name: Browser health must report real Docker available
+        run: python -B scripts/platform_ci.py browser --expect-docker available --output-dir "${{ runner.temp }}/pyharness-docker"
+      - name: Public output and syntax scan
+        run: python -B scripts/platform_ci.py scan --output-dir "${{ runner.temp }}/pyharness-docker"
+      - name: Check no managed container remains
+        if: always()
+        shell: bash
+        run: |
+          remaining="$(docker ps -aq --filter label=pyharness.managed=true)"
+          if [ -n "$remaining" ]; then
+            echo "Owned sandbox residue detected; job failed"
+            docker rm -f $remaining
+            exit 1
+          fi
+      - name: Upload sanitized Docker facts and browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-docker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/pyharness-docker/artifacts/*-summary.json
+            ${{ runner.temp }}/pyharness-docker/artifacts/junit-*.xml
+            ${{ runner.temp }}/pyharness-docker/artifacts/browser/*.png
           retention-days: 7
           if-no-files-found: warn
 

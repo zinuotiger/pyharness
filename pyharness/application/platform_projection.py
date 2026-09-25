@@ -88,11 +88,18 @@ def project(session_id, events, live_tasks=()):
         if kind.startswith(('tool.', 'llm.', 'approval.', 'decision.', 'platform.', 'agent.')) and kind not in ('llm.chunk',):
             # Never expose llm.request/response bodies or private reasoning fields.
             public = {k: p[k] for k in ('name','code','reason','ok','model','in_tokens','out_tokens','cost_est') if k in p}
+            if kind=='platform.sandbox':
+                record=p.get('record',{})
+                public.update({k:record[k] for k in ('sandbox_id','backend','status','network','cpus','memory_mb','pids_limit') if k in record})
+                public.update({k:p[k] for k in ('action','command_summary','exit_code') if k in p})
             span=TraceSpan(span_id=f'{session_id}~{e.seq}', run_id=run.run_id if run else None,
                 type=kind, name=str(p.get('name') or kind), status='failed' if kind.endswith('error') else 'recorded',
                 parent_span_id=f"{session_id}~{e.trace['parent_seq']}" if getattr(e,'trace',None) and e.trace.get('parent_seq') else None,
                 started_at=e.ts, output_summary=summary(public), error_code=p.get('code'),
                 token_usage=(p.get('in_tokens',0)+p.get('out_tokens',0)) if kind=='llm.usage' else 0,cost=p.get('cost_est'))
+            if kind=='platform.sandbox' and re.fullmatch(r'ph-[0-9a-f]{32}',str(p.get('record',{}).get('sandbox_id',''))):
+                # Typed opaque identifier, not arbitrary command/output text.
+                span.sandbox_id=p['record']['sandbox_id']
             if kind=='tool.call':
                 span.status='running'
                 tool_spans[p['call_id']]=span

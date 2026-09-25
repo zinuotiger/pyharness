@@ -20,6 +20,7 @@ class PlatformRuntime:
         self.baselines = {}
         self.baseline_hashes = {}
         self.command_results = {}
+        self.process_tokens = {}
 
     async def sandbox(self, ctx):
         task = str(ctx.task_id or '')
@@ -100,9 +101,19 @@ class PlatformRuntime:
             original=before.get(name)
             changes.append({'path':name,'before_sha256':self.baseline_hashes.get(task,{}).get(name),'after':value})
             patch.extend(difflib.unified_diff((original or '').splitlines(True),(value or '').splitlines(True),fromfile='a/'+name,tofile='b/'+name))
+        commands=list(self.command_results.get(task,[]))
+        for token in self.process_tokens.get(task,[]):
+            result=self.platform.sandboxes.process_status(ident,token)
+            # A still-running, cancelled or failed process is not validation.
+            code=result.get('exit_code',-1)
+            commands.append({'tool':'proc.start','exit_code':code,'output':summary(result.get('output',''),4000),
+                             'incomplete':result.get('running',False)})
+            await ctx.session.append('platform.sandbox',{'action':'executed',
+                'record':self.platform.sandboxes.records[ident].model_dump(),
+                'command_summary':'background process completion','exit_code':code},actor='system',task_id=task,sync=True)
+        validation='failed' if any(c['exit_code']!=0 for c in commands) else 'passed' if commands else 'not_run'
         if changes:
-            await self.platform.record_generated(ctx,'changes.patch',''.join(patch).encode(),manifest=changes)
-        commands=self.command_results.get(task,[])
+            await self.platform.record_generated(ctx,'changes.patch',''.join(patch).encode(),manifest=changes,validation_status=validation)
         if commands:
             await self.platform.record_generated(ctx,'test-report.json',json.dumps(commands,ensure_ascii=False,indent=2).encode())
 
@@ -134,9 +145,15 @@ class PlatformRuntime:
                 from pyharness.application.platform_projection import summary
                 self.command_results.setdefault(task,[]).append({'tool':name,'exit_code':result['exit_code'],
                     'output':summary(result.get('output',''),4000),'truncated':result.get('truncated',False)})
+                await ctx.session.append('platform.sandbox',{'action':'executed',
+                    'record':self.platform.sandboxes.records[ident].model_dump(),
+                    'command_summary':summary(args.get('command',args.get('code','')),200),
+                    'exit_code':result['exit_code']},actor='system',task_id=task,sync=True)
                 return ProviderOutcome({**result,'ok':result.get('ok',result.get('exit_code')==0)})
             if name=='proc.start':
-                return json.dumps(await self.platform.sandboxes.start_process(ident,args['command']))
+                process=await self.platform.sandboxes.start_process(ident,args['command'])
+                self.process_tokens.setdefault(task,[]).append(process['pid'])
+                return json.dumps(process)
             if name=='proc.status':
                 return json.dumps(self.platform.sandboxes.process_status(ident,args['pid']))
             if name=='proc.kill':

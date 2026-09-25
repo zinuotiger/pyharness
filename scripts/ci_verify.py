@@ -183,6 +183,8 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     targets = {
         "full": ["tests"], "isolation": ["tests/unit/test_remediation_isolation.py"],
         "posix": ["tests/unit/test_posix_secret_permissions.py"],
+        "platform": ["tests/unit/test_platform_models.py", "tests/unit/test_platform_service.py", "tests/unit/test_platform_safety.py", "tests/unit/test_platform_remote.py"],
+        "docker": ["tests/docker_acceptance", "--real-docker"],
         "high-risk": [str(p.relative_to(ROOT)) for p in sorted((ROOT / "tests/unit").glob("test_remediation_*.py"))],
         "security": ["tests/security"], "acceptance": ["tests/acceptance"],
         "e2e": ["tests/e2e"], "invariants": ["tests/invariants"],
@@ -209,7 +211,7 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     finally:
         if raw.exists():
             counts = safe_junit(raw, artifacts / ("junit-" + suite + ".xml"))
-            if suite == "posix" and (counts["collected"] == 0 or counts["skipped"]):
+            if suite in {"posix", "docker"} and (counts["collected"] == 0 or counts["skipped"]):
                 code = code or 1
             evidence = {"suite": suite, **counts, "exit_code": code,
                         "python": platform.python_version(), "os": platform.system(),
@@ -466,7 +468,7 @@ def main(argv=None) -> int:
     parser.add_argument("stage", choices=("prepare", "test", "static", "package"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cov-fail-under", type=int, default=75)
-    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural"))
+    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural", "platform", "docker"))
     parsed = parser.parse_args(args)
     if parsed.cov_fail_under < 75 or parsed.cov_fail_under > 100:
         parser.error("coverage gate must be between 75 and 100 percent")

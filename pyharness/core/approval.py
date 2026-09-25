@@ -45,14 +45,13 @@ guard 链/executor(重入由 executor 编排,本模块不 import)。
    不落孤儿事件。headless 拒绝审计面由 guard 层 guard.rejected(GRD-401,policy_ref=
    APR-501)负责(tools_guard 偏离 3 同口径)。_deny_no_channel 保留为内部实现,
    只负责 raise(签名标注 -> str 但恒不返回,见 spec 函数速览表同名列)。
-3. 裁决唤醒单点 = on_verdict(总线订阅):approve/deny/_on_timeout 只负责强同步落结果
-   事件,唤醒经总线分发到达 on_verdict 完成(一次性消费);总线未装配(纯内存
-   SessionLog/单测)时 _emit_verdict 回落为直接 await on_verdict,保证不悬挂
-   (装配态走总线同路径,语义不变)。
-4. queue.suspended/resumed 已入 57 词表(可落盘)→ 经注入 session 尽力而为落盘,
+3. 裁决完成单点 = provider 拥有的 completion task:强同步裁决事件 → 必要队列
+   恢复确认 → pending 移除与 waiter 完成。总线消费者仅观察本地裁决，不拥有
+   状态迁移。approve_async/deny_async 等待整个完成边界;同步入口仅提交命令。
+4. queue.suspended/resumed 已入 57 词表(可落盘)→ 经注入 session 落盘,
    reason 取 spec 伪码字面量 "approval"(EVENT-SCHEMA §3.5.3 示例值 approval-pending
-   仅为示例,冲突以伪码为准);重复挂起合并(首请挂起、末决恢复)。落盘失败只记日志
-   不阻断审批主路径(与 scope._record 同款尽力而为)。
+   仅为示例,冲突以伪码为准);重复挂起合并(首请挂起、末决恢复)。队列转换失败
+   必须上抛并拒绝工具执行，不能以仅写事件降级为成功。
 5. approval.trust_*(trust_set/trust_added/trust_hit/trust_cleared)不在 57 词表
    (实测 session.append → EVT-102;词表扩展属 events 模块后续阶段门)→ 信任留痕经
    bus/日志尽力而为(scope.py 偏离 4 / tools_guard 偏离 1 同款先例),测试只断言
@@ -164,7 +163,8 @@ class ApprovalRequest:
     timer: Any = None                      # TTL asyncio.TimerHandle(仅 lead)
     batch: list = field(default_factory=list)  # 所属 60s 批(含自身;lead 恒 batch[0])
     batch_mono: float = 0.0                # 批创建单调时钟(60s 窗口判定)
-    decision_inflight: Optional[str] = None  # granted/denied/timeout 正在落盘
+    decision_inflight: Optional[str] = None  # 单次决定的预留，早于任何 await
+    completion: Any = None                 # provider 拥有的完成任务，API/关闭共同等待
 
     @property
     def is_terminal(self) -> bool:
@@ -211,6 +211,9 @@ class ApprovalProvider:
         # 不再自行 append,避免双写。
         self._queue_getter: Any = queue_getter
         self._queue_driven: bool = False        # 本次挂起是否由队列驱动(决定谁来恢复)
+        self._paused_queue: Any = None          # 恢复实际暂停过的队列，禁止重新取错对象
+        self._transition_lock = asyncio.Lock()  # 仅本 provider 的登记/队列转换边界
+        self._initializing: Any = None          # 当前 append 的日志与起始 seq，仅供路由
         self._channel: Optional[str] = default_channel_of(channel)
         """本 provider 服务的**交互外壳**归一化名(N5)。
 
@@ -286,6 +289,29 @@ class ApprovalProvider:
                 if cid:
                     self._grant_slots[cid] = binding
             return "granted"                     # executor 仍重入 guard 链
+        req = None
+        registered = []
+        try:
+            async with self._transition_lock:
+                if self._detached:
+                    raise_code("APR-503", why="审批服务已关闭")
+                req = await self._register(
+                    call, args_summary, ch, ttl, sid, sess, fp, binding, registered)
+            return await self._wait_any(req)
+        except BaseException:
+            # Registration can fail/cancel while append or pause is suspended.
+            # Only clean up a request this invocation actually registered.
+            if req is None and registered:
+                req = registered[0]
+            if req is not None:
+                try:
+                    await self._cancel_request(req)
+                except Exception:
+                    logger.warning("approval cleanup failed; preserving primary error", exc_info=True)
+            raise
+
+    async def _register(self, call, args_summary, ch, ttl, sid, sess, fp, binding, registered):
+        """Called with the provider transition lock, through pause acknowledgement."""
         # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件。
         # **键含 sid**(F-28):provider 按 spine 共享,子会话与父会话的指纹可相同,
         # 若只按指纹合并,子请求会挂进父批并被父的裁决唤醒(跨会话授权污染)。
@@ -297,7 +323,9 @@ class ApprovalProvider:
             req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,
                                    sess=sess, binding=binding)
             batch.append(req)                    # 挂到既有批,等同一裁决
-            return await self._wait_any(req)
+            req.batch = batch
+            registered.append(req)
+            return req
         # 开新批:强同步 approval.requested(approval_id = append 返回 seq)
         payload = {"tool": call.name, "args_summary": args_summary,
                    "ttl_ms": ttl, "risk": "high"}
@@ -306,8 +334,13 @@ class ApprovalProvider:
             trace["call_id"] = call.call_id
         if getattr(call, "parent_seq", None):
             trace["parent_seq"] = call.parent_seq
-        env = await sess.append("approval.requested", payload,
-                                actor="tool", sync=True, trace=trace)
+        stats = getattr(sess, "stats", None)
+        self._initializing = (sess, stats()["seq"]) if callable(stats) else None
+        try:
+            env = await sess.append("approval.requested", payload,
+                                    actor="tool", sync=True, trace=trace)
+        finally:
+            self._initializing = None
         req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,
                                sess=sess, binding=binding)
         req.approval_id = env.seq                # approval_id=请求事件 seq
@@ -326,22 +359,17 @@ class ApprovalProvider:
                               "复合键设计见 F1-X5/X6")
         self._pending[env.seq] = req
         self._merge[(sid, fp)] = req.batch
-        self._start_ttl(req)                     # TTL 定时器:到点无人 → timeout
-        try:
-            if not self._suspended:              # 首请挂起(F043;重复挂起合并)
-                self._suspended = True
-                self._suspend_log = sess
-                # R12-3:有队列则**真挂起**(队列写 queue.suspended);否则仅落事件
-                await self._pause_queue_or_record(sess)
-            return await self._wait_any(req)
-        except asyncio.CancelledError:
-            # F025/APR-502:取消可能落在 soft_append 与等待之间的任意 await 点
-            # (不只在 _wait_any 内)——此时未决批尚未被处理,置 denied 后按取消
-            # 协议重抛,保证无悬挂 Future(与 _wait_any 内处理幂等,重复进入无害)。
-            if req.state == "pending":
-                self._settle(req, "denied", by="system")
-                self._maybe_resume_soft()
-            raise
+        registered.append(req)
+
+        if self._detached:
+            self._settle(req, "denied", by="system")
+            return req
+        self._start_ttl(req)                     # TTL 包含等待 pause 确认的时间
+        if not self._suspended:
+            self._suspended = True
+            self._suspend_log = sess
+            await self._pause_queue_or_record(sess)
+        return req
 
     def _deny_no_channel(self, call: Any) -> str:
         """无通道直接拒(APR-501;零事件零等待,见偏离 2;恒 raise 不返回)。"""
@@ -361,7 +389,7 @@ class ApprovalProvider:
         self._spawn_outcome("granted", approval_id, by)
 
     async def approve_async(self, approval_id: int, *, by: str) -> None:
-        """异步裁决:等待 approval.granted 强同步落盘后才返回。"""
+        """等待强同步裁决、必要队列恢复及等待者可继续后才返回。"""
         await self._decide_async("granted", approval_id, by)
 
     def deny(self, approval_id: int, *, by: str) -> None:
@@ -369,7 +397,7 @@ class ApprovalProvider:
         self._spawn_outcome("denied", approval_id, by)
 
     async def deny_async(self, approval_id: int, *, by: str) -> None:
-        """异步裁决:等待 approval.denied 强同步落盘后才返回。"""
+        """等待拒绝生效及本审批持有的队列暂停解除后才返回。"""
         await self._decide_async("denied", approval_id, by)
 
     async def user_choice(self, options: list[str],
@@ -395,19 +423,28 @@ class ApprovalProvider:
         return hit or "中止"
 
     def _spawn_outcome(self, verdict: str, approval_id: int, by: str) -> None:
-        """裁决落地公共路径:身份校验 → 判 id(未知/已消费 → APR-503)→ 异步强同步落事件。"""
+        self._require_human(by)
+        if approval_id not in self._pending and self.owns_initializing(approval_id):
+            # CLI is a synchronous command sender. Its valid early command must
+            # join registration too; unknown/replayed IDs still fail below.
+            self._own(self._decide_async(verdict, approval_id, by))
+            return
         req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)
-        if not self._spawn(self._emit_outcome(req, sess, type_, by, actor="user")):
-            req.decision_inflight = None
+        req.completion = self._own(self._emit_outcome(req, sess, type_, by, actor="user"))
 
     async def _decide_async(self, verdict: str, approval_id: int, by: str) -> None:
-        """裁决落地公共异步路径;调用方可 await 确保事件已成为事实。"""
-        req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)
-        await self._emit_outcome(req, sess, type_, by, actor="user")
+        # A request event may already be visible while registration is awaiting
+        # persistence. Join registration before looking up its ID.
+        async with self._transition_lock:
+            req, sess, type_ = self._prepare_outcome(verdict, approval_id, by)
+            req.completion = self._own(self._emit_outcome(req, sess, type_, by, actor="user"))
+        await asyncio.shield(req.completion)
 
     def _prepare_outcome(self, verdict: str, approval_id: int, by: str) -> tuple:
         """同步完成身份与 pending 校验,保证无效裁决立即抛错而不是后台吞掉。"""
         self._require_human(by)
+        if self._detached:
+            raise_code("APR-503", why="审批服务已关闭")
         req = self._pending.get(int(approval_id))
         if req is None or req.state != "pending":
             raise_code("APR-503", approval_id=approval_id,
@@ -424,65 +461,71 @@ class ApprovalProvider:
         return req, sess, type_
 
     async def _emit_outcome(self, req: ApprovalRequest, sess: Any, type_: str,
-                            by: str, *, actor: str) -> None:
-        """强同步落结果事件(approval.granted/denied/timeout,by 框架打)+ 唤醒。"""
-        payload = {"approval_id": req.approval_id, "by": by,
-                   "ttl_ms": req.ttl_ms}
-        try:
-            await self._emit_verdict(sess, type_, payload, actor=actor)
-        except Exception:
-            req.decision_inflight = None
-            # 落盘失败 + TTL 已失效(如 _ttl_tick 已触发)→ 无再触发者,executor
-            # await request() 将永久挂起(P2 修复):内存侧 settle=denied 收口唤醒
-            # 等待者(事件未落 = 审计缺口,记日志),绝不悬挂。
-            self._settle(req, "denied", by="system")
-            self._maybe_resume_soft()
-            logger.warning("approval 结果落盘失败,settle=denied 收口 id=%s",
-                           req.approval_id)
-            raise
+                            by: str, *, actor: str, emit: bool = True) -> None:
+        """Only completion owner: durable verdict, queue acknowledgement, waiter."""
+        async with self._transition_lock:
+            verdict = req.decision_inflight
+            if req.is_terminal:
+                return
+            resume_attempted = False
+            try:
+                if emit:
+                    await self._emit_verdict(sess, type_,
+                        {"approval_id": req.approval_id, "by": by, "ttl_ms": req.ttl_ms},
+                        actor=actor)
+                resume_attempted = True
+                await self._release_if_last(req)
+            except BaseException:
+                # No granted waiter/slot on any incomplete commit. Retain the
+                # pending record if its queue transition still needs recovery.
+                released = False
+                if not resume_attempted:
+                    try:
+                        await self._release_if_last(req)
+                        released = True
+                    except Exception:
+                        logger.warning("approval recovery failed; preserving commit error",
+                                       exc_info=True)
+                self._settle(req, "denied", by="system", remove=released)
+                raise
+            if (verdict == "granted" and not self._detached
+                    and self._enabled and req.channel in CHANNELS):
+                req.by = by
+                self._remember(req)
+            self._settle(req, verdict, by)
+
+    async def _release_if_last(self, req: ApprovalRequest) -> None:
+        if self._suspended and not any(w is not req for w in self._pending.values()):
+            await self._resume_queue_or_record_async(req.log)
+            self._suspended = False
 
     async def _emit_verdict(self, sess: Any, type_: str, payload: dict, *,
                             actor: str) -> Any:
-        """强同步落盘(成功才返回;PERS-202 上抛);总线未装配时直接消费(偏离 3)。"""
-        env = await sess.append(type_, payload, actor=actor, sync=True,
-                                trace={"kind": "approval.verdict"})
-        # 唤醒判定:总线装配且与会话同总线 → 由总线分发触达 on_verdict(订阅者);
-        # 否则(纯内存会话/异总线)直接消费,保证等待者不悬挂(偏离 3)。
-        if self._bus is None or getattr(sess, "_bus", None) is not self._bus:
-            await self.on_verdict(type_, env)
-        return env
+        return await sess.append(type_, payload, actor=actor, sync=True,
+                                 trace={"kind": "approval.verdict"})
 
-    # ================================================== 裁决事件订阅(总线驱动)
     async def on_verdict(self, type_: str, payload: Any) -> None:
-        """裁决事件订阅(DIS-SEAM §6.2 subscriptions):按 approval_id 解决等待者。
+        """Legacy external verdict delivery; locally owned events are observations.
 
-        一次性消费:未知/已终态 id 再收裁决 → system.error(APR-503)忽略,不重复
-        执行(防重放);timeout 由本服务 TTL 定时器先落(定时器先到者胜,迟到外部
-        裁决即重放)。批内合并等待者随 lead 级联解决(各自配对同一裁决)。
+        Never await our own completion from a SessionLog subscriber: append must
+        finish dispatch and strong flush before completion can proceed.
         """
         p = payload.payload if hasattr(payload, "payload") else (payload or {})
         aid = p.get("approval_id") if isinstance(p, dict) else None
         req = self._pending.get(aid) if isinstance(aid, int) else None
-        if req is None or req.state != "pending":
-            await self._note_replay(aid)         # 未知/已消费:APR-503 事件化
-            return
-        if self._cross_session(payload, req):    # 异会话信封:按未知裁决忽略(偏离 6)
+        if req is None or req.state != "pending" or self._cross_session(payload, req):
             await self._note_replay(aid)
             return
+        if req.decision_inflight is not None:
+            return
         verdict = type_.rsplit(".", 1)[-1] if type_ else ""
-        if verdict not in VERDICTS:
+        if verdict not in VERDICTS or self._detached:
             return
         by = p.get("by") or ("system" if verdict == "timeout" else "")
-        sess = req.log or self._session
-        # 信任记录先于一切 await/唤醒(同步块内完成,保证 granted 返回时已就绪)
-        if (verdict == "granted" and self._enabled
-                and req.approval_id is not None
-                and req.channel in CHANNELS):
-            self._remember(req)                  # 会话级信任:granted 后记录
-        self._settle(req, verdict, by)           # 终态迁移 + 批内级联 + 唤醒
-        if self._suspended and not self._pending:  # 末决清空 → 恢复队列(F043)
-            self._suspended = False
-            await self._resume_queue_or_record_async(sess)
+        req.decision_inflight = verdict
+        req.completion = self._own(self._emit_outcome(
+            req, req.log, type_, by, actor="system", emit=False))
+        await asyncio.shield(req.completion)
 
     def _cross_session(self, payload: Any, req: ApprovalRequest) -> bool:
         """信封会话与本请求会话不符 → 异会话串扰过滤(偏离 6;无信封视为同会话)。"""
@@ -505,7 +548,8 @@ class ApprovalProvider:
             logger.warning("approval system.error 落盘失败: %s", exc)
 
     # ================================================== 终态迁移(一次性消费)
-    def _settle(self, req: ApprovalRequest, verdict: str, by: str) -> None:
+    def _settle(self, req: ApprovalRequest, verdict: str, by: str, *,
+                remove: bool = True) -> None:
         """终态迁移单点:批内全部 pending 成员迁移 + 取消 TTL + 解决各自 waiter。
 
         幂等:成员已终态跳过(防重复解决);lead 从 _pending 摘除后,同 id 再收
@@ -530,7 +574,7 @@ class ApprovalProvider:
                 self._ref_slots[w.call_id] = lead_ref
             if not w.waiter.done():
                 w.waiter.set_result(verdict)     # 唤醒 request() 等待者
-        if req.approval_id is not None and req.approval_id in self._pending:
+        if remove and req.approval_id is not None and req.approval_id in self._pending:
             self._pending.pop(req.approval_id, None)
 
     # ================================================== TTL(超时=denied 安全默认)
@@ -558,125 +602,68 @@ class ApprovalProvider:
             logger.warning("approval TTL 触发失败 id=%s: %s", req.approval_id, exc)
 
     async def _on_timeout(self, req: ApprovalRequest) -> None:
-        """超时路径:强同步落 approval.timeout(by=system)→ on_verdict 消费。
-
-        与外部迟到裁决竞争:本事件先落即 TTL 优先;若已被裁决解决(state != pending)
-        则放弃(不落孤儿 timeout 事件)。
-        """
-        if req.state != "pending":
-            return
-        if req.decision_inflight is not None:
+        if req.state != "pending" or req.decision_inflight is not None:
             return
         req.decision_inflight = "timeout"
-        sess = req.log or self._session
-        if sess is None:
-            req.decision_inflight = None
-            return
-        try:
-            await self._emit_verdict(sess, "approval.timeout",
-                                     {"approval_id": req.approval_id, "by": "system",
-                                      "ttl_ms": req.ttl_ms},
-                                     actor="system")
-        except Exception:
-            req.decision_inflight = None
-            # 超时落盘也失败 + 定时器已消费 → 同样 settle=denied 收口防悬挂(P2)
-            self._settle(req, "denied", by="system")
-            self._maybe_resume_soft()
-            logger.warning("approval timeout 落盘失败,settle=denied 收口 id=%s",
-                           req.approval_id)
-            raise
+        req.completion = self._own(self._emit_outcome(
+            req, req.log, "approval.timeout", "system", actor="system"))
+        await asyncio.shield(req.completion)
 
-    # ================================================== 等待与取消(APR-502)
     async def _wait_any(self, req: ApprovalRequest) -> str:
-        """等 waiter(裁决/超时/取消任一先到者解决)。
-
-        可被取消(F025):取消 → 本批全置 denied(APR-502 语义,不留悬挂 Future)
-        后按取消协议重抛 CancelledError;detach/会话关闭批量路径走 cancel_all。
-        """
         try:
-            return await req.waiter
+            return await asyncio.shield(req.waiter)
         except asyncio.CancelledError:
-            if req.state == "pending":           # 取消即 denied(APR-502)
-                self._settle(req, "denied", by="system")
-                self._maybe_resume_soft()
+            try:
+                await self._cancel_request(req)
+            except Exception:
+                logger.warning("approval cancel cleanup failed", exc_info=True)
             raise
+
+    def _cancel_request_start(self, req):
+        lead = req.batch[0]
+        if lead.state == "pending" and lead.decision_inflight is None:
+            lead.decision_inflight = "denied"
+            lead.completion = self._own(self._emit_outcome(
+                lead, lead.log, "approval.denied", "system", actor="system", emit=False))
+        return lead.completion
+
+    async def _cancel_request(self, req):
+        completion = self._cancel_request_start(req)
+        if completion is not None:
+            await asyncio.shield(completion)
 
     def cancel_all(self, reason: str = "detach") -> None:
-        """未决请求全置 denied(APR-502)+ 恢复队列;detach/会话关闭调用,无悬挂。"""
-        for batch in list(self._merge.values()):
-            for w in list(batch):                # 批内级联幂等,扫一遍即可全覆盖
-                if w.state == "pending":
-                    self._settle(w, "denied", by="system")
-        self._merge.clear()                      # 批表清空(全部终态)
-        self._maybe_resume_soft()
-
-    def _maybe_resume_soft(self) -> None:
-        """同步上下文恢复队列(取消/批量否认路径;尽力而为)。"""
-        if self._suspended and not self._pending:
-            self._suspended = False
-            self._resume_queue_or_record_sync()
+        """Reserve denial synchronously; request/aclose join its full completion."""
+        for req in list(self._pending.values()):
+            self._cancel_request_start(req)
 
     # ------------------------------------------------- 队列联动(R12-3)
     def _queue(self) -> Any:
-        """惰性取本会话队列(未装配/取值异常 → None)。"""
+        """惰性取本会话队列;取值异常上抛，禁止伪装成未装配。"""
         getter = self._queue_getter
         if getter is None:
             return None
-        try:
-            q = getter() if callable(getter) else getter
-        except Exception as exc:                 # noqa: BLE001 取值失败不阻断审批
-            logger.warning("approval 取队列失败(队列联动降级为仅事件): %s", exc)
-            return None
-        return q
+        return getter() if callable(getter) else getter
 
     async def _pause_queue_or_record(self, sess: Any) -> None:
-        """首请挂起:有队列 ⇒ **驱动它挂起**(队列是 queue.suspended 唯一写者);
-
-        无队列(单测/轻装配)⇒ 保持原语义:只落 `queue.suspended` 事件(尽力而为)。
-        2026-09-21 R12-3 修:此前**只落事件、从不驱动队列** ⇒ 日志宣称"队列已挂起"
-        而 `queue.status().paused` 恒 False(状态与事件不一致;`delete_session` 的
-        BUSY 守卫在等审批期间失效)。
-        """
         q = self._queue()
-        pause = getattr(q, "pause", None)
-        if callable(pause):
-            try:
-                await pause("approval", by="system")
-                self._queue_driven = True
-                return
-            except Exception as exc:             # noqa: BLE001 驱动失败退化为仅事件
-                logger.warning("approval 驱动 queue.pause 失败(退化为仅事件): %s", exc)
-        self._queue_driven = False
-        await self._soft_append(sess, "queue.suspended", {"reason": "approval"})
+        if q is not None:
+            # Record ownership before awaiting: failed/cancelled pause may have
+            # already changed the real queue, so cleanup must reach that queue.
+            self._paused_queue = q
+            self._queue_driven = True
+            await q.pause("approval", by="system")
+        else:
+            await sess.append("queue.suspended", {"reason": "approval"}, actor="system")
 
     async def _resume_queue_or_record_async(self, sess: Any) -> None:
-        """末决恢复(异步上下文):队列驱动过 → 由队列写 `queue.resumed`;否则自行落事件。"""
         if self._queue_driven:
+            await self._paused_queue.resume("approval", by="system")
             self._queue_driven = False
-            q = self._queue()
-            resume = getattr(q, "resume", None)
-            if callable(resume):
-                try:
-                    await resume("approval", by="system")
-                    return
-                except Exception as exc:         # noqa: BLE001 恢复失败退化为仅事件
-                    logger.warning("approval 驱动 queue.resume 失败: %s", exc)
-        await self._soft_append(self._suspend_log or sess, "queue.resumed",
-                                {"reason": "approval"})
-
-    def _resume_queue_or_record_sync(self) -> None:
-        """末决恢复(同步上下文):同上,但用 `_spawn` 投递队列的异步 resume。"""
-        if self._queue_driven:
-            self._queue_driven = False
-            q = self._queue()
-            resume = getattr(q, "resume", None)
-            if callable(resume):
-                try:
-                    self._spawn(resume("approval", by="system"))
-                    return
-                except Exception as exc:         # noqa: BLE001 无事件循环等
-                    logger.warning("approval 投递 queue.resume 失败: %s", exc)
-        self._record(self._suspend_log, "queue.resumed", {"reason": "approval"})
+            self._paused_queue = None
+        else:
+            await (self._suspend_log or sess).append(
+                "queue.resumed", {"reason": "approval"}, actor="system")
 
     # ================================================== 通道与指纹
     def set_default_channel(self, value: Any) -> None:
@@ -848,6 +835,7 @@ class ApprovalProvider:
         """摘订阅 + 取消全部等待(未决全置 denied)+ 清信任;幂等,随 ctx.close()。"""
         if self._detached:
             return
+        self._detached = True
         self.cancel_all(reason="detach")
         if self._bus is not None:
             try:
@@ -861,13 +849,43 @@ class ApprovalProvider:
 
     async def aclose(self):
         self.detach()
+        # Registration may be inside append/pause when detach is called.
+        async with self._transition_lock:
+            self.cancel_all(reason="close")
         while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            tasks = list(self._tasks)
+            await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+            # gather(done tasks) can finish synchronously on Python 3.13.
+            # Do not spin waiting for discard callbacks to get a loop turn.
+            self._tasks.difference_update(t for t in tasks if t.done())
+        async with self._transition_lock:
+            if self._suspended:
+                await self._resume_queue_or_record_async(self._suspend_log)
+                self._suspended = False
+            self._pending.clear()
+            self._merge.clear()
 
     # ================================================== 查询与公共只读
     def pending_count(self) -> int:
         """未决请求数(队列暂停/自检用;0 且曾挂起 → queue.resumed 由裁决路径落)。"""
         return len(self._pending)
+
+    def owns_initializing(self, approval_id: int, *, sid: Optional[str] = None) -> bool:
+        """Route a published requested event while registration still holds the lock.
+
+        The async decision revalidates pending under that same lock. This is only
+        routing evidence, never authorization and never a replay acceptance.
+        """
+        if self._detached or self._initializing is None:
+            return False
+        log, before_seq = self._initializing
+        if approval_id <= before_seq:
+            return False
+        if sid is not None and getattr(log, "sid", None) != sid:
+            return False
+        get = getattr(log, "get", None)
+        event = get(approval_id) if callable(get) else None
+        return event is not None and event.type == "approval.requested"
 
     def trust_count(self) -> int:
         """信任名单当前条数(审计/自检只读)。"""
@@ -898,6 +916,13 @@ class ApprovalProvider:
             return int(node)
         except (TypeError, ValueError):
             return default
+
+    def _own(self, coro):
+        task = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._task_error)
+        return task
 
     def _spawn(self, coro: Any) -> bool:
         """异步协程排程(fire-and-forget):失败只记日志;任务登记防 GC。"""

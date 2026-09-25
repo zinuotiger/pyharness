@@ -143,6 +143,7 @@ class TaskQueue:
         self._q: Deque[Task] = deque()
         self._running: Optional[Task] = None
         self._pause_reasons: Counter[str] = Counter()
+        self._pause_lock = asyncio.Lock()       # pause/resume 的落盘与唤醒不可交错
         self._resume_evt = asyncio.Event()               # 泵挂起唤醒(非忙等)
         self._enqueue_ready = asyncio.Event()            # 入队事件写完后才允许泵消费
         self._pump_task: Optional[asyncio.Task] = None   # 泵单例句柄(防多泵)
@@ -413,6 +414,10 @@ class TaskQueue:
 
     # ============================================================ 暂停/恢复
     async def pause(self, reason: str, *, by: str = "system") -> None:
+        async with self._pause_lock:
+            await self._pause_owned(reason, by=by)
+
+    async def _pause_owned(self, reason: str, *, by: str) -> None:
         """队列挂起(F015 联动):审批等待/预算暂停时停消费——只停弹任务,运行中任务
         不受影响,等待不超时饿死。
 
@@ -426,11 +431,15 @@ class TaskQueue:
             self._pause_reasons[reason] += 1
             return
         self._pause_reasons[reason] += 1          # 首挂起(0→1):发事件 + 泵阻塞
+        self._resume_evt.clear()                  # 在落盘 await 前关闭消费闸
         await self._session.append("queue.suspended",
             {"reason": reason, "by": by}, actor="system")
-        self._resume_evt.clear()                  # 泵在 wait() 处阻塞
 
     async def resume(self, reason: str, *, by: str = "system") -> None:
+        async with self._pause_lock:
+            await self._resume_owned(reason, by=by)
+
+    async def _resume_owned(self, reason: str, *, by: str) -> None:
         """解除一个挂起原因:计数减一;仍有其他原因保持挂起;全部解除才写
         queue.resumed 并唤醒泵。未挂起的 reason 幂等无害(无事件)。
 
@@ -441,11 +450,12 @@ class TaskQueue:
         if self._pause_reasons[reason] > 1:            # 该原因多层挂起:仅减计数
             self._pause_reasons[reason] -= 1
             return
-        del self._pause_reasons[reason]                # 减到 0:移除该原因
-        if self._pause_reasons:                        # 仍有其他原因 → 维持挂起
+        if len(self._pause_reasons) > 1:                # 仍有其他原因 → 维持挂起
+            del self._pause_reasons[reason]
             return
         await self._session.append("queue.resumed",
             {"reason": reason}, actor="system")        # 全解除才写 resumed(偏离 4)
+        del self._pause_reasons[reason]                # 落盘失败时保留暂停及重试能力
         self._resume_evt.set()                         # 唤醒泵(先 resumed 后放行)
 
     # ============================================================ 取消(F025)

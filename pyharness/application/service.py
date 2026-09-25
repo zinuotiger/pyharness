@@ -973,6 +973,9 @@ class ApplicationService:
                 psid = self._approval_sid_of(p, aid)
                 if sid is None or psid == sid:
                     matches.append(p)
+            elif callable(getattr(p, "owns_initializing", None)):
+                if p.owns_initializing(aid, sid=sid):
+                    matches.append(p)
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:

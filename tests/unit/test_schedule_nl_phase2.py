@@ -19,16 +19,15 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
 from pyharness import cli
 from pyharness.core import llm as llm_mod
-from pyharness.core.session import open_session
-from pyharness.core.task_queue import TaskQueue
-from pyharness.engine import assemble_real_engine, build_runner_components
-from pyharness.persistence import open_store
+from pyharness.engine import assemble_real_engine
 
 
 def _cfg(tmp_path):
@@ -113,11 +112,25 @@ class _llm_swap:
         return False
 
 
-async def _boot(cfg, sid: str, text: str):
-    """装配真实引擎 + 落 session.created/user.message(不建队列、不 submit)。"""
+async def _close_engine(ctx):
+    try:
+        await ctx.engine_spine.close()
+    finally:
+        ctx.scope.release()
+
+
+@pytest_asyncio.fixture
+async def engine_owners():
+    async with AsyncExitStack() as owners:
+        yield owners
+
+
+async def _boot(cfg, sid: str, text: str, owners):
+    """装配真实引擎与所属队列，登记清理后落初始消息；不 submit。"""
     ctx = await assemble_real_engine(cfg, sid=sid,
                                      sessions_dir=pathlib.Path(
                                          cfg.storage.sessions_dir), channel="cli")
+    owners.push_async_callback(_close_engine, ctx)
     await ctx.session.append("session.created",
                              {"title": "", "model": cfg.llm.model},
                              actor="system", sync=True)
@@ -138,10 +151,8 @@ async def _drain(q, timeout: float = 25.0) -> None:
             if not pending:
                 return
         for tid in pending:
-            try:
-                await asyncio.wait_for(q.wait_for(tid), timeout=timeout)
-            except asyncio.TimeoutError:
-                return
+            await asyncio.wait_for(q.wait_for(tid), timeout=timeout)
+    raise AssertionError("队列在限定轮次内没有进入空闲状态")
 
 
 CREATE = {"op": "create", "name": "daily_work", "kind": "cron",
@@ -150,13 +161,13 @@ CREATE = {"op": "create", "name": "daily_work", "kind": "cron",
 
 # ============================================================= 1. 闭环 + 到点回话
 @pytest.mark.asyncio
-async def test_scheduled_fire_returns_agent_message_to_same_session(tmp_path):
+async def test_scheduled_fire_returns_agent_message_to_same_session(tmp_path, engine_owners):
     """闭环:会话内建任务 → 到点 trigger → task.enqueued → AgentLoop →
     **同一会话**产生 agent.message。"""
     cfg = _cfg(tmp_path)
     with _llm_swap(ScriptedAdapter([[ _tc("schedule", CREATE) ]])):
-        ctx = await _boot(cfg, "s-p2loop00001", "每天早上8点提醒我开始工作")
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        ctx = await _boot(cfg, "s-p2loop00001", "每天早上8点提醒我开始工作", engine_owners)
+        q = ctx.task_queue
         await q.submit("每天早上8点提醒我开始工作")
         await _drain(q)
 
@@ -188,16 +199,16 @@ async def test_scheduled_fire_returns_agent_message_to_same_session(tmp_path):
 
 # ============================================================= 2. 会话隔离
 @pytest.mark.asyncio
-async def test_scheduled_trigger_stays_in_own_session(tmp_path):
+async def test_scheduled_trigger_stays_in_own_session(tmp_path, engine_owners):
     """A 会话的任务只触发到 A;B 的事件源看不到任何 schedule.*。"""
     cfg = _cfg(tmp_path)
     with _llm_swap(ScriptedAdapter([[ _tc("schedule", CREATE) ]])):
-        a_ctx = await _boot(cfg, "s-p2isoA00001", "每天早上8点提醒我开始工作")
-        aq = TaskQueue(a_ctx.session, runner=a_ctx.task_runner, max_queue=8)
+        a_ctx = await _boot(cfg, "s-p2isoA00001", "每天早上8点提醒我开始工作", engine_owners)
+        aq = a_ctx.task_queue
         await aq.submit("每天早上8点提醒我开始工作")
         await _drain(aq)
 
-        b_ctx = await _boot(cfg, "s-p2isoB00001", "你好")
+        b_ctx = await _boot(cfg, "s-p2isoB00001", "你好", engine_owners)
         assert "daily_work" not in b_ctx.engine_spine.schedule._jobs
         assert [e for e in b_ctx.session.events_after(0)
                 if e.type.startswith("schedule")] == []
@@ -211,11 +222,12 @@ async def test_scheduled_trigger_stays_in_own_session(tmp_path):
         assert [e for e in b_ctx.session.events_after(0)
                 if e.type.startswith("schedule")] == []
         b_ctx.engine_spine.schedule.stop()
+        await _drain(aq)
 
 
 # ============================================================= 3. 治理管道
 @pytest.mark.asyncio
-async def test_scheduled_run_tool_calls_still_governed(tmp_path):
+async def test_scheduled_run_tool_calls_still_governed(tmp_path, engine_owners):
     """到点任务里产生的 tool call 仍走 guard/decision/receipt(不绕过治理)。"""
     cfg = _cfg(tmp_path)
     scripted = [
@@ -225,8 +237,8 @@ async def test_scheduled_run_tool_calls_still_governed(tmp_path):
         [_tc("fs.list_dir", {"path": "."})],      # 到点那次 run 调一个真实工具
     ]
     with _llm_swap(ScriptedAdapter(scripted)):
-        ctx = await _boot(cfg, "s-p2gov000001", "每天早上8点列一下工作区目录")
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        ctx = await _boot(cfg, "s-p2gov000001", "每天早上8点列一下工作区目录", engine_owners)
+        q = ctx.task_queue
         await q.submit("每天早上8点列一下工作区目录")
         await _drain(q)
 
@@ -245,31 +257,24 @@ async def test_scheduled_run_tool_calls_still_governed(tmp_path):
 
 # ============================================================= 4. 重启恢复
 @pytest.mark.asyncio
-async def test_restart_recovery_keeps_job_and_can_fire(tmp_path):
+async def test_restart_recovery_keeps_job_and_can_fire(tmp_path, engine_owners):
     """重启(= 用同一会话事件源重建 spine)后任务仍在,且仍能到点触发。"""
     cfg = _cfg(tmp_path)
     with _llm_swap(ScriptedAdapter([[ _tc("schedule", CREATE) ]])):
-        ctx = await _boot(cfg, "s-p2rst000001", "每天早上8点提醒我开始工作")
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        ctx = await _boot(cfg, "s-p2rst000001", "每天早上8点提醒我开始工作", engine_owners)
+        q = ctx.task_queue
         await q.submit("每天早上8点提醒我开始工作")
         await _drain(q)
         ctx.engine_spine.schedule.stop()
         sdir = pathlib.Path(cfg.storage.sessions_dir)
-        # 落盘:持久化是异步批量写,_drain 完成不保证已刷盘(重启前须显式 flush)
-        store1 = ctx.engine_spine.persistence
-        await store1.flush()
-        if hasattr(store1, "close"):
-            store1.close()
+        # 完整关闭先停止写入者，再刷盘/关闭文件和索引。
+        await _close_engine(ctx)
 
         # —— 重启:丢掉内存 spine,从同一 JSONL 事件源重新装配 ——
-        store = open_store("s-p2rst000001", dir=sdir)
-        log_ = await open_session("s-p2rst000001", store)
-        spine2 = build_runner_components(cfg, log_=log_, bus=None,
-                                         sessions_dir=sdir, store=store,
-                                         attach_persistence=False)
-        q2 = TaskQueue(session=log_, runner=ctx.task_runner, max_queue=8)
-        from pyharness.engine import activate_orchestration
-        await activate_orchestration(spine2, task_queue=q2)   # 内含 recover
+        restarted = await assemble_real_engine(cfg, sid="s-p2rst000001",
+                                               sessions_dir=sdir, channel="cli")
+        engine_owners.push_async_callback(_close_engine, restarted)
+        spine2, log_, q2 = restarted.engine_spine, restarted.session, restarted.task_queue
         assert "daily_work" in spine2.schedule._jobs, "重启后任务应被回放恢复"
         job = spine2.schedule._jobs["daily_work"]
         assert job.next_fire_at is not None
@@ -280,19 +285,20 @@ async def test_restart_recovery_keeps_job_and_can_fire(tmp_path):
         await spine2.schedule._tick(sctx, now_dt=job.next_fire_at)
         after = len([e for e in log_.events_after(0) if e.type == "schedule.trigger"])
         assert after == before + 1, "重启后到点仍应触发"
+        await _drain(q2)
 
 
 # ============================================================= 5. 非法参数
 @pytest.mark.asyncio
-async def test_illegal_tool_args_rejected_by_scheduler(tmp_path):
+async def test_illegal_tool_args_rejected_by_scheduler(tmp_path, engine_owners):
     """LLM 产出非法结构(4 字段 cron)→ 由 Scheduler 拒绝:CFG-601 tool.error,
     且**零 schedule.registered**(校验不被绕过,也不落错误任务)。"""
     cfg = _cfg(tmp_path)
     bad = {"op": "create", "name": "broken", "kind": "cron",
            "expr": "0 8 * *", "intent": "坏的"}      # cron 只有 4 字段
     with _llm_swap(ScriptedAdapter([[ _tc("schedule", bad) ]])):
-        ctx = await _boot(cfg, "s-p2bad000001", "每天8点提醒我")
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        ctx = await _boot(cfg, "s-p2bad000001", "每天8点提醒我", engine_owners)
+        q = ctx.task_queue
         await q.submit("每天8点提醒我")
         await _drain(q)
 

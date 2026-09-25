@@ -669,32 +669,25 @@ async def _flush_session(sh: ShellCtx) -> None:
     事件类型如 ``agent.message``/``tool.result``/``llm.response`` 仍在攒批缓冲里,
     进程退出即丢),与 chat/run 形态(``ctx.session`` 是 SessionLog)行为不一致。
     """
-    log_ = getattr(sh.ctx, "session", None)
-    persist = getattr(log_, "_persistence", None) if log_ is not None else None
-    fl = getattr(persist, "flush", None)
-    if callable(fl):                           # ① 会话日志直连形态:先刷真源
+    errors = []
+    async def attempt(fn):
+        if not callable(fn): return
         try:
-            res = fl()
-            if hasattr(res, "__await__"):
-                await res
-        except Exception:                      # noqa: BLE001 刷盘失败不掩盖退出码
-            log.warning("会话收尾 flush 失败(事件已入攒批,疑磁盘问题)",
-                        exc_info=True)
-    spine = getattr(sh.ctx, "engine_spine", None)
-    close = getattr(spine, "close", None)
-    if callable(close):                        # ② 引擎外部资源(含 FTS detach/flush)
-        try:
-            await close()
-        except Exception:                      # noqa: BLE001 收尾尽力
-            log.warning("引擎外部资源收尾失败", exc_info=True)
-    shutdown = getattr(log_, "shutdown_all", None) if log_ is not None else None
-    if callable(shutdown):                     # ③ 会话门面形态(ACP/桌面):关 store
-        try:
-            res = shutdown()
-            if hasattr(res, "__await__"):
-                await res
-        except Exception:                      # noqa: BLE001 收尾尽力
-            log.warning("会话门面收尾失败", exc_info=True)
+            result = fn()
+            if hasattr(result, '__await__'): await result
+        except BaseException as exc: errors.append(exc)
+    if getattr(sh.ctx, '_acp_runtimes', None) or getattr(sh.ctx, '_acp_owns_llm', False):
+        from pyharness.acp import close_owned_runtimes
+        await attempt(lambda: close_owned_runtimes(sh.ctx))
+    await attempt(getattr(getattr(sh.ctx, 'engine_spine', None), 'close', None))
+    log_ = getattr(sh.ctx, 'session', None)
+    persist = getattr(log_, '_persistence', None)
+    if not getattr(getattr(persist, '_fh', None), 'closed', False):
+        await attempt(getattr(persist, 'flush', None))
+    await attempt(getattr(persist, 'close', None))
+    await attempt(getattr(log_, 'shutdown_all', None))
+    await attempt(getattr(getattr(sh.ctx, 'llm_runtime', None), 'aclose', None))
+    if errors: raise BaseExceptionGroup('CLI cleanup failed', errors)
 
 
 async def _scan_unhealthy(sessions_dir: Path, *,

@@ -106,6 +106,9 @@ def _validate_registry_url(url: str) -> str:
     return str(url).strip()
 
 
+from pyharness.core.lifecycle import admitted, stop_admissions
+
+
 class ApplicationService:
     """Session-scoped business facade independent from HTTP and UI frameworks."""
 
@@ -134,6 +137,8 @@ class ApplicationService:
         self._settings_store = TenantSettingsStore(
             tenants_dir(self._storage_root()))     # R31-2:派生点收口到 tenants_dir
         register_tenant_store(self.tenant_id, self._settings_store)
+        from pyharness.core.llm import LLMRuntime
+        self.llm_runtime = LLMRuntime()
 
     def _storage_root(self) -> Path:
         cfg = _session_module()._cfg_of(self.ctx)
@@ -173,7 +178,7 @@ class ApplicationService:
         profile = self._settings_store.active_profile(self.tenant_id)
         scoped = self.tenant_id != "default"
         if (profile is None and not scoped) or not hasattr(cfg, "model_dump"):
-            return cfg                      # 无改动:原样返回（保持既有语义/对象）
+            return copy.deepcopy(cfg)       # Runtime registration must not mutate caller settings.
         raw = cfg.model_dump()
         if scoped:                          # 索引库随会话目录同域（R14-8）
             storage = dict(raw.get("storage") or {})
@@ -199,16 +204,19 @@ class ApplicationService:
         return self._settings_store.state(self.tenant_id)
 
     def save_model_profile(self, body: dict) -> dict:
+        self._ensure_open()
         result = self._settings_store.upsert_profile(self.tenant_id, body)
         result["restart_required"] = bool(self._engines)
         return result
 
     def activate_model_profile(self, profile_id: str) -> dict:
+        self._ensure_open()
         result = self._settings_store.activate_profile(self.tenant_id, profile_id)
         result["restart_required"] = bool(self._engines)
         return result
 
     def delete_model_profile(self, profile_id: str) -> dict:
+        self._ensure_open()
         result = self._settings_store.delete_profile(self.tenant_id, profile_id)
         result["restart_required"] = bool(self._engines)
         return result
@@ -250,6 +258,7 @@ class ApplicationService:
                 self._surface._ctx_repair = getattr(ctx, "repair", None)
         return self._surface
 
+    @admitted
     async def require_session(self, sid: str) -> Any:
         sm = _session_module()
         sid = sm.validate_session_id(sid)
@@ -263,7 +272,9 @@ class ApplicationService:
             register_session_tenant(sid, self.tenant_id)
             return log_
 
+    @admitted
     async def queue_for(self, sid: str, log_: Any = None) -> TaskQueue:
+        self._ensure_open()
         if log_ is None:
             log_ = await self.require_session(sid)
         lock = self._queue_locks.setdefault(sid, asyncio.Lock())
@@ -285,7 +296,11 @@ class ApplicationService:
         from pyharness import engine as _eng
         from pyharness.engine import make_runner as _eng_make_runner
         cfg = self.effective_settings()
-        _eng.register_default_llm(cfg)
+        if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None:
+            # Explicit borrowed test/local adapters do not resolve host credentials.
+            models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]
+            if not all(self.llm_runtime.has_borrowed_adapter(model) for model in models):
+                raise_code('CRED-701', reason='tenant_model_profile_required')
         if spine is None:
             store = getattr(self.surface_mgr(), "_stores", {}).get(sid)
             sessions_dir = self._tenant_sessions_dir()
@@ -295,7 +310,7 @@ class ApplicationService:
                 attach_persistence=False,
                 # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
                 # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
-                channel=self.channel)
+                channel=self.channel, llm_runtime=self.llm_runtime)
             self._engines[sid] = spine
         if not getattr(spine, "_plugins_ready", False):
             await _eng._preload_plugins(spine)
@@ -321,27 +336,16 @@ class ApplicationService:
             return f"{self.channel}:{sid}"
         return f"{self.channel}:{self.tenant_id}:{sid}"
 
+    @admitted
     async def public_spine_for(self, sid: str) -> tuple[Any, Any]:
+        self._ensure_open()
         log_ = await self.require_session(sid)
         spine = self._engines.get(sid)
         if spine is None:
-            from pyharness import engine as _eng
-            store = getattr(self.surface_mgr(), "_stores", {}).get(sid)
-            sessions_dir = self._tenant_sessions_dir()
-            spine = _eng.build_runner_components(
-                self.effective_settings(), log_=log_,
-                bus=getattr(self.ctx, "bus", None),
-                sessions_dir=sessions_dir, store=store,
-                attach_persistence=False,
-                channel=self.channel)          # GAP-11:同 _engine_runner_for
-            self._engines[sid] = spine
-            # 队列注入必须先于 ticker 启动:activate_orchestration 会 recover 并起
-            # scheduler 分钟泵,而泵到点经 _SpineCtx.task_queue 读 spine.task_queue。
-            # 旧实现在此直接 activate_orchestration(spine)(**无队列**)→ 到点 _fire
-            # 抛 CYC-999「未注入 task_queue」:schedule.trigger 已落盘但任务不入队
-            # (BUG-2)。委托 queue_for 单例(它建 TaskQueue 并以 task_queue=q 激活)。
-            # 仅新装配路径需要:已存在的 spine 必来自本函数或 queue_for,二者均已注入。
+            # One authorized construction path, before creating or caching any
+            # model adapter. A rejected request must not leave a host-bound spine.
             await self.queue_for(sid, log_)
+            spine = self._engines[sid]
         return log_, spine
 
     def approval_for(self, sid: str, log_: Any) -> ApprovalProvider:
@@ -373,7 +377,9 @@ class ApplicationService:
                 out.append(p)
         return out
 
+    @admitted
     async def create_session(self) -> str:
+        self._ensure_open()
         mgr = self.surface_mgr()
         fn = getattr(mgr, "create", None)
         if not callable(fn):
@@ -385,6 +391,7 @@ class ApplicationService:
         register_session_tenant(sid, self.tenant_id)
         return str(sid)
 
+    @admitted
     async def delete_session(self, sid: str) -> dict:
         """Delete an idle session and all of its tenant-scoped files."""
         sid = _session_module().validate_session_id(sid)
@@ -482,8 +489,10 @@ class ApplicationService:
             payloads.append(validate_payload("user.attachment.image", payload))
         return payloads
 
+    @admitted
     async def create_message(self, sid: str, text: str, *,
                              attachments: Any = None) -> dict:
+        self._ensure_open()
         text = str(text or "").strip()
         if not text:
             raise_code("EVT-100", advice="消息不能为空")
@@ -498,6 +507,7 @@ class ApplicationService:
                                                  "session_id": sid})
         return {"task_id": task_id, "user_seq": env.seq}
 
+    @admitted
     async def list_jobs(self, sid: str) -> dict:
         _, spine = await self.public_spine_for(sid)
         owner = self.owner_for(sid)
@@ -509,7 +519,9 @@ class ApplicationService:
     def _job_dict(status: Any) -> dict:
         return _json_safe(_as_dict(status))
 
+    @admitted
     async def start_job(self, sid: str, intent: str) -> str:
+        self._ensure_open()
         intent = str(intent or "").strip()
         if not intent:
             raise_code("EVT-100", field="intent", advice="job intent 不能为空")
@@ -522,24 +534,29 @@ class ApplicationService:
                               tools=getattr(spine, "tools", None), budget=None)
         return await spine.jobs.start(intent, ctx)
 
+    @admitted
     async def job_status(self, sid: str, job_id: str) -> dict:
         _, spine = await self.public_spine_for(sid)
         return {"job": self._job_dict(
             await spine.jobs.status(job_id, by=self.owner_for(sid)))}
 
+    @admitted
     async def cancel_job(self, sid: str, job_id: str) -> bool:
         _, spine = await self.public_spine_for(sid)
         return bool(await spine.jobs.cancel(job_id, by=self.owner_for(sid)))
 
+    @admitted
     async def list_schedules(self, sid: str) -> dict:
         _, spine = await self.public_spine_for(sid)
         rows = [_json_safe(_as_dict(j)) for j in await spine.schedule.list_jobs()]
         return {"schedules": rows, "count": len(rows)}
 
+    @admitted
     async def schedule_action(self, sid: str, action: str, *,
                               name: str = "", kind: str = "cron",
                               expr: str = "", intent: str = "",
                               is_risky: Optional[bool] = None) -> dict:
+        self._ensure_open()
         action = str(action or "").strip().lower()
         name = str(name or "").strip()
         log_ = await self.require_session(sid)
@@ -564,15 +581,18 @@ class ApplicationService:
                        advice="action 须为 add/pause/resume/remove")
         return {"ok": True, "action": action, "name": name}
 
+    @admitted
     async def list_subagents(self, sid: str) -> dict:
         _, spine = await self.public_spine_for(sid)
         return {"status": _json_safe(_as_dict(spine.subagent.status()))}
 
+    @admitted
     async def spawn_subagent(self, sid: str, task: str, *,
                              tools_subset: Any = None,
                              deny_extra: Any = None,
                              budget_ratio: float = 0.25,
                              notify: bool = True) -> str:
+        self._ensure_open()
         from pyharness.core.subagent import SubagentSpec
         task = str(task or "").strip()
         if not task:
@@ -591,41 +611,49 @@ class ApplicationService:
                               bus=getattr(spine, "bus", None))
         return await spine.subagent.spawn(spec, ctx)
 
+    @admitted
     async def cancel_subagent(self, sid: str, sub_id: str) -> bool:
         _, spine = await self.public_spine_for(sid)
         return bool(await spine.subagent.cancel(sub_id, by=self.owner_for(sid)))
 
+    def _ensure_open(self):
+        if getattr(self, '_closing', False) and asyncio.current_task() not in getattr(self, '_admissions', {}):
+            raise_code('EVT-104', reason='service_closing', advice='服务正在关闭;拒绝新工作')
+
     async def shutdown(self) -> None:
-        # ① 队列排空**最先**(2026-09-21):本服务持有的 per-session 队列先排空(取消
-        #    在途/摘除排队 + 终态与段锚落盘),再关会话与引擎 —— 否则 `session.finished`
-        #    先落盘会让任务终态/段锚被 EVT-104 拒写(等待者悬挂,已实测复现)。
-        for sid, q in list(self._queues.items()):
-            if callable(getattr(q, "shutdown", None)):
-                try:
-                    await q.shutdown(reason="service-shutdown")
-                except Exception:                      # noqa: BLE001 收尾尽力
-                    log.warning("queue shutdown failed sid=%s", sid,
-                                exc_info=True)
-        surface = self._surface
-        if isinstance(surface, _session_module().DesktopSessionManager):
+        task = getattr(self, '_shutdown_task', None)
+        if task is None:
+            self._closing = True
+            task = self._shutdown_task = asyncio.create_task(self._shutdown_owned())
+        await asyncio.shield(task)
+
+    async def _shutdown_owned(self):
+        await stop_admissions(self)
+        errors = []
+        async def attempt(fn, *args, **kw):
             try:
-                await surface.shutdown_all()
-            except Exception:                          # noqa: BLE001
-                pass
-        seen: set[int] = set()
+                await fn(*args, **kw)
+            except BaseException as exc:
+                errors.append(exc)
         spines = list(self._engines.values())
-        if self.tenant_id == "default":
-            spines.append(getattr(self.ctx, "engine_spine", None))
+        if self.tenant_id == 'default':
+            spines.append(getattr(self.ctx, 'engine_spine', None))
+        seen = set()
         for spine in spines:
-            if spine is None or id(spine) in seen:
-                continue
-            seen.add(id(spine))
-            try:
-                await spine.close()
-            except Exception:                          # noqa: BLE001
-                pass
+            if spine is not None and id(spine) not in seen:
+                seen.add(id(spine))
+                await attempt(spine.close)
+        for queue in self._queues.values():
+            if callable(getattr(queue, 'shutdown', None)):
+                await attempt(queue.shutdown, reason='service-shutdown')
+        if isinstance(self._surface, _session_module().DesktopSessionManager):
+            await attempt(self._surface.shutdown_all)
+        await attempt(self.llm_runtime.aclose)
+        if errors:
+            raise BaseExceptionGroup('application cleanup failed', errors)
 
     # ------------------------------------------------------------ read models
+    @admitted
     async def list_sessions(self) -> dict:
         lst = self.surface_mgr().list()
         if callable(lst) or hasattr(lst, "__await__"):
@@ -653,6 +681,7 @@ class ApplicationService:
             sessions.append(row)
         return {"sessions": sessions, "count": len(sessions)}
 
+    @admitted
     async def session_messages(self, sid: str, after_seq: int = 0) -> dict:
         log_ = await self.require_session(sid)
         msgs = log_.derive_messages()
@@ -661,6 +690,7 @@ class ApplicationService:
         return {"sid": sid, "after_seq": int(after_seq), "to_seq": to_seq,
                 "messages": _with_message_origin(log_, msgs)}
 
+    @admitted
     async def session_timeline(self, sid: str, after_seq: int = 0,
                                kinds: str = "") -> dict:
         log_ = await self.require_session(sid)
@@ -674,6 +704,7 @@ class ApplicationService:
         return {"sid": sid, "base_seq": max(0, int(after_seq)),
                 "nodes": [asdict(n) for n in nodes]}
 
+    @admitted
     async def event_detail(self, sid: str, seq: int) -> dict:
         log_ = await self.require_session(sid)
         if isinstance(seq, bool) or not isinstance(seq, int):
@@ -685,6 +716,7 @@ class ApplicationService:
         from pyharness.desktop.projection import _env_dict
         return {"event": _env_dict(env)}
 
+    @admitted
     async def telemetry_report(self, sid: str) -> dict:
         """旧遥测面:按事件类型计数聚合(与治理因果无关,保留兼容)。"""
         log_ = await self.require_session(sid)
@@ -697,6 +729,7 @@ class ApplicationService:
                     "error": f"{type(e).__name__}:{e}"[:200]}
 
     # ------------------------------------------------------------ 治理审计(GAP-7)
+    @admitted
     async def governance_audit(self, sid: str, *, decision_id: str = "",
                                since_seq: int = 0, reconcile: bool = False,
                                limit: int = 100) -> dict:
@@ -777,6 +810,7 @@ class ApplicationService:
         }
 
     # ------------------------------------------------------------ 治理证据(GAP-8)
+    @admitted
     async def governance_evidence(self, sid: str, *, task_id: str = "") -> dict:
         """证据查询面:按任务段聚合的治理证据工件。
 
@@ -826,7 +860,9 @@ class ApplicationService:
                 return ev
         return None
 
+    @admitted
     async def resend_text(self, log_: Any, sid: str, text: str) -> dict:
+        self._ensure_open()
         text = str(text or "").strip()
         if not text:
             raise_code("EVT-100", advice="重发内容为空")
@@ -837,6 +873,7 @@ class ApplicationService:
                                                  "session_id": sid})
         return {"task_id": task_id, "user_seq": env.seq}
 
+    @admitted
     async def edit_message(self, sid: str, seq: int, text: str,
                            *, resend: bool = False) -> dict:
         text = str(text or "").strip()
@@ -848,6 +885,7 @@ class ApplicationService:
             out["resend"] = await self.resend_text(log_, sid, text)
         return out
 
+    @admitted
     async def resend_message(self, sid: str, seq: int) -> dict:
         log_ = await self.require_session(sid)
         env = log_.get(int(seq))
@@ -855,6 +893,7 @@ class ApplicationService:
             raise_code("EVT-101", seq=int(seq), hint="目标不是 user.message,无法重发")
         return await self.resend_text(log_, sid, env.payload.get("content", ""))
 
+    @admitted
     async def feedback(self, sid: str, seq: int, kind: str,
                        note: str = "") -> dict:
         kind = str(kind or "")
@@ -871,6 +910,7 @@ class ApplicationService:
                           actor="user", sync=True)
         return {"ok": True, "target_seq": int(seq), "kind": kind}
 
+    @admitted
     async def edit_last_user(self, sid: str, text: str,
                              *, resend: bool = False) -> dict:
         log_ = await self.require_session(sid)
@@ -879,6 +919,7 @@ class ApplicationService:
             raise_code("EVT-101", hint="会话里还没有可编辑的用户消息")
         return await self.edit_message(sid, env.seq, text, resend=resend)
 
+    @admitted
     async def resend_last_user(self, sid: str) -> dict:
         log_ = await self.require_session(sid)
         env = self._last_env_of(log_, "user.message")
@@ -886,6 +927,7 @@ class ApplicationService:
             raise_code("EVT-101", hint="会话里还没有可重发的用户消息")
         return await self.resend_message(sid, env.seq)
 
+    @admitted
     async def feedback_last_agent(self, sid: str, kind: str,
                                   note: str = "") -> dict:
         log_ = await self.require_session(sid)
@@ -895,6 +937,7 @@ class ApplicationService:
         return await self.feedback(sid, env.seq, kind, note)
 
     # ------------------------------------------------------------ approvals / asks
+    @admitted
     async def pending_approvals(self) -> dict:
         out: list[dict] = []
         seen: set[int] = set()
@@ -930,6 +973,9 @@ class ApplicationService:
                 psid = self._approval_sid_of(p, aid)
                 if sid is None or psid == sid:
                     matches.append(p)
+            elif callable(getattr(p, "owns_initializing", None)):
+                if p.owns_initializing(aid, sid=sid):
+                    matches.append(p)
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -944,6 +990,7 @@ class ApplicationService:
         raise_code("APR-503", approval_id=aid,
                    hint="未知/已裁决的 approval_id;同一审批至多一个结果(防重放)")
 
+    @admitted
     async def decide_approval(self, aid: int, decision: str, *,
                               sid: Optional[str] = None) -> dict:
         if sid is not None:
@@ -982,6 +1029,7 @@ class ApplicationService:
                 return str(sid)
         return ""
 
+    @admitted
     async def pending_asks(self) -> dict:
         out: list[dict] = []
         for p in self.ask_providers():
@@ -993,6 +1041,7 @@ class ApplicationService:
         out.sort(key=lambda x: (str(x.get("session_id") or ""), x["ask_id"]))
         return {"pending": out, "count": len(out)}
 
+    @admitted
     async def answer_ask(self, ask_id: int, *, choice: Any = None,
                          text: Any = None, sid: Optional[str] = None) -> dict:
         if sid is not None:
@@ -1019,15 +1068,19 @@ class ApplicationService:
                    hint="未知/已答复的 ask_id")
 
     # ------------------------------------------------------------ attachments / workflow / budget
+    @admitted
     async def upload_attachment(self, sid: str, attachment: dict) -> dict:
+        self._ensure_open()
         log_ = await self.require_session(sid)
         for payload in self.attachment_payloads([attachment], sid=sid):
             await log_.append("user.attachment.image", payload, actor="user")
         return {"ok": True, "sid": str(sid)}
 
+    @admitted
     async def run_workflow(self, sid: str, steps: list, *,
                            name: str = "desktop",
                            stop_on_fail: bool = False) -> dict:
+        self._ensure_open()
         if not isinstance(steps, list):
             raise_code("EVT-100", field="steps", advice="steps 须为非空字符串数组")
         log_ = await self.require_session(sid)
@@ -1039,6 +1092,7 @@ class ApplicationService:
         return {"ok": all(r["ok"] for r in results), "sid": sid,
                 "results": results}
 
+    @admitted
     async def budget_dashboard(self, sid: str) -> dict:
         log_ = await self.require_session(sid)
         usages = [e for e in log_.events_after() if e.type == "llm.usage"]
@@ -1094,6 +1148,7 @@ class ApplicationService:
         return SimpleNamespace(session=getattr(spine, "session", None),
                                bus=getattr(spine, "bus", None))
 
+    @admitted
     async def list_plugins(self) -> dict:
         out: list[dict] = []
         for sid, spine in self._engines.items():
@@ -1111,7 +1166,9 @@ class ApplicationService:
                 })
         return {"plugins": out, "count": len(out)}
 
+    @admitted
     async def plugin_action(self, kind: str, body: dict) -> dict:
+        self._ensure_open()
         pid = str((body or {}).get("id") or "")
         if not pid:
             return {"ok": False, "error": "缺插件 id"}
@@ -1184,7 +1241,9 @@ class ApplicationService:
             pass
         _eng._apply_preset(cfg, p, spine.tool_registry)
 
+    @admitted
     async def set_preset(self, body: dict) -> dict:
+        self._ensure_open()
         preset = str((body or {}).get("preset") or "")
         valid = ("strict", "standard", "readonly", "locked")
         if preset not in valid:
@@ -1225,6 +1284,7 @@ class ApplicationService:
             max_package_bytes=int(getattr(sk, "max_package_bytes", 5 * 1024 * 1024)),
             max_files=int(getattr(sk, "max_files", 200)))
 
+    @admitted
     async def search_skills(self, query: str,
                             registry_url: str = "") -> dict:
         cfg = _session_module()._cfg_of(self.ctx)
@@ -1237,9 +1297,11 @@ class ApplicationService:
         rows = await self.skill_installer().search(query, url)
         return {"registry_url": url, "skills": rows, "count": len(rows)}
 
+    @admitted
     async def install_skill(self, sid: str, name: str, *, version: str = "",
                             registry_url: str = "",
                             approved_by: str = "user") -> dict:
+        self._ensure_open()
         cfg = _session_module()._cfg_of(self.ctx)
         url = str(registry_url or getattr(getattr(cfg, "skills", None),
                                           "registry_url", "") or "").strip()
@@ -1258,8 +1320,10 @@ class ApplicationService:
         self.skills_mgr().scan()
         return result
 
+    @admitted
     async def remove_skill(self, sid: str, name: str, *,
                            approved_by: str = "user") -> dict:
+        self._ensure_open()
         result = self.skill_installer().remove(name, approved_by=approved_by)
         if result.get("removed"):
             log_ = await self.require_session(sid)
@@ -1269,8 +1333,10 @@ class ApplicationService:
             self.skills_mgr().scan()
         return result
 
+    @admitted
     async def rollback_skill(self, sid: str, name: str, version: str, *,
                              approved_by: str = "user") -> dict:
+        self._ensure_open()
         result = self.skill_installer().rollback(
             name, version, approved_by=approved_by)
         log_ = await self.require_session(sid)
@@ -1301,17 +1367,20 @@ class ApplicationService:
             pass
         return SkillManager(roots)
 
+    @admitted
     async def list_skills(self) -> dict:
         mgr = self.skills_mgr()
         rows = mgr.list()
         return {"skills": rows, "count": len(rows), "catalog": mgr.render_catalog()}
 
+    @admitted
     async def skill_detail(self, name: str) -> dict:
         data = self.skills_mgr().load(str(name))
         return {"ok": True, "name": data["name"],
                 "description": data["description"], "dir": data["dir"],
                 "body": data["body"]}
 
+    @admitted
     async def reload_skills(self) -> dict:
         counts = []
         for spine in self._engines.values():

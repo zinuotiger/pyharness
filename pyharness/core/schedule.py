@@ -806,6 +806,12 @@ class Scheduler:
         t = self._ticker_task
         if t is not None and not t.done():
             t.cancel()
+
+    async def aclose(self):
+        task = self._ticker_task
+        self.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
         self._ticker_task = None
 
 

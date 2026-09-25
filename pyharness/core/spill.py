@@ -9,7 +9,7 @@ storage.spill.max_per_file_bytes=10MB)、EVENT-SCHEMA §2/§3.4.6
 
 一句话:工具输出溢出基础设施(基础设施型 seam,Consumer=脊柱结果检查器,
 LLM 不直调 put)——超限原始大文本落**会话私有 spill 区(workspace 外、
-权限 600)**,上下文只放 ≤2KB 摘要 + spill_ref 引用;模型要全文经 LLM 可见的
+目录权限 700、文件权限 600)**,上下文只放 ≤2KB 摘要 + spill_ref 引用;模型要全文经 LLM 可见的
 读工具 storage.spill 按行取回,已读量计入 ctx.counters(spill_read_chars)
 防循环烧预算;**截断不吞事实,溢出部分可查**。
 
@@ -26,7 +26,7 @@ LLM 不直调 put)——超限原始大文本落**会话私有 spill 区(workspa
    跨会话引用一律 PERS-222 **零读取**(同 call 无部分返回)。
 4. 防循环烧预算:每次 read 的返回字符数累入 ctx.counters 的
    spill_read_chars 键,预算/轮数闸可据此终止"读全文-再读"死循环。
-5. 生命周期:enter=会话首访惰性建目录(权限 600,Windows ACL 尽力而为,主防线
+5. 生命周期:enter=会话首访惰性建目录(权限 700,Windows ACL 尽力而为,主防线
    =位置与路径 containment);detach=幂等摘除(摘读工具、摘定位器、摘订阅,
    **文件不删**——留 F060 归档/repair 读取窗口);purge_session 订阅
    session.finished 删除本会话 spill 目录(删除前 containment 校验、目录
@@ -96,7 +96,8 @@ DEFAULT_MAX_PER_FILE: int = 10_485_760   # 默认 10MB(storage.spill.max_per_fil
 DEFAULT_MAX_PER_SESSION_MB: int = 100
 DEFAULT_LIMIT: int = 200            # read 默认行数(1-1000)
 MAX_READ_LIMIT: int = 1000          # read 单次上限行(schema 同步锁死)
-MODE_PRIVATE: int = 0o600           # 私有目录/文件权限(spill 区 600)
+MODE_PRIVATE: int = 0o600           # 私有文件权限
+_MODE_PRIVATE_DIR: int = 0o700      # 目录需 owner execute 才能遍历，group/other 仍为零
 TOOL_NAME: str = "storage.spill"    # LLM 可见读工具名(模块职责 7:只读面)
 COUNTER_KEY: str = "spill_read_chars"  # 已读量计数键(防循环烧预算,F039 边界)
 SPILL_PATTERN: str = "spill-*.txt"  # spill 文件 glob(清理/审计用)
@@ -107,7 +108,7 @@ _REFUSED_ADVICE: str = "spill 引用越界,已拒绝读取;只允许本会话私
 # PERS-223 回喂文案(超限拒写)
 _TOO_BIG_ADVICE: str = "输出超过 10MB spill 上限;上游截断或分块"
 # PERS-221 回喂文案(写失败)
-_WRITE_FAIL_ADVICE: str = "查 spill 目录权限(600)与磁盘空间(F039)"
+_WRITE_FAIL_ADVICE: str = "查 spill 目录权限(700)、文件权限(600)与磁盘空间(F039)"
 
 
 # ------------------------------------------------------------------ 配置/上下文辅助
@@ -279,7 +280,7 @@ async def _maybe_await(r: Any) -> Any:
 
 # ------------------------------------------------------------------ enter
 async def enter(ctx: Any) -> Path:
-    """会话首访建私有目录(F039,幂等):spill_dir/<session_id>,权限 600。
+    """会话首访建私有目录(F039,幂等):spill_dir/<session_id>,权限 700。
 
     已存在则幂等返回;创建/权限失败 → PERS-221 结构化上抛(Consumer 转
     tool.error 回喂"输出归档写入失败,请重试")。返回归一后的会话 spill
@@ -295,9 +296,9 @@ async def enter(ctx: Any) -> Path:
                    advice=_WRITE_FAIL_ADVICE)
     d = root / sid
     try:
-        d.mkdir(parents=True, exist_ok=True)     # 幂等(会话首访惰性建)
+        d.mkdir(parents=True, exist_ok=True, mode=_MODE_PRIVATE_DIR)
         try:
-            os.chmod(d, MODE_PRIVATE)            # 600;Windows ACL 尽力而为(偏离 4)
+            os.chmod(d, _MODE_PRIVATE_DIR)       # POSIX owner 可遍历；Windows ACL 尽力而为
         except OSError as e:                     # 权限设置失败同样上抛(spec 伪码)
             raise_code("PERS-221", dir=str(d), cause=e, advice=_WRITE_FAIL_ADVICE)
     except OSError as e:
@@ -341,13 +342,17 @@ async def put(text: str, kind: str = "output", ctx: Any = None) -> dict:
     text = _redact(ctx, text)                    # 出口脱敏(INV-09,spill=明文出口)
     name = f"{FILE_PREFIX}{uuid.uuid4().hex[:8]}.txt"
     tmp = d / (name + ".tmp")                    # 临时文件:坏行不落地(rename 前不可见)
+    created = False
     try:
-        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        with open(tmp, "x", encoding="utf-8", newline="",
+                  opener=lambda path, flags: os.open(path, flags, MODE_PRIVATE)) as fh:
+            created = True
             fh.write(text)
         os.replace(tmp, d / name)                # 原子替换(Windows os.replace 同 rename)
     except OSError as e:
         try:                                    # 清理残留临时文件(尽力而为)
-            tmp.unlink(missing_ok=True)
+            if created:                         # 不删独占创建失败时他人已有的文件
+                tmp.unlink(missing_ok=True)
         except OSError:
             pass
         raise_code("PERS-221", dir=str(d), kind=kind, cause=e,
@@ -387,7 +392,8 @@ async def read(ref: str, start: int = 0, limit: int = DEFAULT_LIMIT,
         raise_code("TLB-802", tool=TOOL_NAME, ref=ref,
                    advice="spill 引用已失效;重跑源头工具重新生成输出")
     try:
-        raw = f.read_text(encoding="utf-8", newline="")
+        with f.open("r", encoding="utf-8", newline="") as fh:
+            raw = fh.read()
     except OSError as e:                         # 读 IO 失败 → 同样按失效回喂
         raise_code("TLB-802", tool=TOOL_NAME, ref=ref, cause=e,
                    advice="spill 文件读取失败;重跑源头工具重新生成输出")

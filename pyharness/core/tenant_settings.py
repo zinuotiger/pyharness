@@ -14,6 +14,11 @@ import os
 import re
 import secrets
 import stat
+import tempfile
+import threading
+import uuid
+from contextlib import contextmanager
+from functools import wraps
 from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +33,16 @@ _PROFILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _RESERVED = {".", ".."}
 _STORES: dict[str, "TenantSettingsStore"] = {}
 _SESSION_TENANTS: dict[str, set] = {}   # sid → 认领该 sid 的租户集合(多认领=归属未知)
+_TRANSACTION_LOCKS: dict[str, threading.RLock] = {}
+_TRANSACTION_GUARD = threading.Lock()
+
+
+def _transactional(method):
+    @wraps(method)
+    def call(self, tenant_id, *args, **kwargs):
+        with self._transaction(tenant_id):
+            return method(self, tenant_id, *args, **kwargs)
+    return call
 
 
 def normalize_tenant_id(value: Any) -> str:
@@ -96,7 +111,33 @@ class TenantSettingsStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def tenant_dir(self, tenant_id: str) -> Path:
-        return self.root / normalize_tenant_id(tenant_id)
+        path = self.root / normalize_tenant_id(tenant_id)
+        if not path.resolve().is_relative_to(self.root.resolve()):
+            raise_code('CRED-703', reason='tenant_path_escape')
+        return path
+
+    @contextmanager
+    def _transaction(self, tenant_id):
+        from pyharness.persistence import _FileLock
+        directory = self.tenant_dir(tenant_id)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        key = str(directory.resolve())
+        with _TRANSACTION_GUARD:
+            mutex = _TRANSACTION_LOCKS.setdefault(key, threading.RLock())
+        with mutex:
+            lock = _FileLock(directory / '.models.lock')
+            if not lock.try_acquire():
+                raise_code('CRED-703', reason='tenant_settings_busy')
+            try:
+                yield
+            except BaseException as primary:
+                try:
+                    lock.release()
+                except BaseException as secondary:
+                    primary.add_note(f'transaction unlock failed: {type(secondary).__name__}')
+                raise
+            else:
+                lock.release()
 
     # ---------------------------------------------------------- per-tenant 令牌
     def token_path(self, tenant_id: str) -> Path:
@@ -163,9 +204,35 @@ class TenantSettingsStore:
 
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}-')
+        tmp = Path(name)
+        try:
+            # mkstemp creates exclusively with mode 0600; verify before bytes exist.
+            if os.name != 'nt':
+                os.fchmod(fd, 0o600)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                    raise PermissionError('private file permissions unavailable')
+            remaining = memoryview(data)
+            while remaining:
+                n = os.write(fd, remaining)
+                if n <= 0:
+                    raise OSError('short private file write')
+                remaining = remaining[n:]
+            os.fsync(fd)
+            closing_fd, fd = fd, -1
+            os.close(closing_fd)
+            os.replace(tmp, path)
+        except BaseException as primary:
+            if fd != -1:
+                try:
+                    os.close(fd)
+                except BaseException as secondary:
+                    primary.add_note(f'private descriptor cleanup failed: {type(secondary).__name__}')
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as secondary:
+                primary.add_note(f'private temporary cleanup failed: {type(secondary).__name__}')
+            raise
 
     def _load_doc(self, tenant_id: str) -> dict:
         meta, _ = self._paths(tenant_id)
@@ -186,46 +253,92 @@ class TenantSettingsStore:
         self._atomic_write(meta, json.dumps(
             doc, ensure_ascii=False, indent=2).encode("utf-8"))
 
+    def _secret_path(self, tenant_id: str, doc: dict) -> Path:
+        _, legacy = self._paths(tenant_id)
+        name = doc.get('secret_generation')
+        if name is None:
+            return legacy
+        if not isinstance(name, str) or not re.fullmatch(r'model-secrets-[a-f0-9]{32}\.bin', name):
+            raise_code('CRED-703', reason='invalid_secret_generation')
+        path = legacy.with_name(name)
+        if path.is_symlink() or not path.resolve().is_relative_to(legacy.parent.resolve()):
+            raise_code('CRED-703', reason='secret_path_escape')
+        return path
+
     def _load_secrets(self, tenant_id: str) -> dict[str, str]:
-        _, secret_path = self._paths(tenant_id)
+        doc = self._load_doc(tenant_id)
+        secret_path = self._secret_path(tenant_id, doc)
         if not secret_path.exists():
+            if doc.get('secret_generation') or any(p.get('has_api_key') and not p.get('api_key_ref')
+                                                  for p in doc.get('profiles', [])):
+                raise_code('CRED-703', reason='committed_secret_generation_missing')
             return {}
-        raw = secret_path.read_bytes()
         try:
+            raw = secret_path.read_bytes()
             plain = _dpapi(raw, protect=False) if os.name == "nt" else raw
             data = json.loads(plain.decode("utf-8"))
         except Exception as exc:                       # noqa: BLE001
             raise_code("CRED-703", reason="tenant_secret_decrypt",
-                       detail=f"{type(exc).__name__}:{exc}",
+                       detail=type(exc).__name__,
                        advice="无法解密当前租户的模型密钥文件")
         if not isinstance(data, dict):
             raise_code("CRED-703", reason="tenant_secret_shape",
                        advice="租户密钥文件格式非法")
         return {str(k): str(v) for k, v in data.items()}
 
-    def _save_secrets(self, tenant_id: str, secrets: dict[str, str]) -> None:
-        _, secret_path = self._paths(tenant_id)
+    def _save_secrets(self, tenant_id: str, secrets: dict[str, str], *, path=None) -> None:
+        secret_path = path or self._secret_path(tenant_id, self._load_doc(tenant_id))
         plain = json.dumps(secrets, ensure_ascii=False).encode("utf-8")
         raw = _dpapi(plain, protect=True) if os.name == "nt" else plain
         self._atomic_write(secret_path, raw)
+
+    def _commit(self, tenant, doc, values):
+        old = self._secret_path(tenant, self._load_doc(tenant))
+        name = f'model-secrets-{uuid.uuid4().hex}.bin'
+        new = self.tenant_dir(tenant) / name
+        self._save_secrets(tenant, values, path=new)
+        doc['secret_generation'] = name
         try:
-            os.chmod(secret_path, stat.S_IRUSR | stat.S_IWUSR)
-        except OSError:
-            pass
+            self._save_doc(tenant, doc)  # sole commit point; old generation unchanged
+        except BaseException as primary:
+            try:
+                new.unlink(missing_ok=True)
+            except OSError as secondary:
+                primary.add_note(f'uncommitted secret cleanup failed: {type(secondary).__name__}')
+            raise
+        pending = False
+        candidates = [old, *self.tenant_dir(tenant).glob('model-secrets-*.bin')]
+        for retired in set(candidates):
+            if retired == new:
+                continue
+            if retired.name != 'model-secrets.bin' and not re.fullmatch(r'model-secrets-[a-f0-9]{32}\.bin', retired.name):
+                continue
+            try:
+                if retired.is_symlink():
+                    pending = True
+                    continue
+                retired.unlink(missing_ok=True)
+            except OSError:
+                pending = True
+        if pending:
+            log.warning('retired secret generation cleanup pending')
+        return pending
 
     @staticmethod
     def _mask_ref(profile: dict) -> str:
-        if profile.get("has_api_key"):
-            return "encrypted"
         ref = str(profile.get("api_key_ref") or "")
         if ref.startswith("env:"):
-            return ref
+            return 'env'
         if ref.startswith("file:"):
-            return "file:***"
+            return 'file'
+        if profile.get("has_api_key"):
+            return "encrypted"
         return ""
 
     def public_profile(self, profile: dict) -> dict:
-        row = {k: v for k, v in profile.items() if k != "api_key_ref"}
+        fields = ('id', 'label', 'provider', 'model', 'base_url', 'temperature',
+                  'max_tokens', 'fallback_models', 'has_api_key', 'created_at', 'updated_at')
+        row = {k: profile[k] for k in fields if k in profile}
         # Compatibility for older metadata written before has_api_key existed.
         if not row.get("has_api_key") and row.get("api_key_source") == "encrypted":
             row["has_api_key"] = True
@@ -241,16 +354,22 @@ class TenantSettingsStore:
             pass
         return sorted(names)
 
+    @_transactional
     def state(self, tenant_id: str) -> dict:
         tenant = normalize_tenant_id(tenant_id)
         doc = self._load_doc(tenant)
         profiles = [self.public_profile(dict(p)) for p in doc["profiles"]
                     if isinstance(p, dict)]
+        if tenant != 'default':
+            for row in profiles:
+                if row.get('api_key_source') in ('env', 'file'):
+                    row['credential_status'] = 'blocked_host_reference'
         return {"tenant_id": tenant, "active": str(doc.get("active") or ""),
                 "profiles": profiles, "count": len(profiles),
                 "tenants": self.list_tenants(),
                 "secure_storage": "windows-dpapi" if os.name == "nt" else "posix-0600"}
 
+    @_transactional
     def upsert_profile(self, tenant_id: str, body: dict) -> dict:
         tenant = normalize_tenant_id(tenant_id)
         doc = self._load_doc(tenant)
@@ -265,27 +384,43 @@ class TenantSettingsStore:
         if not base_url.startswith(("http://", "https://")):
             raise_code("EVT-100", field="base_url",
                        advice="base_url 必须以 http:// 或 https:// 开头")
-        api_key = str((body or {}).get("api_key") or "").strip()
-        api_key_ref = str((body or {}).get("api_key_ref") or "").strip()
+        for name in ('api_key', 'api_key_ref'):
+            if body.get(name) is not None and not isinstance(body[name], str):
+                raise_code('EVT-100', field=name, advice='credential must be a string')
+        clear = body.get('clear_api_key', False)
+        if not isinstance(clear, bool):
+            raise_code('EVT-100', field='clear_api_key')
+        api_key = (body.get('api_key') or '').strip()
+        api_key_ref = (body.get('api_key_ref') or '').strip()
+        if (api_key and api_key_ref) or (clear and (api_key or api_key_ref)):
+            raise_code('EVT-100', field='credential', advice='conflicting credential update')
         if api_key.startswith(("env:", "file:")):
             api_key_ref, api_key = api_key, ""
         if api_key_ref and not api_key_ref.startswith(("env:", "file:")):
             raise_code("EVT-100", field="api_key_ref",
                        advice="api_key_ref 只允许 env:NAME 或 file:PATH")
+        if api_key_ref and tenant != 'default':
+            raise_code('CRED-703', reason='host_reference_forbidden')
 
         profiles = [dict(p) for p in doc.get("profiles", [])
                     if isinstance(p, dict)]
         current = next((p for p in profiles if str(p.get("id")) == profile_id), {})
+        changed = bool(api_key or api_key_ref or clear)
+        if current and current.get('base_url') != base_url and not changed:
+            raise_code('EVT-100', field='base_url', advice='endpoint change requires explicit credential replacement or clear')
         secrets = self._load_secrets(tenant)
-        if api_key:
+        if clear:
+            secrets.pop(profile_id, None)
+            api_key_ref = ''
+        elif api_key:
             secrets[profile_id] = api_key
             api_key_ref = ""
-        elif profile_id in secrets:
-            pass
         elif api_key_ref:
             secrets.pop(profile_id, None)
         elif current.get("api_key_ref"):
             api_key_ref = str(current.get("api_key_ref"))
+        if api_key_ref and tenant != 'default':
+            raise_code('CRED-703', reason='host_reference_forbidden')
         now = datetime.now(timezone.utc).isoformat()
         row = {
             "id": profile_id,
@@ -305,6 +440,7 @@ class TenantSettingsStore:
             "has_api_key": bool(profile_id in secrets or api_key_ref),
             "created_at": current.get("created_at") or now,
             "updated_at": now,
+            'credential_revision': uuid.uuid4().hex if changed else current.get('credential_revision', uuid.uuid4().hex),
         }
         if not 0 <= row["temperature"] <= 1.5:
             raise_code("EVT-100", field="temperature", advice="temperature 须在 0-1.5")
@@ -316,12 +452,13 @@ class TenantSettingsStore:
         doc["profiles"] = profiles
         if not doc.get("active"):
             doc["active"] = profile_id
-        self._save_secrets(tenant, secrets)
-        self._save_doc(tenant, doc)
+        cleanup_pending = self._commit(tenant, doc, secrets)
         return {"ok": True, "tenant_id": tenant,
+                'cleanup_pending': cleanup_pending,
                 "profile": self.public_profile(row),
                 "active": str(doc.get("active") or "")}
 
+    @_transactional
     def activate_profile(self, tenant_id: str, profile_id: str) -> dict:
         tenant = normalize_tenant_id(tenant_id)
         profile_id = normalize_profile_id(profile_id)
@@ -333,6 +470,7 @@ class TenantSettingsStore:
         self._save_doc(tenant, doc)
         return {"ok": True, "tenant_id": tenant, "active": profile_id}
 
+    @_transactional
     def delete_profile(self, tenant_id: str, profile_id: str) -> dict:
         tenant = normalize_tenant_id(tenant_id)
         profile_id = normalize_profile_id(profile_id)
@@ -344,12 +482,13 @@ class TenantSettingsStore:
             doc["active"] = str(doc["profiles"][0].get("id")) if doc["profiles"] else ""
         secrets = self._load_secrets(tenant)
         removed_secret = secrets.pop(profile_id, None) is not None
-        self._save_secrets(tenant, secrets)
-        self._save_doc(tenant, doc)
+        cleanup_pending = self._commit(tenant, doc, secrets)
         return {"ok": before != len(doc["profiles"]), "tenant_id": tenant,
                 "profile_id": profile_id, "active": str(doc.get("active") or ""),
-                "secret_removed": removed_secret}
+                "secret_removed": removed_secret and not cleanup_pending,
+                'credential_revoked': removed_secret, 'cleanup_pending': cleanup_pending}
 
+    @_transactional
     def active_profile(self, tenant_id: str) -> Optional[dict]:
         tenant = normalize_tenant_id(tenant_id)
         doc = self._load_doc(tenant)
@@ -359,24 +498,49 @@ class TenantSettingsStore:
         return next((dict(p) for p in doc.get("profiles", [])
                      if str(p.get("id")) == active), None)
 
-    def resolve_ref(self, ref: str) -> str:
+    def resolve_ref(self, ref: str, *, binding=None) -> str:
         parts = str(ref or "").split(":", 2)
         if len(parts) != 3 or parts[0] != "tenant":
             raise_code("CRED-701", ref=ref, reason="tenant_ref")
         tenant = normalize_tenant_id(parts[1])
         profile_id = normalize_profile_id(parts[2])
-        secrets = self._load_secrets(tenant)
-        value = str(secrets.get(profile_id) or "")
-        if value:
-            return value
+        with self._transaction(tenant):
+            profile = self._validated_profile(tenant, profile_id, binding=binding)
+            values = self._load_secrets(tenant)
+            value = str(values.get(profile_id) or '')
+            if value:
+                return value
+            fallback = str(profile.get('api_key_ref') or '')
+            if fallback:
+                from pyharness.core.llm import resolve_secret_ref
+                return resolve_secret_ref(fallback)
+        raise_code('CRED-701', reason='missing', advice='模型档案未配置 API Key')
+
+    def _validated_profile(self, tenant, profile_id, *, binding=None):
         profile = next((p for p in self._load_doc(tenant).get("profiles", [])
                         if str(p.get("id")) == profile_id), None)
+        if profile is None:
+            raise_code('CRED-701', reason='missing_profile')
         fallback = str((profile or {}).get("api_key_ref") or "")
-        if fallback.startswith(("env:", "file:")):
-            from pyharness.core.llm import resolve_secret_ref
-            return resolve_secret_ref(fallback)
-        raise_code("CRED-701", ref=ref, reason="missing",
-                   advice=f"租户 {tenant} 的模型档案 {profile_id} 未配置 API Key")
+        if fallback and tenant != 'default':
+            raise_code('CRED-703', reason='host_reference_forbidden')
+        if binding is not None and (profile.get('credential_revision', '') != binding['revision']
+                                    or profile.get('base_url') != binding['endpoint']):
+            raise_code('CRED-703', reason='stale_model_binding', advice='模型配置已变更;请创建新会话')
+        return profile
+
+    def binding(self, ref, endpoint):
+        _, tenant, profile = ref.split(':', 2)
+        with self._transaction(tenant):
+            row = self._validated_profile(tenant, profile)
+            if row.get('base_url') != endpoint:
+                raise_code('CRED-703', reason='endpoint_binding_mismatch')
+            return {'revision': row.get('credential_revision', ''), 'endpoint': endpoint}
+
+    def validate_binding(self, ref, binding):
+        _, tenant, profile = ref.split(':', 2)
+        with self._transaction(tenant):
+            self._validated_profile(tenant, profile, binding=binding)
 
 
 def register_tenant_store(tenant_id: str, store: TenantSettingsStore) -> None:

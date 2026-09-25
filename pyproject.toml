@@ -2,6 +2,9 @@
 name = "pyharness"
 version = "0.1.0"
 description = "DSH 架构思想的 Python 复刻 - Agent 框架(66 功能/6 阶段)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",
@@ -48,8 +51,9 @@ build-backend = "hatchling.build"
 packages = ["pyharness"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"skills" = "skills"
-"examples" = "examples"
+"skills/demo-script/SKILL.md" = "skills/demo-script/SKILL.md"
+"skills/interview-pitch/SKILL.md" = "skills/interview-pitch/SKILL.md"
+"examples/plugins/hello_time/plugin.py" = "examples/plugins/hello_time/plugin.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

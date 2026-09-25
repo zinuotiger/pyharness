@@ -32,7 +32,7 @@ CFG.md §3.1/§3.5(llm.retry/llm.degrade/llm.probe/budget.task.* 配置键)。
 6. AdapterHealth.degraded 单次 ok 回 healthy:伪码 degraded 态永不回 healthy 属缺口
    (DIS 4.4 线性状态机 healthy→degraded→down→healthy 语义);llm.recovered 通知由
    probe_loop 按状态翻转发出(mark 保持纯状态机无副作用、无 bus 句柄依赖)。
-7. 探针 ping 超时(5s wait_for 的 TimeoutError)与非 PyHError 未预期异常同判失败
+7. 探针 ping 超时(5s deadline 的 TimeoutError)与非 PyHError 未预期异常同判失败
    (伪码异常表只列 PyHError);探针尽力而为,失败不落 llm.retry、不计 F029 用量。
 8. 降级/预算通知事件(system.error/budget.warn/llm.recovered)为尽力而为出口:
    EventBus.emit 同步返回分发协程,同步决策点 fire-and-forget(create_task 排程,
@@ -348,7 +348,11 @@ class FallbackChain:
                     continue
                 prev = self.health[name].state
                 try:
-                    await asyncio.wait_for(adp.ping(), timeout=5.0)
+                    # Keep the deadline in the owner task: Python 3.11 wait_for
+                    # can lose external cancellation when its child finishes
+                    # concurrently, leaving shutdown waiting for this loop.
+                    async with asyncio.timeout(5.0):
+                        await adp.ping()
                     self.health[name].mark(True)
                 except (PyHError, asyncio.TimeoutError):
                     self.health[name].mark(False)

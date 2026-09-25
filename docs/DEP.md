@@ -10,7 +10,7 @@
 
 **10 章**:1 环境准备 · 2 安装步骤 · 3 配置准备 · 4 分阶段运行指南 · 5 CLI 命令参考 · 6 故障排查 · 7 数据位置与备份 · 8 卸载/清理 · 9 面试录屏演示脚本 · 10 关联测试
 
-**命令环境约定**:全文命令在 **Windows 11 + git-bash(随 Git for Windows 安装)** 中执行;`~` = `C:\Users\<你的用户名>`;项目根 = `~/Desktop/mini-harness`。统一以 `uv run` 前缀调用(无需激活 venv),等效 PRD 中的裸 `pyharness` 命令。中文路径/文件在 git-bash 下原生支持 UTF-8。
+**命令环境约定**：本项目为独立 PyHarness，当前根目录为 `<PyHarness source directory>`。PowerShell 使用明确路径；Bash 片段仅供具备相应 shell 的环境。平台、中文与空格路径结果以本轮验收报告为准。历史阶段演示的预期输出是使用说明，不是当前运行证据。
 
 ---
 
@@ -20,7 +20,7 @@
 
 | 项 | 要求 | 说明 |
 |---|---|---|
-| OS | Windows 11(x64),git-bash | 全能力无 WSL/Docker(N9);macOS/Linux 仅 CI smoke |
+| OS | 当前主测 Windows 11 | CI 配置仅 Windows；其他平台须分别验证 |
 | Python | 3.11.x(uv 托管,§1.2) | 不要求系统预装 |
 | uv | ≥0.5 | 见 §1.2 |
 | 网络 | 可达 `https://api.deepseek.com` | 阶段1 起需要;代理/镜像 §1.4 |
@@ -51,19 +51,17 @@ uv python install 3.11       # 下载官方 CPython 3.11 到用户目录,不影�
 uv python list               # 预期列表中含 3.11.x(标 * 为默认)
 ```
 
-`pyproject.toml` 声明 `requires-python = ">=3.11"`,`uv sync` 时会自动挑选 3.11;显式 `uv venv --python 3.11` 亦可强制。
+`pyproject.toml` 要求 Python >=3.11，不会自动固定为3.11；若需3.11，请显式使用 `uv venv --python 3.11`。当前 CI 配置选择3.13。
 
 ## 1.3 依赖清单(说明性;权威清单 = 仓库 `pyproject.toml` + `uv.lock`)
 
 | 包 | 用途 | 最早阶段 |
 |---|---|---|
 | pydantic(v2) | 事件信封/配置 Schema 强校验(PRD §3.2) | 0 |
-| openai | DeepSeek OpenAI 兼容客户端(F012),多适配器底座 | 1 |
 | PyYAML | `config.yaml` 解析(F021) | 1 |
-| httpx | openai 传输层;网页抓取复用(F038) | 3 |
+| httpx | OpenAI 兼容 HTTP 传输及网页工具 | 3 |
 | fastapi + uvicorn + pywebview | Desktop 壳:pywebview 窗口 + FastAPI 同进程单 worker(F065);前端原生 JS/Vue | 6 |
 | pytest / pytest-cov | 验收测试与覆盖(N8) | 0(dev) |
-| pygount | 代码量/注释占比检查(N6/N7,check_size.py) | 0(dev) |
 
 SQLite(FTS/KV)、JSONL、asyncio、线程池全用标准库——运行期第三方 ≤15(N9),零 Node/Docker。
 
@@ -80,15 +78,14 @@ SQLite(FTS/KV)、JSONL、asyncio、线程池全用标准库——运行期第三
 ## 2.1 项目结构(PRD §2.6 最终态)
 
 ```text
-mini-harness/
+pyharness/
 ├── pyproject.toml / uv.lock    # 元数据+依赖;锁文件(uv sync 生成)
-├── pyharness/                  # 引擎包(python -m pyharness → CLI)
-│   ├── bus/                    # 阶段0:总线/分发/注册表/热插拔
-│   ├── core/                   # 阶段1:脊柱 8 模块(agent_loop/agent/session/llm/…)
-│   ├── capabilities/           # 阶段3-6:外围能力(Definition 自描述)
-│   ├── guards/  events/  config.py  errors.py
-│   ├── cli/  desktop/  acp/        # 阶段6:外壳(desktop = pywebview 壳 + FastAPI)
-│   └── __main__.py
+├── pyharness/                  # 引擎包；安装后使用 pyharness 命令
+│   ├── bus/                    # 插件总线
+│   ├── core/                   # 核心及能力实现
+│   ├── application/  governance/  events/
+│   ├── desktop/  desktop_native/  ui/
+│   └── cli.py  acp.py  config.py  engine.py
 ├── scripts/
 │   ├── demo_phase0.py … demo_phase6.py   # 里程碑演示(§8.3 门禁)
 │   └── check_size.py                      # N6/N7 检查
@@ -96,26 +93,27 @@ mini-harness/
 └── docs/  (本文与各设计文档)
 ```
 
-用户数据**不在**项目内,统一在 `~/.pyharness`(§7),删除项目目录不影响历史会话。
+默认用户数据位于 `~/.pyharness`；实际位置取决于 `storage.*` 配置，也可能在项目目录内。删除或清理项目之前，应核对实际数据路径并备份。
 
-## 2.2 获取代码
+## 2.2 使用已有仓库
 
-```bash
-git clone <仓库地址> ~/Desktop/mini-harness     # 或复制现成目录
-cd ~/Desktop/mini-harness
+```powershell
+Set-Location -LiteralPath '<PyHarness source directory>'
+git rev-parse --show-toplevel
 ```
 
-## 2.3 创建虚拟环境并安装依赖
+已有仓库无需重新 clone。先核对输出确为 PyHarness。
 
-```bash
-cd ~/Desktop/mini-harness
-uv python install 3.11        # 首次;已有可跳过
-uv sync --all-extras          # ①读 pyproject.toml ②建 .venv ③装基础+dev+desktop 依赖
-uv run python -c "import pydantic, openai, yaml; print('deps ok')"
-uv run pyharness --help       # 控制台入口可用;等价 python -m pyharness --help
+## 2.3 创建独立环境并安装
+
+```powershell
+python -m venv .venv
+& .venv/Scripts/python.exe -m pip install '.[desktop]'
+& .venv/Scripts/python.exe -c "import pydantic, httpx, yaml; print('deps ok')"
+& .venv/Scripts/pyharness.exe --help
 ```
 
-`uv sync` 幂等,随时可重跑(如依赖变更后 `uv sync` 即更新 .venv)。想用裸 `pyharness`:先 `source .venv/Scripts/activate`(Windows venv 激活脚本在 **Scripts/**,不是 bin/)。本手册统一 `uv run` 前缀,不依赖激活。
+只用 CLI 时安装 `.`；原生桌面安装 `.[native]`；开发测试安装 `.[dev]`。这些命令写入明确选择的环境，可能下载依赖。不要覆盖已有环境；受控验收使用仓库外目录。`requires-python >=3.11` 是版本范围，不会自动选择 3.11；当前 CI 选择 3.13。原生包不需要 Web 依赖。本文其他 `uv run` 命令要求使用者已配置相应环境。
 
 ## 2.4 冒烟(离线,不需要 API key)
 
@@ -213,10 +211,10 @@ uv run pyharness chat --once "你好,用一句话介绍你自己"
 | 2 | 流式/断网重试/401 降级/成本打印 | `uv run pyharness chat --stream` | §4.3 |
 | 3 | 整理文件夹按主题归类全自动 | `uv run pyharness run "整理 D:\\杂乱文件夹"` | §4.4 |
 | 4 | plan 批准执行;排队串行;定时触发 | `uv run pyharness plan "每周备份笔记"` | §4.5 |
-| 5 | subprocess/PTY;FTS 命中;compaction;fork | `uv run pyharness search "备份"` | §4.6 |
+| 5 | subprocess（PTY 暂时禁用）;FTS 命中;compaction;fork | `uv run pyharness search "备份"` | §4.6 |
 | 6 | repair 恢复;CLI 全命令;**桌面程序(双击 exe:对话+轨迹回放+审批弹窗)**;ACP | `pyharness-desktop` / `pyharness acp` | §4.7 |
 
-通用前置:命令在项目根 `~/Desktop/mini-harness` 执行;阶段1 起需 §3 配置就绪;每阶段结束跑本阶段验收模块,全绿 + 演示成功才算过阶段门(PRD §4.6/§8.3):`uv run pytest tests/acceptance/ -q --tb=short -k "f00"`(阶段0 的 F001-F006;阶段 N 换 `f0N`;`tests/invariants/` 的 9 条 INV 最先全绿)。
+通用前置：从已核对的 PyHarness 根执行。测试入口为 `python -m pytest tests/unit tests/integration tests/e2e tests/invariants tests/security`，以实际收集数量和退出码判断；零用例选择不算通过。下面阶段表和 GWT 预期不能代替当前运行结果。
 
 ## 4.1 阶段0:插件总线(离线,无 key)
 
@@ -234,7 +232,7 @@ uv run python -m pyharness.demo_bus
 [registry] 查询 plugin:beta → 未注册;脊柱 8 名保留(BUS-002)
 ```
 
-演示讲解点:①总线只中转、不落盘,日志订阅者到阶段1 才挂上;②热卸载后事件即停 = 里程碑;③背压"拒新不丢旧"(F005)。验收:`uv run pytest tests/acceptance -q -k "f00"`。其余各阶段"预期输出"均为**示意片段**,硬判据是事件类型与 seq(§4.2.2 落盘校验)。
+演示讲解点:①总线只中转、不落盘,日志订阅者到阶段1 才挂上;②热卸载后事件即停 = 里程碑;③背压"拒新不丢旧"(F005)。验收:`uv run pytest tests/unit/test_events.py -q`。其余各阶段"预期输出"均为**示意片段**,硬判据是事件类型与 seq(§4.2.2 落盘校验)。
 
 ## 4.2 阶段1:核心脊柱——查天气给建议 + guard 拦截
 
@@ -502,7 +500,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | uv run pyhar
 
 # 7 数据位置与备份
 
-## 7.1 数据目录(`storage.root` = `~/.pyharness` = `C:\Users\<用户名>\.pyharness`)
+## 7.1 默认数据目录(`storage.root` = `~/.pyharness` = `C:\Users\<用户名>\.pyharness`)
 
 | 数据 | 位置(CFG §3.6) | 内容 | 可否重建 |
 |---|---|---|---|
@@ -529,18 +527,7 @@ uv run pyharness chat --session <sid> --once "验证恢复"
 
 # 8 卸载/清理
 
-```bash
-# 1) 退出运行中的 pyharness(无后台常驻服务)
-# 2) 删项目与 .venv(历史会话在 ~/.pyharness,不受影响)
-rm -rf ~/Desktop/mini-harness
-# 3) 删用户数据(不可恢复——先按 §7.2 备份!)
-rm -rf ~/.pyharness
-# 4) 卸载 uv 装的 Python 3.11:uv python uninstall 3.11
-# 5) 卸载 uv:winget → winget uninstall astral-sh.uv;脚本装 → rm ~/.local/bin/uv*
-# 6) 清理 ~/.bashrc 中 DEEPSEEK_API_KEY/PH_*/PATH 追加行;uv cache clean(可选)
-```
-
-最小清理(只拆环境、留历史):只做 2)+4);重装项目后 `config validate` + `chat --session <旧sid>` 即恢复。
+先正常关闭自己启动的 PyHarness 进程，核对安装环境、`storage.root` 和备份位置。卸载应用环境与删除会话数据是两件事。本手册不提供固定目录递归删除命令，也不要求卸载共享 Python、uv 或清理全局缓存。重新安装后使用相同显式配置读取保留数据；重启不能保证正在执行的外部操作回滚。
 
 ---
 
@@ -596,7 +583,7 @@ ls -R ~/.pyharness/workspaces/<sid>/output/重复文件/    # 零副作用:文�
 
 # 10 关联测试(≥4 条 GWT,验证本手册命令真实可执行)
 
-归属:`tests/acceptance/test_f064_cli.py`、`test_f041_commands.py`、`test_f060_repair.py` 与 `tests/manual/test_deploy_*.py`;演示/发布会前各跑一遍。
+当前对应测试为 `tests/unit/test_cli.py`、`tests/unit/test_repair.py` 与 `tests/integration/`；以仓库实际文件与收集结果为准。
 
 **G1 环境与离线命令(§2/§3)**:Given 全新 Win11 + git-bash + uv,已 `uv sync`;When 依次 `config init`/`config validate`/`config show --json`;Then 退出码均 0,show 含 `llm.model=deepseek-chat`,无 API key 也全成功(离线)。
 
@@ -606,7 +593,7 @@ ls -R ~/.pyharness/workspaces/<sid>/output/重复文件/    # 零副作用:文�
 
 **G4 headless 危险默认拒绝(§9/R8)**:When `echo "删掉工作区里所有 .md 文件" | uv run pyharness run "整理并清理临时文件"`(stdin 非 tty);Then 全程无 `fs.delete_file` 真实执行;`guard.rejected`(critical)落盘;工作区文件原样(INV-05);报告含"拒绝"。
 
-**G5 未知斜杠与退出(§5)**:Given 交互 chat(pty);When 输入 `/foo`;Then 回显 EVT-105、会话继续、`llm.request` 事件数不增;When 连续两次 Ctrl-C;Then 退出码 0。
+**G5 未知斜杠与退出(§5)**:Given 交互 chat(pty);When 输入 `/foo`;Then 回显 EVT-105、会话继续、`llm.request` 事件数不增;When 连续两次 Ctrl-C；Then 中断退出码130；`/exit` 或 Ctrl-D 正常退出码0。
 
 **G6 损坏修复与备份恢复(§6/§7)**:Given 备份 `<sid>.jsonl` 后截断尾部 2 行;When `repair --session <sid>`;Then 声明 lost=2 与 backup、追加 `session.recovered`、会话可继续;When 备份覆盖后再次 repair;Then 无 lost,回放与备份一致。
 
@@ -624,3 +611,10 @@ ls -R ~/.pyharness/workspaces/<sid>/output/重复文件/    # 零副作用:文�
 ---
 
 *本文档由 PyHarness 文档流水线产出。命令均为 Windows git-bash + uv 兼容。*
+
+## 当前运行边界（2026-09-24）
+
+- 当前 PTY 路径关闭并返回 TLB-807；安装 pty extra 不会重新开启。strict 默认不开放 exec，使用 standard 仍须通过治理与审批。
+- Web 只接受回环 127.0.0.1 / localhost / ::1，非回环始终拒绝；token 不放宽绑定限制。IPv6 URL 使用 [::1]，就绪检查核对本次 server.started 及同一地址。
+- JSONL 重启恢复的是已保存历史，不会自动重放运行中 Job；取消和超时不等于远端副作用撤销。
+- 本轮包与当前源树的关系见 STATUS 和修复报告；旧本地候选包不自动包含新修复。

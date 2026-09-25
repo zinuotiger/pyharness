@@ -59,9 +59,13 @@ class StdioTransport(Transport):
         self._seq = 0
         self._stderr_task: Optional[asyncio.Task] = None
         self._request_lock = asyncio.Lock()
-        self._close_lock = asyncio.Lock()
+        self._close_task: Optional[asyncio.Task] = None
+        self._closed = False
 
     async def _ensure(self) -> None:
+        if self._closed or (self._proc is not None and self._proc.returncode is not None):
+            raise_code("TLB-805", module="mcp", hint="MCP 连接已关闭;需显式重新初始化。"
+                       "此前未确认的远端操作结果不确定,副作用未撤销;先查询核对,不要盲目重试写入")
         if self._proc is not None and self._proc.returncode is None:
             return
         flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
@@ -82,53 +86,78 @@ class StdioTransport(Transport):
             log.debug("mcp stderr: %s", line.decode("utf-8", errors="replace").rstrip())
 
     async def request(self, method: str, params: dict) -> Any:
-        timeout = False
         async with self._request_lock:
             await self._ensure()
             proc = self._proc
             assert proc is not None and proc.stdin is not None and proc.stdout is not None
             self._seq += 1
             req_id = self._seq
-            envelope = json.dumps({"jsonrpc": "2.0", "id": req_id,
-                                   "method": method, "params": params},
-                                  ensure_ascii=False)
-            proc.stdin.write((envelope + "\n").encode("utf-8"))
-            await proc.stdin.drain()
-            if method.startswith("notifications/"):
-                return None                     # JSON-RPC 通知无响应
+            message = {"jsonrpc": "2.0", "method": method, "params": params}
+            if not method.startswith("notifications/"):
+                message["id"] = req_id
+            envelope = json.dumps(message, ensure_ascii=False)
             try:
-                resp = await asyncio.wait_for(proc.stdout.readline(),
-                                              timeout=self._timeout)
-            except asyncio.TimeoutError:
-                timeout = True
-                data = {}
-            else:
-                if not resp:
-                    raise_code("TLB-805", module="mcp", method=method,
-                               hint="MCP server 已退出或关闭 stdout")
-                try:
-                    data = json.loads(resp.decode("utf-8"))
-                except (UnicodeDecodeError, ValueError) as exc:
-                    raise_code("TLB-805", module="mcp", method=method,
-                               hint=f"MCP 返回非 JSON:{type(exc).__name__}")
-        if timeout:
-            await self.close()
-            raise_code("TLB-805", module="mcp", method=method,
-                       hint=f"MCP 请求超时(>{self._timeout}s),传输已关闭")
-        if data.get("id") != req_id:
-            raise_code("TLB-805", module="mcp", method=method,
-                       hint=f"MCP 响应 id 不匹配:期望 {req_id},收到 {data.get('id')}")
+                async with asyncio.timeout(self._timeout):
+                    proc.stdin.write((envelope + "\n").encode("utf-8"))
+                    await proc.stdin.drain()
+                    log.debug("mcp sent pid=%s id=%s method=%s tool=%s", proc.pid,
+                              message.get("id"), method, params.get("name"))
+                    if method.startswith("notifications/"):
+                        return None             # JSON-RPC 通知无 id、无响应
+                    while True:
+                        resp = await proc.stdout.readline()
+                        if not resp:
+                            raise ConnectionError("server closed stdout")
+                        data = json.loads(resp.decode("utf-8"))
+                        if not isinstance(data, dict) or data.get("jsonrpc") != "2.0":
+                            raise ValueError("invalid JSON-RPC envelope")
+                        if "id" not in data and str(data.get("method", "")).startswith("notifications/"):
+                            continue
+                        if data.get("id") != req_id:
+                            raise ValueError("response id mismatch")
+                        break
+            except asyncio.CancelledError:
+                # Discard late responses; a new stream must initialize explicitly.
+                log.warning("MCP cancelled id=%s method=%s; remote outcome unknown, no rollback", req_id, method)
+                await self.close()
+                raise
+            except (OSError, asyncio.TimeoutError, ValueError) as exc:
+                await self.close()
+                raise_code("TLB-805", module="mcp", method=method, request_id=req_id,
+                           hint=f"MCP 传输失败({type(exc).__name__}),连接已关闭;"
+                           "远端操作结果不确定,可能仍在运行,副作用未撤销;先查询核对,不要盲目重试写入")
         if "error" in data:
             raise_code("TLB-805", module="mcp",
                        hint=f"{method} 远端错误:{data['error']}")
         return data.get("result")
 
     async def close(self) -> None:
-        async with self._close_lock:
+        self._closed = True
+        task = self._close_task
+        if task is None or (task.done() and (task.cancelled() or task.exception())):
+            task = self._close_task = asyncio.create_task(self._close_owned())
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancelled = exc
+            except BaseException as exc:
+                if cancelled is not None:
+                    cancelled.add_note(f'MCP cleanup failed: {type(exc).__name__}')
+                    raise cancelled from exc
+                raise
+        if cancelled is not None:
+            raise cancelled
+
+    async def _close_owned(self) -> None:
+        # The cleanup task, rather than any individual waiter, owns these handles.
+        # Keep them available for a subsequent close if cleanup itself fails.
+        if self._proc is not None:
             proc = self._proc
-            self._proc = None
-            if proc is None:
-                return
             if proc.stdin is not None and not proc.stdin.is_closing():
                 proc.stdin.close()
                 try:
@@ -137,14 +166,18 @@ class StdioTransport(Transport):
                     pass
             if proc.returncode is None:
                 try:
-                    proc.terminate()
+                    # EOF is the normal stdio shutdown; allow the server to flush.
                     await asyncio.wait_for(proc.wait(), timeout=3)
-                except (ProcessLookupError, asyncio.TimeoutError):
+                except asyncio.TimeoutError:
                     try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    await proc.wait()
+                        proc.terminate()
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except (ProcessLookupError, asyncio.TimeoutError):
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        await proc.wait()
             if self._stderr_task is not None:
                 self._stderr_task.cancel()
                 try:
@@ -157,6 +190,7 @@ class StdioTransport(Transport):
                 except Exception:                # noqa: BLE001 stderr 排空失败不阻断
                     pass
                 self._stderr_task = None
+            self._proc = None
 
 
 class InlineTransport(Transport):
@@ -190,6 +224,7 @@ class McpClient:
         self.version = version
         self.connected = False
         self._tools: list[dict] = []
+        self.initialization: dict = {}
 
     async def connect(self) -> dict:
         """MCP 握手:initialize → notifications/initialized → tools/list。"""
@@ -197,21 +232,34 @@ class McpClient:
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
             "clientInfo": {"name": "pyharness", "version": self.version}})
+        self.initialization = dict(init or {})
+        negotiated = self.initialization.get("protocolVersion")
+        if negotiated is not None and negotiated != "2024-11-05":
+            await self.close()
+            raise_code("TLB-805", module="mcp", hint=f"不支持协商版本 {negotiated}")
         await self.transport.request("notifications/initialized", {})
         listed = await self.transport.request("tools/list", {})
         self._tools = list((listed or {}).get("tools") or [])   # result:null 判空(P2)
         self.connected = True
-        return {"server": (init or {}).get("serverInfo"),
+        return {"server": (init or {}).get("serverInfo"), "protocolVersion": negotiated,
                 "tools": len(self._tools)}
 
-    def register_into(self, tool_reg: Any) -> list[str]:
+    def register_into(self, tool_reg: Any, *, allowed_tools: Optional[list[str]] = None) -> list[str]:
         """list 出的工具桥接进 core ToolRegistry(mcp.<name>.<tool> 前缀)。
 
         danger=high:远端工具=代码执行面,一律走审批;返回注册名清单。"""
         from pyharness.core.tools_registry import ToolDefinition
         registered: list[str] = []
+        selected = self._tools
+        if allowed_tools is not None:
+            allowed = set(allowed_tools)
+            missing = allowed - {t.get("name") for t in self._tools}
+            if missing:
+                raise_code("TLB-802", module="mcp", tool=sorted(missing),
+                           advice="本地允许的 MCP 工具未被服务发现")
+            selected = [t for t in self._tools if t.get("name") in allowed]
         try:
-            for t in self._tools:
+            for t in selected:
                 tool_name = f"mcp.{self.name}.{t.get('name')}"
                 schema = t.get("inputSchema") or {"type": "object",
                                                   "properties": {}}

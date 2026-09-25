@@ -27,6 +27,7 @@ envelope → loop.wake),供桌面壳/交互 CLI 把"提问"真正变成 Agent �
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import logging
@@ -175,125 +176,61 @@ class EngineSpine:
         return True
 
     async def close(self) -> None:
-        """关闭会话拥有的外部资源(MCP 子进程/调度泵/子任务/派生索引)。
+        """Stop all writers before releasing subscriptions, stores and connections."""
+        task = getattr(self, '_close_task', None)
+        if task is None:
+            self._closing = True
+            task = self._close_task = asyncio.create_task(self._close_owned())
+        await asyncio.shield(task)
 
-        GAP-13:攒批落盘定时器**先停**——否则它可能在 store 句柄关闭后触发一次
-        flush(PERS-202 噪音,甚至半写)。停止是协作式的(stop 事件),超时兜底 cancel。
-        """
-        # 任务队列**先**排空(2026-09-21 修):在途/排队任务的终态事件与 `segment.end`
-        # 都是 append,而 `session.finished` 一旦落盘即 EVT-104 拒写 ⇒ 若不先排空,
-        # 实测会出现"任务无终态、段锚不闭合、`wait_for` 悬挂"。此处排空 = 取消在途
-        # (归一化 failed(cancelled))+ 摘除排队 + 等泵退场。
-        queue = self.task_queue
-        if queue is not None and callable(getattr(queue, "shutdown", None)):
+    async def _close_owned(self):
+        errors = []
+        async def attempt(fn, *args, **kwargs):
             try:
-                await queue.shutdown(reason="session-close")
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("task queue shutdown failed", exc_info=True)
-        task, stop = self._flush_task, self._flush_stop
-        if task is not None:
-            if stop is not None:
-                stop.set()
-            try:
-                await asyncio.wait_for(task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                task.cancel()
-            except Exception:                    # noqa: BLE001 定时器自身异常:收尾不阻断
-                log.warning("flush ticker 退出异常", exc_info=True)
-            self._flush_task, self._flush_stop = None, None
-        # F033 探针任务:与 flush ticker 同款协作式收尾(先取消再 await,防止
-        # "Task was destroyed but it is pending" 与关闭后仍 ping 出网)。
-        probe = self.llm_probe
-        if probe is not None:
-            self.llm_probe = None
-            probe.cancel()
-            try:
-                await probe
-            except asyncio.CancelledError:
-                pass
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("llm probe task exit failed", exc_info=True)
-        # 在途 job 先取消(P2):close 此前不触 jobs._on_session_closing,store 关闭后
-        # job 仍可能向父会话写终态(脏续写);与 subagent 的 child-first 清理对齐。
-        if self.jobs is not None:
-            try:
-                await self.jobs._on_session_closing("session.closing", None)
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("jobs session-closing cleanup failed", exc_info=True)
-        if self.fts is not None:
-            try:
-                await self.fts.detach(None)
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("fts detach failed", exc_info=True)
-            self.fts = None
+                value = fn(*args, **kwargs)
+                if inspect.isawaitable(value):
+                    await value
+            except BaseException as exc:
+                errors.append(exc)
         if self.schedule is not None:
-            try:
-                self.schedule.stop()
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("schedule stop failed", exc_info=True)
-        # 会话级总线订阅收尾(2026-09-21 修):本会话装配期挂的订阅(落盘记录器 /
-        # 证据收集器 / 证据生产者)**必须按属主摘除**。桌面壳多会话**共用一条总线**
-        # (bus=getattr(self.ctx,"bus")),实测关闭一个会话后在共享总线上遗留 83 条
-        # 订阅:证据生产者会继续对后续会话的 segment.end 反应、落盘记录器会向已关闭
-        # 的 store 写入(PERS 噪音),且内存随会话数线性增长。
-        # 属主串含 sid(_sid_of),故摘除**只影响本会话**(修前属主恒为 "...:?" ⇒ 两会话
-        # 同属主,按属主摘除会误伤)。放在其它 detach 之后、store 关闭之前。
-        bus = self.bus
-        if bus is not None and self.bus_owners:
-            for owner in list(self.bus_owners):
-                try:
-                    bus.unsubscribe_all(owner)
-                except Exception:                    # noqa: BLE001 收尾尽力
-                    log.warning("bus unsubscribe %s failed", owner, exc_info=True)
-            self.bus_owners = []
-        # 审批面收尾(2026-09-21 修):`ApprovalProvider.detach` 的 docstring 写着
-        # "幂等,随 ctx.close()",但全库**零生产调用者** —— 实测会话关闭后
-        # `_pending` 仍挂着未决请求(`denied` 未置)、订阅未摘、信任表未清,等待裁决
-        # 的任务**永久悬挂**。必须放在 store 关闭**之前**(detach 会落
-        # `approval.denied` / `queue.resumed` 事件)。
-        if self.approval is not None:
-            try:
-                self.approval.detach()
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("approval detach failed", exc_info=True)
+            await attempt(getattr(self.schedule, 'aclose', None) or self.schedule.stop)
+        if self.jobs is not None:
+            await attempt(self.jobs._on_session_closing, 'session.closing', None)
         if self.subagent is not None:
-            try:
-                await self.subagent.detach()
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("subagent detach failed", exc_info=True)
-        # 会话后台子进程(F052/F053):`proc.start` 起的进程树必须随会话一起终止。
-        # 2026-09-21 修:`proc.close_session` 的 docstring 一直写着"agent close 时
-        # 调用",但全库**零生产调用者** —— 实测会话关闭后进程仍在跑(registry 项、
-        # 泵线程、定时器一并泄漏)。与 jobs/subagent 的 child-first 清理同处收口。
-        try:
-            from pyharness.core import proc as proc_mod
-            n = proc_mod.close_session(str(getattr(self.session, "sid", "")))
-            if n:
-                log.info("session close: ended %d background proc session(s)", n)
-        except Exception:                            # noqa: BLE001 收尾尽力
-            log.warning("proc close_session failed", exc_info=True)
+            await attempt(self.subagent.detach)
+        if self.task_queue is not None:
+            await attempt(self.task_queue.shutdown, reason='session-close')
+        if self.approval is not None:
+            await attempt(getattr(self.approval, 'aclose', None) or self.approval.detach)
+        for name in ('_flush_task', 'llm_probe'):
+            task = getattr(self, name, None)
+            if task is not None:
+                task.cancel()
+                result = await asyncio.gather(task, return_exceptions=True)
+                errors.extend(e for e in result if isinstance(e, BaseException) and not isinstance(e, asyncio.CancelledError))
+                setattr(self, name, None)
+        self._flush_stop = None
+        from pyharness.core import proc as proc_mod
+        await attempt(asyncio.to_thread, proc_mod.close_session, str(getattr(self.session, 'sid', '')))
         while self._mcp_clients:
-            client = self._mcp_clients.pop()
-            try:
-                await client.close()
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("mcp client close failed", exc_info=True)
+            await attempt(self._mcp_clients.pop().close)
+        if self.fts is not None:
+            await attempt(self.fts.detach, None)
+            self.fts = None
         store = self.persistence
-        if store is not None:
-            try:
-                flush = getattr(store, "flush", None) or getattr(store, "flush_sync", None)
-                if callable(flush):
-                    result = flush()
-                    if inspect.isawaitable(result):
-                        await result
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("persistence flush failed", exc_info=True)
-            try:
-                close = getattr(store, "close", None)
-                if callable(close):
-                    close()
-            except Exception:                        # noqa: BLE001 收尾尽力
-                log.warning("persistence close failed", exc_info=True)
+        if store is not None and getattr(self, 'owns_persistence', True):
+            flush = getattr(store, 'flush', None) or getattr(store, 'flush_sync', None)
+            if callable(flush): await attempt(flush)
+            close = getattr(store, 'close', None)
+            if callable(close): await attempt(close)
+        if self.bus is not None:
+            for owner in self.bus_owners:
+                await attempt(self.bus.unsubscribe_all, owner)
+            self.bus_owners = []
+        if getattr(self, 'owns_llm_runtime', False):
+            await attempt(self.llm_runtime.aclose)
+        if errors:
+            raise BaseExceptionGroup('engine cleanup failed', errors)
 
 
 @dataclass
@@ -331,7 +268,7 @@ class EngineContext:
 
 # ---------------------------------------------------------------- 适配器注册
 def register_default_llm(cfg: Any, *, force: bool = False,
-                         counters: Any = None) -> str:
+                         counters: Any = None, registry: Any = None) -> str:
     """注册 cfg.llm.model 的真实适配器(OpenAI 兼容端点)。
 
     已注册同名模型 → 跳过(幂等;force=True 强制覆盖)。key 缺失 → 抛 LLM-304
@@ -343,63 +280,64 @@ def register_default_llm(cfg: Any, *, force: bool = False,
     secret_ref_ok 解析(CRED-701/702/703)——本函数不接触也不落盘明文。
     """
     llm_cfg = cfg.llm
+    registry = llm_mod.adapters if registry is None else registry
     api_ref = str(llm_cfg.api_key or "")
     if not api_ref.startswith(("env:", "file:", "tenant:")):
         llm_mod.raise_code(
             "CRED-701", model=llm_cfg.model,
             advice="llm.api_key 须 env:NAME / file:PATH / tenant:租户:档案 秘密引用")
 
-    def key_for(model_name: str) -> str:
-        # 租户档案必须使用独立适配器键;否则两个租户配置同名模型会复用
-        # 第一个租户的 base_url/key,形成跨租户凭据泄漏。
-        if not api_ref.startswith("tenant:"):
-            return model_name
-        digest = hashlib.sha256(
-            f"{api_ref}:{llm_cfg.base_url}:{model_name}".encode("utf-8")).hexdigest()[:16]
-        return f"__tenant_{digest}__{model_name}"
+    credential_store, binding = None, None
+    if api_ref.startswith('tenant:'):
+        from pyharness.core.tenant_settings import TenantSettingsStore, tenants_dir, _STORES
+        tenant = api_ref.split(':', 2)[1]
+        root = tenants_dir(cfg.storage.root)
+        credential_store = _STORES.get(tenant)
+        if credential_store is None or credential_store.root.resolve() != root.resolve():
+            credential_store = TenantSettingsStore(root)
+        from types import MappingProxyType
+        binding = MappingProxyType(credential_store.binding(api_ref, str(llm_cfg.base_url)))
 
-    main_model = str(llm_cfg.model)
+    def actual_model(name):
+        existing = registry.get(str(name)) or llm_mod.adapters.get(str(name))
+        return str(existing.model) if isinstance(existing, llm_mod.OpenAICompatAdapter) else str(name)
+
+    def key_for(model_name: str) -> str:
+        if model_name in registry and not isinstance(registry[model_name], llm_mod.OpenAICompatAdapter):
+            return model_name  # explicitly supplied deterministic/plugin adapter
+        limits = llm_mod.TimeoutLimits.from_cfg(llm_cfg.timeout)
+        identity = (api_ref, str(llm_cfg.base_url).rstrip('/'), model_name, repr(limits),
+                    binding['revision'] if binding else '',
+                    str(credential_store.root.resolve()) if credential_store else '')
+        digest = hashlib.sha256(repr(identity).encode('utf-8')).hexdigest()[:20]
+        return f'__connection_{digest}__{model_name}'
+
+    main_model = actual_model(llm_cfg.model)
     main_key = key_for(main_model)
-    fallback_keys = [key_for(str(m))
-                     for m in (getattr(llm_cfg, "fallback_models", None) or [])]
-    if llm_mod.adapters.get(main_key) and not force:
-        llm_cfg.model = main_key
-        llm_cfg.fallback_models = fallback_keys
-        return main_key
-    triple = llm_mod.AdapterTriple(base_url=str(llm_cfg.base_url),
-                                   api_key_ref=api_ref, model=main_model)
-    llm_mod.register_adapter(
-        main_key,
-        lambda: llm_mod.OpenAICompatAdapter(
-            model=main_model, triple=triple,
-            limits=llm_mod.TimeoutLimits.from_cfg(llm_cfg.timeout),
-            cfg=cfg, counters=counters))
-    for actual, registry_key in zip(
-            getattr(llm_cfg, "fallback_models", None) or [], fallback_keys):
-        actual = str(actual)
-        if registry_key and not llm_mod.adapters.get(registry_key):
-            llm_mod.register_adapter(
-                registry_key,
-                lambda actual=actual, registry_key=registry_key:
-                    llm_mod.OpenAICompatAdapter(
-                        model=actual,
-                        triple=llm_mod.AdapterTriple(
-                            base_url=str(llm_cfg.base_url),
-                            api_key_ref=api_ref, model=actual),
-                        limits=llm_mod.TimeoutLimits.from_cfg(llm_cfg.timeout),
-                        cfg=cfg, counters=counters))
+    fallback_models = [actual_model(m) for m in (getattr(llm_cfg, 'fallback_models', None) or [])]
+    fallback_keys = [key_for(m) for m in fallback_models]
+    for actual, registry_key in zip([main_model, *fallback_models], [main_key, *fallback_keys]):
+        if registry_key not in registry or force:
+            previous = registry.get(registry_key)
+            if isinstance(previous, llm_mod.OpenAICompatAdapter) and previous._transport is not None:
+                raise_code('CRED-703', reason='live_model_replacement_requires_runtime_close')
+            registry[registry_key] = llm_mod.OpenAICompatAdapter(
+                model=actual, triple=llm_mod.AdapterTriple(
+                    base_url=str(llm_cfg.base_url), api_key_ref=api_ref, model=actual,
+                    credential_store=credential_store, credential_binding=binding),
+                limits=llm_mod.TimeoutLimits.from_cfg(llm_cfg.timeout), cfg=cfg)
     llm_cfg.model = main_key
     llm_cfg.fallback_models = fallback_keys
     return main_key
 
 
-def _make_chain(cfg: Any, bus: Any) -> Any:
+def _make_chain(cfg: Any, bus: Any, registry=None) -> Any:
     """FallbackChain 装配(F013/F028):adapters 引用 llm 注册表(后续注册立即可见)。
 
     config = Settings 权威(chain = llm.model + fallback_models;退避 llm.retry;
     降级 llm.degrade);bus 为告警/通知事件尽力出口。"""
     from pyharness.core.llm_fallback import FallbackChain
-    return FallbackChain(adapters=llm_mod.adapters, config=cfg, bus=bus)
+    return FallbackChain(adapters=llm_mod.adapters if registry is None else registry, config=cfg, bus=bus)
 
 
 def _cfg_probe_interval(cfg: Any) -> float:
@@ -460,6 +398,9 @@ def _apply_preset(cfg: Any, policy: Any, tool_reg: Any,
                 log.warning("preset 留痕失败", exc_info=True)
 
     preset_name = _policy_preset(cfg)
+    # Explicit local prohibitions apply at initial assembly and after preset resets.
+    policy.deny_tools.update(getattr(getattr(getattr(cfg, "security", None),
+        "policy", None), "deny_tools_extra", None) or [])
     names = [d.name for d in tool_reg.iter_definitions()]
     if preset_name == "locked":
         _deny = set(names)
@@ -501,12 +442,43 @@ async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
     bus = bus or EventBus(**bus_kwargs_of(cfg))  # F005 背压阈值由装配层注入(N1)
     # N1:攒批/定时落盘标量由**装配层**从 Settings 解析后注入(工厂不读 config)。
     store = open_store(sid, dir=sessions_dir, **flush_kwargs_of(cfg))
-    log_ = await open_session(sid, store, tenant_id=tenant_id)  # async 工厂
-    spine = build_runner_components(cfg, log_=log_, bus=bus,
-                                    sessions_dir=sessions_dir,
-                                    store=store, channel=channel)
-    spine.persistence = store
-    return spine
+    try:
+        log_ = await open_session(sid, store, tenant_id=tenant_id)  # async 工厂
+        spine = build_runner_components(cfg, log_=log_, bus=bus,
+                                        sessions_dir=sessions_dir,
+                                        store=store, channel=channel)
+        spine.persistence = store
+        return spine
+    except BaseException as primary:
+        # Ownership transfers only when the complete spine is returned.
+        try:
+            store.close()
+        except BaseException as cleanup_error:
+            primary.add_note(f'store cleanup failed: {type(cleanup_error).__name__}')
+        raise
+
+
+async def _rollback_spine(spine: EngineSpine, primary: BaseException) -> None:
+    """Finish unreturned assembly cleanup without replacing its original failure."""
+    cleanup = asyncio.create_task(spine.close())
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError:
+            if cleanup.done():
+                if cleanup.cancelled():
+                    primary.add_note('engine cleanup task was cancelled')
+                    break
+                # Retrieve any failure from the completed task on the next pass.
+            primary.add_note('cancellation received while awaiting engine cleanup')
+        except BaseException as cleanup_error:
+            primary.add_note(f'engine cleanup failed: {type(cleanup_error).__name__}')
+            break
+    try:
+        spine.scope.release()
+    except BaseException as cleanup_error:
+        primary.add_note(f'scope cleanup failed: {type(cleanup_error).__name__}')
 
 
 async def _preload_plugins(spine: EngineSpine) -> None:
@@ -554,7 +526,7 @@ async def _preload_mcp(spine: EngineSpine) -> None:
             list(server.command), timeout_s=int(server.timeout_s)))
         try:
             await client.connect()
-            client.register_into(spine.tool_registry)
+            client.register_into(spine.tool_registry, allowed_tools=server.allowed_tools)
             spine._mcp_clients.append(client)
         except Exception as e:                       # noqa: BLE001 单个 server 隔离
             await client.close()
@@ -653,7 +625,8 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
                             sessions_dir: Path,
                             store: Any = None,
                             attach_persistence: bool = True,
-                            channel: Any = CHANNEL_UNDECLARED) -> EngineSpine:
+                            channel: Any = CHANNEL_UNDECLARED,
+                            llm_runtime: Any = None) -> EngineSpine:
     """纯组件装配(复用外部已 open 的 SessionLog/bus/store)。
 
     desktop 多会话场景:会话已由 DesktopSessionManager open(log_/store/bus
@@ -671,6 +644,15 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     ``authorize()`` 处以 APR-503 fail-closed,这是有意为之(装配缺陷可见,
     不静默降级为 system 主体)。
     """
+    # Connection registry keys and policy compilation are runtime-local state.
+    cfg = copy.deepcopy(cfg)
+    # Resolve the required workspace before subscribing capability owners.
+    # A bad path must not leave approval listeners attached to a borrowed bus.
+    ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
+                   ).expanduser()
+    ws_root.mkdir(parents=True, exist_ok=True)
+    workspace_root = session_workspace(str(ws_root), str(getattr(log_, "sid", "")))
+    Path(workspace_root).mkdir(parents=True, exist_ok=True)
     # AgentLoop(真 cfg:max_turns=30 权威默认)
     loop = AgentLoop(cfg)
 
@@ -746,12 +728,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # 共用同一 fs 根,跨会话文件互相可见/可写(会话隔离失效);②子会话工厂按规格
     # 形态 base.parent/{sub_id} 推导时越出 workspaces 树且目录从未创建(子代理
     # 文件类工具全废)。派生一律走 scope.session_workspace 单点,不再就地拼接。
-    ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
-                   ).expanduser()
-    ws_root.mkdir(parents=True, exist_ok=True)
-    policy.workspace_root = session_workspace(
-        str(ws_root), str(getattr(log_, "sid", "")))
-    Path(policy.workspace_root).mkdir(parents=True, exist_ok=True)
+    policy.workspace_root = workspace_root
     # storage.spill 定位器:首个 agent 就绪时 SpillProvider.enter 挂载(见
     # _activate_storage_caps)——executor 关4 超长输出(>2KB)→ spill 私有区 +
     # ref 回喂(F039);激活失败时报 PERS-221 不崩(截断兜底)
@@ -759,9 +736,13 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # LLM 门面(会话级;适配器须先 register_default_llm)+ 降级链(F013/F028):
     # fallback_models 非空 → FallbackChain 挂载(指数退避 + 单调降级 + BudgetGuard
     # 前置);chain.adapters 引用 llm 模块注册表,后续 register 补注册立即可见
+    owns_llm_runtime = llm_runtime is None
+    llm_runtime = llm_runtime or llm_mod.LLMRuntime()
+    register_default_llm(cfg, registry=llm_runtime.registry)
     fb_models = list(getattr(getattr(cfg, "llm", None), "fallback_models", None) or [])
     llm_client = llm_mod.LLMClient(
-        cfg, chain=_make_chain(cfg, bus) if fb_models else None)
+        cfg, registry=llm_runtime.registry,
+        chain=_make_chain(cfg, bus, llm_runtime.registry) if fb_models else None)
     # F033 健康探针:**回切的唯一驱动**。2026-09-21 修:`chain.probe_loop` 此前全库
     # 零生产调用者(只有单测启动过),而健康状态机只能被探针改回 healthy、降级链的
     # idx 也只在探针里归零 ⇒ **一次降级即永久降级**(进程生命周期内不回切主模型),
@@ -897,6 +878,9 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
         search_backend=search_backend,
         llm_probe=probe_task,
         channel=channel)
+    spine.owns_persistence = attach_persistence
+    spine.llm_runtime = llm_runtime
+    spine.owns_llm_runtime = owns_llm_runtime
     # 真实编排适配层:jobs/subagent 不再停在 runner=None 的模块单测状态。
     # SubagentManager 的 announce 使用 tool_registry 直接绑 Provider;模型经
     # 正常 ToolExecutor 看到 subagent.spawn。
@@ -1329,6 +1313,7 @@ async def _activate_session_caps(ag: Any, spine: Any) -> None:
     if getattr(spine, "_fts_entered", False):
         return
     spine._fts_entered = True                      # 试过就不再重试(索引可选)
+    idx = None
     try:
         from pyharness.core.session_query import SessionQueryIndex
         cfg = getattr(spine, "settings", None) or _cfg_of(spine)
@@ -1337,12 +1322,34 @@ async def _activate_session_caps(ag: Any, spine: Any) -> None:
         sid = str(getattr(ag, "session_id", "")
                   or getattr(spine.session, "sid", ""))
         idx = SessionQueryIndex(db, sources={sid: spine.session})
+        spine.fts = idx                           # ownership before first await
         await idx.enter(ag.ctx)                    # 开库建表 + 总线订阅
         await idx.announce(ag.ctx)                 # 注册 session.fts_query + 挂载
         spine.fts = idx
         ag.ctx.session_query = idx                 # F060 对账读数(repair 用)
         log.info("session fts activated sid=%s db=%s", sid, db)
-    except Exception as e:                         # noqa: BLE001 索引失败不阻断对话
+    except BaseException as e:
+        if idx is not None:
+            cleanup = asyncio.create_task(idx.detach(None))
+            cancelled = None
+            while True:
+                try:
+                    await asyncio.shield(cleanup)
+                    spine.fts = None
+                    break
+                except asyncio.CancelledError as cancellation:
+                    if cleanup.done():
+                        raise
+                    cancelled = cancellation
+                except BaseException as cleanup_error:
+                    e.add_note(f'index cleanup failed: {type(cleanup_error).__name__}')
+                    raise e
+            if cancelled is not None:
+                cancelled.add_note(f'index activation failed: {type(e).__name__}')
+                raise cancelled from e
+        if not isinstance(e, Exception):
+            raise
+        # Optional index failures remain visible; cancellation is never degraded.
         log.warning("fts activate skipped: %s", type(e).__name__)
 
 
@@ -1383,24 +1390,28 @@ async def assemble_real_engine(cfg: Any, *, sid: str,
 
     spine = await build_spine(cfg, sid=sid, sessions_dir=sessions_dir,
                               channel=channel, tenant_id=tenant_id)
-    register_default_llm(cfg, counters=spine.counters)
-    runner = make_runner(spine)
-    queue = TaskQueue(session=spine.session, runner=runner,
-                      **queue_kwargs_of(cfg))      # F043 队深由装配层注入(N1)
-    ctx = EngineContext(
-        settings=cfg, bus=spine.bus, session=spine.session,
-        llm=spine.llm, scope=spine.scope, loop=spine.loop,
-        tools=spine.tools, registry=spine.registry,
-        guard=spine.guard, approval=spine.approval,
-        counters=spine.counters,
-        agent=None, task_runner=runner,
-        make_runner=lambda: make_runner(spine),
-        storage=spine.storage,     # 与 spine 同对象:spill 激活后立即可见
-        engine_spine=spine, task_queue=queue, budget=spine.budget,
-        governance=spine.governance)
-    ctx.search_backend = spine.search_backend
-    await activate_orchestration(spine, task_queue=queue)
-    return ctx
+    try:
+        runner = make_runner(spine)
+        queue = TaskQueue(session=spine.session, runner=runner,
+                          **queue_kwargs_of(cfg))      # F043 队深由装配层注入(N1)
+        spine.task_queue = queue
+        ctx = EngineContext(
+            settings=spine.settings, bus=spine.bus, session=spine.session,
+            llm=spine.llm, scope=spine.scope, loop=spine.loop,
+            tools=spine.tools, registry=spine.registry,
+            guard=spine.guard, approval=spine.approval,
+            counters=spine.counters,
+            agent=None, task_runner=runner,
+            make_runner=lambda: make_runner(spine),
+            storage=spine.storage,     # 与 spine 同对象:spill 激活后立即可见
+            engine_spine=spine, task_queue=queue, budget=spine.budget,
+            governance=spine.governance)
+        ctx.search_backend = spine.search_backend
+        await activate_orchestration(spine, task_queue=queue)
+        return ctx
+    except BaseException as primary:
+        await _rollback_spine(spine, primary)
+        raise
 
 
 async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
@@ -1416,35 +1427,44 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
     """
     from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 
+    runtime = getattr(ctx, 'llm_runtime', None)
+    if runtime is None:
+        runtime = ctx.llm_runtime = llm_mod.LLMRuntime()
     spine = build_runner_components(
         cfg, log_=log_, bus=bus or getattr(ctx, "bus", None),
         sessions_dir=sessions_dir,
         store=store if store is not None else getattr(log_, "_persistence", None),
-        attach_persistence=False, channel=channel)
-    register_default_llm(cfg, counters=spine.counters)   # 幂等;适配器先注则跳过
-    if preload:
-        try:
-            await _preload_plugins(spine)
-            spine._plugins_ready = True
-        except Exception:                       # noqa: BLE001 预载失败不阻断
-            log.warning("cli/acp plugin preload skipped", exc_info=True)
-    runner = make_runner(spine)
-    ctx.engine_spine = spine
-    ctx.llm = spine.llm
-    ctx.scope = spine.scope
-    ctx.tools = spine.tools
-    ctx.guard = spine.guard
-    ctx.governance = getattr(spine, "governance", None)   # 治理层单实例(S2-3)
-    ctx.budget = spine.budget                      # F032 只读预算门面(仪表盘)
-    ctx.search_backend = getattr(spine, "search_backend", None)
-    ctx.approval = spine.approval
+        attach_persistence=False, channel=channel, llm_runtime=runtime)
     try:
-        spine.approval.set_default_channel(channel)   # N5:归一化覆写,不直写 _channel
-    except Exception:                              # noqa: BLE001 只读门面:尽力
-        pass
-    ctx.task_runner = runner
-    ctx.make_runner = lambda: runner
-    ctx.task_queue = TaskQueue(session=log_, runner=runner,
-                               **queue_kwargs_of(cfg))   # F043 队深同源注入
-    await activate_orchestration(spine, task_queue=ctx.task_queue)
-    return spine
+        ctx.engine_spine = spine  # ownership precedes the first await
+        if preload:
+            try:
+                await _preload_plugins(spine)
+                spine._plugins_ready = True
+            except Exception:                       # noqa: BLE001 预载失败不阻断
+                log.warning("cli/acp plugin preload skipped", exc_info=True)
+        runner = make_runner(spine)
+        ctx.engine_spine = spine
+        ctx.llm = spine.llm
+        ctx.scope = spine.scope
+        ctx.tools = spine.tools
+        ctx.guard = spine.guard
+        ctx.governance = getattr(spine, "governance", None)   # 治理层单实例(S2-3)
+        ctx.budget = spine.budget                      # F032 只读预算门面(仪表盘)
+        ctx.search_backend = getattr(spine, "search_backend", None)
+        ctx.approval = spine.approval
+        try:
+            spine.approval.set_default_channel(channel)   # N5:归一化覆写,不直写 _channel
+        except Exception:                              # noqa: BLE001 只读门面:尽力
+            pass
+        ctx.task_runner = runner
+        ctx.make_runner = lambda: runner
+        ctx.task_queue = TaskQueue(session=log_, runner=runner,
+                                   **queue_kwargs_of(cfg))   # F043 队深同源注入
+        spine.task_queue = ctx.task_queue
+        await activate_orchestration(spine, task_queue=ctx.task_queue)
+        return spine
+
+    except BaseException as primary:
+        await _rollback_spine(spine, primary)
+        raise

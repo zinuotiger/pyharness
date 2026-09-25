@@ -1,4 +1,7 @@
 .venv/
+.work/verification/
+.work/integration-evleven/
+.work/release-candidate/
 __pycache__/
 *.pyc
 .env
@@ -23,7 +26,7 @@ collect_only.txt
 pytest_final.txt
 # 本机运行残留/私人记忆(预提交审计发现原先未被忽略 ⇒ git add -A 会误入库)
 sessions/
-archive/
+/archive/
 .mcp
 
 # S0/S1 临时证据产物(含本机路径与 junit XML,勿入库:仓库是 PUBLIC)

@@ -214,6 +214,7 @@ async def test_public_spine_for_injects_task_queue_bug2(tmp_path):
     saved = dict(llm_mod.adapters)
     llm_mod.adapters.clear()
     llm_mod.adapters[cfg.llm.model] = _FakeAdapter()
+    svc = None
     try:
         svc = ApplicationService(cli.assemble_ctx(cfg), channel="cli")
         sid = await svc.surface_mgr().create()          # 真实建会话路径
@@ -241,5 +242,9 @@ async def test_public_spine_for_injects_task_queue_bug2(tmp_path):
             await asyncio.wait_for(spine.task_queue.wait_for(tid), timeout=10.0)
         spine.schedule.stop()
     finally:
-        llm_mod.adapters.clear()
-        llm_mod.adapters.update(saved)
+        try:
+            if svc is not None:
+                await svc.shutdown()
+        finally:
+            llm_mod.adapters.clear()
+            llm_mod.adapters.update(saved)

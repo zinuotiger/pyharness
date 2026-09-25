@@ -43,6 +43,9 @@ async def test_fts_rows_are_purged_when_session_is_deleted(tmp_path):
     order: list[str] = []
 
     class _Fts:
+        async def detach(self, *args):
+            order.append("detach")
+
         async def delete_session(self, session_id: str) -> None:
             order.append(f"fts:{session_id}")
 

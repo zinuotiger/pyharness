@@ -898,9 +898,9 @@ def test_pick_free_port_loopback_random():
 
 def test_wait_until_listening_probe(monkeypatch):
     """就绪探测:可连即 True;超时 False(开窗前不弹空窗,调用方退 1)。"""
-    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: True)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port, **kw: True)
     assert d.wait_until_listening(9999, timeout=0.3) is True
-    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: False)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port, **kw: False)
     assert d.wait_until_listening(9999, timeout=0.15) is False
 
 
@@ -933,7 +933,7 @@ def test_run_uvicorn_single_worker_no_reload(monkeypatch):
 
 async def test_wait_listening_async_timeout_raises(monkeypatch):
     """异步就绪探测超时 → CYC-999(启动取消,不弹空窗)。"""
-    monkeypatch.setattr(desktop_net, "_probe_port", lambda port: False)
+    monkeypatch.setattr(desktop_net, "_probe_port", lambda port, **kw: False)
     app = await _async_app()
     with pytest.raises(PyHError) as e:
         await d.wait_listening_async(app, 9999, timeout=0.15)
@@ -1169,7 +1169,7 @@ def _stub_entry(monkeypatch, *, wv=_UNSET, listening=True, ctx=None):
     monkeypatch.setattr(desktop_launcher, "run_uvicorn",
                         lambda app, port, host=None: recorded.setdefault(
                             "ran", (app, port, host)))
-    monkeypatch.setattr(desktop_launcher, "wait_until_listening", lambda port, timeout=15: listening)
+    monkeypatch.setattr(desktop_launcher, "wait_until_listening", lambda port, timeout=15, **kw: listening)
     if wv is _UNSET:                                   # 缺省:可用假窗
         wv = _FakeWv()
     if wv is None:
@@ -1257,7 +1257,7 @@ async def test_run_desktop_cli_bridge_returns_0(monkeypatch):
     assert isinstance(fake_wv_holder["wv"], _FakeWv)
 
 
-async def _null_async(app, port, timeout=15):
+async def _null_async(app, port, timeout=15, **kw):
     """wait_listening_async 替身(直接通过)。"""
     return None
 

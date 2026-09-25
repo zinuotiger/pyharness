@@ -6,6 +6,10 @@
 - Ubuntu 24.04 Python 3.11 和 3.13：完整适用测试、同样的覆盖率门禁与隔离边界、独立 R02 真实 POSIX 权限用例。专用 R02 阶段要求 Linux、非 root、至少一个用例且零 skip；每个用例恢复 umask。只有实际通过的 run 才能关闭 R02，不能用 Windows skip 代替。
 - 三种 OS/Python 组合均构建 wheel + sdist，从源码目录外的全新环境安装 base wheel 并检查 import / CLI / 包元数据。Windows 另在独立 native / desktop 环境执行 Qt 离屏启动关闭和回环 HTTP 就绪、停止与端口释放预检。完整人工 GUI / WebView2 和真实模型不在此 CI 的验收范围。
 
+Ubuntu runner 通过 `apt-get install --no-install-recommends libegl1 libopengl0` 安装现有 PySide6 离屏测试需要的最小图形动态库。这不会安装完整桌面或启动显示服务；测试继续使用 `QT_QPA_PLATFORM=offscreen`。缺少这些动态库会导致真实 Qt 测试在 collection 阶段失败，不能以 skip 代替。
+
+高风险回归、R02 与打包阶段在依赖准备成功且任务未取消时独立执行，即使完整测试已经失败，也继续收集这些阶段的证据。任何正式阶段失败仍使 job 失败；没有 `continue-on-error`，独立阶段通过不覆盖先前失败。
+
 `uv.lock` 经 `uv export --frozen --extra dev --no-emit-project` 导出后以 `--require-hashes` 安装到新虚拟环境。不依赖缓存；构建工具固定为 hatchling 1.32.4。安装阶段可访问依赖下载站点；pytest 导入前安装非回环 socket 拒绝边界，现有逐用例 fixture 再限制未声明的子进程。网络边界是测试进程防误用措施，并非针对恶意代码的系统沙箱。
 
 `scripts/ci_verify.py` 必须指定仓库外 `--output-dir`。HOME、USERPROFILE、PH_CFG_PATH、临时数据、下载缓存、coverage、构建输出和安装环境都进入该目录；不会读取已有的 PH 配置或传递 API 凭据。测试数据均为合成数据。脚本拒绝把输出放进源码 checkout。

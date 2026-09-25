@@ -43,7 +43,13 @@ jobs:
         with:
           version: "0.12.12"
           enable-cache: false
+      - name: Minimal Linux Qt offscreen dynamic libraries (no desktop or display service)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0
       - name: Clean environment from frozen uv.lock (includes declared native test dependencies)
+        id: prepare
         run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: Authorization AST and governance read-side gates; Git whitespace
         run: python -B scripts/ci_verify.py static --output-dir "${{ runner.temp }}/pyharness-ci"
@@ -52,11 +58,13 @@ jobs:
       - name: Full pytest without ignored modules; coverage at least 75 percent
         run: python -B scripts/ci_verify.py test --suite full --cov-fail-under "${{ env.COV_FLOOR }}" --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: High-risk remediation regression (including real loopback listeners)
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         run: python -B scripts/ci_verify.py test --suite high-risk --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: R02 real POSIX permissions; non-root; umask 022; no skipped cases
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && runner.os == 'Linux' }}
         run: python -B scripts/ci_verify.py test --suite posix --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: Wheel and sdist; external clean base installation; Windows optional entry prechecks
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         run: python -B scripts/ci_verify.py package --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: Upload allowlisted summaries, sanitized JUnit and distribution archives
         if: always()

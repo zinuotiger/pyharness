@@ -47,7 +47,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0
+          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0 fonts-noto-cjk
       - name: Clean environment from frozen uv.lock (includes declared native test dependencies)
         id: prepare
         run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-ci"
@@ -114,7 +114,7 @@ jobs:
       - name: Minimal Linux Qt libraries for shared locked test environment
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0
+          sudo apt-get install --yes --no-install-recommends libegl1 libopengl0 fonts-noto-cjk
       - name: Locked isolated test environment
         run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-docker"
       - name: Real containers, isolation, bounded resources, cancellation and governed patch E2E; no skips

@@ -64,6 +64,16 @@ async def smoke(output, expect_docker=None):
                 await page.goto(f'http://127.0.0.1:{port}/')
                 await page.get_by_text('还没有会话',exact=True).wait_for()
                 assert await page.locator('.error').count()==0
+                await page.evaluate('document.fonts.ready')
+                cdp=await context.new_cdp_session(page)
+                await cdp.send('DOM.enable');await cdp.send('CSS.enable')
+                document=await cdp.send('DOM.getDocument')
+                label=await cdp.send('DOM.querySelector',{'nodeId':document['root']['nodeId'],'selector':'#nav .label'})
+                fonts=(await cdp.send('CSS.getPlatformFontsForNode',{'nodeId':label['nodeId']}))['fonts']
+                assert fonts and sum(f['glyphCount'] for f in fonts)>=3
+                if sys.platform.startswith('linux'):
+                    assert any('CJK' in f['familyName'] for f in fonts),fonts
+                await cdp.detach()
                 await page.route('**/api/v1/acceptance-no-content',lambda route:route.fulfill(status=204))
                 assert await page.evaluate("api('/api/v1/acceptance-no-content')") is None
                 await page.unroute('**/api/v1/acceptance-no-content')
@@ -83,7 +93,8 @@ async def smoke(output, expect_docker=None):
                 assert dashboard['health']['docker']['status']==health['status']
                 for route in ['dashboard','chat','runs','approvals','sandboxes','agents','artifacts','knowledge','connections','schedules','usage','settings']:
                     await page.locator(f'#nav [data-nav="{route}"]').click()
-                    await page.locator('.skeleton').first.wait_for(state='detached')
+                    await page.wait_for_function('(route)=>state.page===route && !document.querySelector(".skeleton")',arg=route)
+                    await page.evaluate('document.fonts.ready')
                     assert await page.locator('.error').count()==0,await page.locator('main').inner_text()
                     path=output/(route+'.png')
                     await page.screenshot(path=str(path),full_page=True)
@@ -188,12 +199,12 @@ async def smoke(output, expect_docker=None):
                 assert '[DETERMINISTIC TEST MODEL]' in await page.locator('#messages').inner_text()
                 await page.set_viewport_size({'width':1280,'height':900})
                 await page.locator('#nav [data-nav="dashboard"]').click()
-                await page.locator('.skeleton').first.wait_for(state='detached')
+                await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 await page.screenshot(path=str(output/'desktop-1280.png'),full_page=True)
                 await page.set_viewport_size({'width':390,'height':844})
                 await page.locator('#nav [data-nav="dashboard"]').click()
-                await page.locator('.skeleton').first.wait_for(state='detached')
+                await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 await page.screenshot(path=str(output/'mobile.png'),full_page=True)
                 await browser.close()
                 assert not errors,errors
@@ -204,7 +215,7 @@ async def smoke(output, expect_docker=None):
         (output/'browser-console.json').write_text(json.dumps({'errors':errors,'console':console},ensure_ascii=False,indent=2),encoding='utf-8')
     report={'status':'passed','screenshots':shots,'model':'deterministic, not a real model',
         'checks':['twelve rendered pages','empty states','create/publish/test correct Agent','real queue message roundtrip','SSE offline reconnect','API failure and retry','draft refresh barrier','session attachment ownership','fixed version after publication','in-flight request session fence','clear attachment preserves draft','safe dates','Ctrl+K','mobile viewport'],
-        'uncaught_errors':len(errors),'browser':Path(executable).name,'http_contracts':[204,404,409,422,503],'sandbox_health':health,'viewport':'1440x900 and 1280x900',
+        'uncaught_errors':len(errors),'browser':Path(executable).name,'rendered_cjk_fonts':fonts,'screenshots_wait_for_target_page':True,'http_contracts':[204,404,409,422,503],'sandbox_health':health,'viewport':'1440x900 and 1280x900',
         'commit':__import__('subprocess').check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
     (output/'browser-summary.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(report,ensure_ascii=False))

@@ -1,5 +1,5 @@
 {
-  "status": "verified_local_mvp_environment_blocks_recorded",
+  "status": "remote_CI_confirmed_see_commit_bound_delivery_manifest",
   "base_commit": "ad9a0e8591999b6c81766b05f98ebceca93fd56e",
   "branch": "feat/pyharness-platform-web-v1",
   "design_agents": 3,
@@ -50,12 +50,12 @@
     "failed": 0
   },
   "remote_acceptance": {
-    "status": "windows_browser_fix_pending_revalidation",
+    "status": "all_five_PR_jobs_passed_at_verified_commit",
     "base_branch": "codex/pyharness-engineering-rc-20260924",
     "head_branch": "feat/pyharness-platform-web-v1",
     "starting_commit": "40b80541c41038c161e73b96be6f6ab0e7d9e6fa",
     "pr_url": "https://github.com/zinuotiger/pyharness/pull/2",
-    "windows": "full_suite_and_package_passed_browser_startup_failed",
+    "windows": "passed",
     "ubuntu_3_11": "passed",
     "ubuntu_3_13": "passed",
     "real_docker": "remote-confirmed on Ubuntu GitHub-hosted runner",
@@ -74,8 +74,8 @@
       "package": "passed",
       "review_confirmed_medium_fixed": 3
     },
-    "workflow_url": "https://github.com/zinuotiger/pyharness/actions/runs/36194415836",
-    "tested_commit": "5cf4ced8931c4da94d4f26c54dacb6ad0d1da817",
+    "workflow_url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295",
+    "tested_commit": "507b742a7b7de85bd5ad16fb486a54189d68dc62",
     "docker_tests": {
       "collected": 13,
       "passed": 13,
@@ -84,8 +84,47 @@
     },
     "docker_daemon": "28.0.4",
     "host_fallback": false,
-    "remote_fix_rounds": 1,
-    "repair_reason": "Windows synthetic known-folder directory layout prevented Chromium DevTools startup"
+    "remote_fix_rounds": 2,
+    "repair_reason": "Windows synthetic known-folder directory layout prevented Chromium DevTools startup",
+    "jobs": [
+      {
+        "name": "Windows / Python 3.13 / security, acceptance, e2e, invariants, structure",
+        "conclusion": "success",
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295/job/108272420314"
+      },
+      {
+        "name": "windows-latest / Python 3.13 / full, permissions, package",
+        "conclusion": "success",
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295/job/108272420505"
+      },
+      {
+        "name": "ubuntu-24.04 / Python 3.13 / full, permissions, package",
+        "conclusion": "success",
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295/job/108272420515"
+      },
+      {
+        "name": "ubuntu-24.04 / Python 3.11 / full, permissions, package",
+        "conclusion": "success",
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295/job/108272420518"
+      },
+      {
+        "name": "Ubuntu 24.04 / real Docker Sandbox / governed code-change",
+        "conclusion": "success",
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36196179295/job/108272420547"
+      }
+    ],
+    "screenshot_followup": "CJK font provisioning and target-page render barrier; exact final-head verification is recorded in the external delivery manifest and PR checks",
+    "latest_local": {
+      "collected": 2525,
+      "passed": 2484,
+      "failed": 0,
+      "skipped": 41,
+      "coverage": 83.08484441459592,
+      "platform_passed": 76,
+      "platform_skipped": 1,
+      "browser": "passed",
+      "package": "passed"
+    }
   },
   "local_docker": "environment_blocked_daemon_unavailable",
   "historical_scope": "Top-level changed_files, pre_final_suite, precommit_suite and targeted_platform describe original local acceptance at 40b80541; remote_acceptance carries this follow-up evidence."

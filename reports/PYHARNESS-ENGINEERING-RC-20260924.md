@@ -1,88 +1,53 @@
-# PyHarness Engineering Release Candidate — 2026-09-24
+# PyHarness Engineering RC — remote Windows and POSIX validation
 
-这是本地工程候选版本，保留包版本 **0.1.0**，未推送、未发布。基础提交：`41d74db15f47bee5813976bd11435dff1be166ef`；候选分支：`codex/pyharness-engineering-rc-20260924`。
+Draft PR: [#1](https://github.com/zinuotiger/pyharness/pull/1), `main` ← `codex/pyharness-engineering-rc-20260924`. Package version remains **0.1.0**. Pushed; unmerged; no tag or GitHub Release.
 
-本报告证据阶段：**reviewed-precommit-source**。最终提交：`HEAD (resolve with git rev-parse HEAD after local commit)`。仓库内报告不能自引用其未来提交及包含自身的归档 SHA256；提交后的准确 SHA、重新执行结果、最终产物校验和在交付目录同名公开报告和 `SHA256SUMS.txt` 中补充，原提交不改写。
+Base: `41d74db15f47bee5813976bd11435dff1be166ef`. Initial locally accepted RC: `3101ca96ff4a2121fef8cf62ddda90a57eaa2089`. The remote evidence below verifies **`1c063da32f3ca563d6f026aacb81657232a99d36`**. This documentation commit is followed by another complete remote matrix; exact final SHA, local rerun and rebuilt archive hashes belong to the postcommit attestation distributed alongside the final artifacts and recorded in the PR. A report cannot embed the hash of its own future commit/archive.
 
-## 结果
+## Remote result
 
-| 检查 | 实际结果 |
-|---|---|
-| 完整 pytest | collected 2383；passed 2364；failed 0；skipped 19；warnings 5；138.88s；exit 0 |
-| coverage | 83.42%，门禁 75% |
-| 高风险回归 | 161/161，包含于完整测试 |
-| 故障注入选择集 | 61/61，包含于完整测试 |
-| Hypothesis 属性测试 | 6/6，不是生成样本数 |
-| 并发/所有权选择集 | 19/19，包含于完整测试 |
-| 固定 evleven R1 | 16/16，独立真实 MCP 测试；exit 0 |
-| 代表性变异 | 10/10 检出：9 断言失败，1 硬超时；非全库分数 |
-| 安装 | 全新非 editable base/native/desktop；24 步全部 exit 0 |
-| Windows | 锁、进程树、Unicode/空格、回环地址及端口释放实际验证 |
-| POSIX | R02 environment-blocked，未把 docker-desktop 作为验收环境 |
+[Workflow run 36079689277](https://github.com/zinuotiger/pyharness/actions/runs/36079689277) completed successfully. All four jobs check out the candidate head, not a synthetic merge commit.
 
-完整 pytest 的 19 个跳过为专用 R1 16 项、真实 POSIX 权限 2 项及需要 Windows 符号链接权限的 1 项。专用 R1 通过数未重复计入完整测试。选择集可重叠，不能相加得出测试总数。各选择集测试 ID 见同名 JSON。
+| Runner OS / Python | collected | passed | failed | skipped | coverage | exit |
+|---|---:|---:|---:|---:|---:|---:|
+| Linux / 3.11.16 | 2413 | 2393 | 0 | 20 | 83.24% | 0 |
+| Linux / 3.13.15 | 2413 | 2393 | 0 | 20 | 83.28% | 0 |
+| Windows / 3.13.15 | 2413 | 2374 | 0 | 39 | 83.44% | 0 |
 
-## 变更与独立复核
+- [ubuntu-24.04 / Python 3.13 / full, permissions, package](https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671821): success; 2026-09-25T00:54:55Z → 2026-09-25T00:57:28Z.
+- [ubuntu-24.04 / Python 3.11 / full, permissions, package](https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671913): success; 2026-09-25T00:54:55Z → 2026-09-25T00:57:30Z.
+- [windows-latest / Python 3.13 / full, permissions, package](https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671998): success; 2026-09-25T00:54:58Z → 2026-09-25T00:58:34Z.
+- [Windows / Python 3.13 / security, acceptance, e2e, invariants, structure](https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898672169): success; 2026-09-25T00:54:55Z → 2026-09-25T00:55:58Z.
 
-F01–F15、R03–R04、G01–G02 共 19 项保留 confirmed-fixed；R01 safely-constrained；R02 environment-blocked。
-候选只带入正式源代码、测试、配置、脚本及公开文档；历史本机报告和旧产物保存于私有外部证据。
+Every matrix job passed isolated installation, authorization AST/Git checks, hostile HOME/configuration/plugin/MCP sentinels, full pytest, 75% coverage, high-risk regression, wheel/sdist build, and fresh base wheel installation outside the checkout. Windows additionally passed fresh native/desktop import and entry prechecks (Qt offscreen and loopback HTTP ready/stop/port release). Windows security, acceptance, e2e, invariant and structure gates also passed. JUnit and JSON summaries in workflow artifacts preserve counts and omit raw output, secret bodies and parameter values. Artifacts expire after seven days; the local delivery retains copied evidence.
 
-两位独立只读 reviewer 分别复核运行时/安全和文件/交付。首轮发现两个 Medium 生命周期缺口：
-重复取消 MCP close 会失去进程所有权；独立引擎装配失败会遗留自建 Store。修复范围限定为自建 Store/锁回滚及已完整装配 spine 的激活失败回收。
-均先建立失败复现，再修复并补回归。另修正过期限制声明、机器 ACL 信息、失效导航和 sdist 文档排除。
-没有未处理的有效 Critical/High/Medium 发现。新增修改仅在独立候选 worktree。
+## R02 real POSIX closure
 
-元数据补充 README/MIT；wheel 只显式包含三项公开示例资源。
-R1 配置脚本要求显式产物目录；本地交付构建器要求显式依赖 pins 和仓库外输出。
-正式依赖版本与锁文件未升级。独立安装从仓库外目录运行，核实实际 import 来自各环境 site-packages。
-native 不带未声明 Web 依赖；base 不带 GUI/Web 依赖。
+**R02: confirmed-fixed**, limited to the recorded GitHub-hosted Ubuntu 24.04 environments.
 
-## 固定外部边界与产物
+- Ubuntu 24.04 / Python 3.11.16: 20 collected / 20 passed / 0 failed / 0 skipped, exit 0; effective UID 1001; umask 022.
+- Ubuntu 24.04 / Python 3.13.15: 20 collected / 20 passed / 0 failed / 0 skipped, exit 0; effective UID 1001; umask 022.
 
-evleven R1 wheel SHA256：`40d5cbd5ae312b4bb3af133405807fb9764653b95145a80e4633bed17039ea2e`。
-使用独立进程、真实 MCP、真实持久化与治理；模型规划使用确定性替身。
-R1 安装包来自已核实产物，未重新构建服务端。
+`tests/unit/test_posix_secret_permissions.py` uses real `os.open`, `os.write`, `os.fstat`, permission changes and atomic replace. It observes a zero-byte temporary file already at **0600** before first write, checks actual mode during short writes and after replacement, and checks private residue on injected replace/cleanup failure. Permission failures abort explicitly and preserve the previous committed configuration. Synthetic secrets are absent from captured logs/errors; deliberate fault residue is removed in finally. Traversal, malicious generation names, directory/generation symlinks and replace-over-symlink boundaries are exercised. The dedicated suite rejects root, zero collection and any skipped case. Windows platform skips never count as POSIX validation. These tests do not prove resistance to every hostile concurrent filesystem mutation or correctness on every POSIX system.
 
-产物范围：Precommit installation artifacts only; final rebuilt artifact hashes are in external postcommit attestation。
+## Reused local baseline and this task's scope
 
-| 文件 | SHA256 |
-|---|---|
-| pyharness-0.1.0-py3-none-any.whl | `e296494e0d4aba276abb4b38d167a0f1d7906e29af816b3dbaef677d912941ba` |
-| pyharness-0.1.0.tar.gz | `16357af0b90a97ca5a56cb7f66fb9514debaed700a5638c1d06cb1705d64e95c` |
+F01–F15, R03–R04, G01–G02 remain confirmed-fixed. R01 stays safely-constrained; unsafe PTY paths remain disabled. Existing runtime fixes cover JSONL partial writes, lock/handle ownership, save failures, tenant secrets, cancellation, process/transport cleanup and entry points. This remote task adds CI and narrowly fixes three production modules: `core/spill.py`, `core/llm_fallback.py` and `core/tools_guard.py`. The new tests preserve authorization, side-effect and cleanup assertions.
 
-源代码/测试清单 SHA256：`63ee6897655b2c1a4120c7667e043a11d958910f5d75db46ce0cd9558c5842e0`。
-公开候选 payload 清单 SHA256：`dc1680b2ca310e9de505252a1d130a039a17c4bd1a1da19ec85f29754951ea26`（范围与算法见 JSON；不含自引用报告）。
-完整本机分类清单、原始命令和日志留在私有外部证据。
+Initial RC local pytest: 2383 collected / 2364 passed / 0 failed / 19 skipped; coverage 83.42%. High-risk selection 161/161, fault injection 61/61, Hypothesis 6/6, concurrency/ownership 19/19. Selections overlap; six property tests is not a generated-sample count. Initial representative mutation detected 10/10 (9 assertion failures, 1 bounded timeout), not a whole-project score. These are historical baseline statistics, not final-commit rerun claims. The final exact commit receives fresh local full/coverage, selected high-risk, R1 integration, representative mutation and base/native/desktop installation checks; the external final attestation and Draft PR record their outcomes. Original selection IDs remain in JSON.
 
-## 可复现命令与边界
+Fixed evleven R1: 16/16 separate real MCP tests, wheel SHA256 `40d5cbd5ae312b4bb3af133405807fb9764653b95145a80e4633bed17039ea2e`. Runtime, governance, process/transport and persistence are real; model planning is deterministic. R1 is not provisioned in hosted CI; those 16 tests remain explicitly skipped there. Keyword/ID recovery does not establish semantic retrieval or autonomous model planning.
 
-先在仓库外使用明确解释器创建环境、按 `uv.lock` 的 dev 依赖配置，并为 HOME、配置、缓存、临时目录和 coverage 指定独立位置。
-模型和网络边界使用正式测试夹具；不继承真实用户配置。
+Pre-push Windows rerun after adding 20 POSIX cases: 2403 collected / 2364 passed / 39 skipped / 0 failed; coverage 83.43%. Windows skips include the 20 new POSIX-only cases. Fresh local CI-driver preparation, isolation and base/native/desktop package prechecks also passed; these provisional archives are not the final rebuilt distribution.
 
-```powershell
-& $PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests/unit/test_remediation_isolation.py
-& $PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests --cov=pyharness --cov-report=json --cov-fail-under=75
-& $PYTHON -B scripts/check_authorization.py
-& $PYTHON -B -m hatchling build -t wheel -t sdist -d $OUT
-git diff --check
-```
+## CI failures and bounded corrections
 
-这些是逻辑命令模板；PowerShell 变量调用需使用 `& $PYTHON`，且工作目录应为隔离副本。完整实际参数与退出码在外部证据索引。
-R1 专用测试遵循现有集成脚本的固定布局契约：先在**仓库外隔离源码副本**的 `.work/verification/venv` 创建全新 PyHarness 环境，按锁文件安装声明的 dev/test（含 desktop）依赖；将 `$PYTHON` 明确指向该环境的 `Scripts/python.exe`（Windows）。再以 `scripts/setup_evleven_r1.ps1 -ArtifactDirectory $R1 -PythonPath $PYTHON -UvPath $UV` 配置独立 R1 环境，最后必须使用**同一个 PyHarness 解释器**运行 `tests/integration/test_evleven_r1.py`。不能用任意外部解释器代替该固定布局；两套环境、数据和日志均留在外部副本中，不能复用原始工作树环境。
-最终安装使用交付 wheel 的 base、`[native]`、`[desktop]`，从源码目录之外运行 `pyharness --help`；不会自动调用模型。
+The initial workflow failed because depth-one checkout made the Git whitespace check treat historical content as additions. Fetch depth two supplies the parent; the gate remains. Ubuntu then failed collecting Qt tests because `libEGL.so.1` was missing. Only minimal `libegl1` / `libopengl0` runtime libraries were added; no full desktop/service, deleted test, reduced assertion, unexplained skip, coverage reduction or `continue-on-error` was used. Independent POSIX/high-risk/package stages collect evidence after other failures without making the failed job green.
 
-## 未验证和限制
+The third and final remediation round addresses errors exposed after collection succeeded. A spill directory set to 0600 was inaccessible to a non-root POSIX owner; directories now use 0700, while temporary files are exclusively created at 0600 before any write. Collision cleanup never removes another existing file. Python 3.11 uses `Path.open(newline="")` for lossless text reads, since `Path.read_text(newline=...)` is a newer API. Deterministic local Python 3.11 evidence also reproduced health-probe completion racing cancellation; `asyncio.timeout` in the owner task preserves cancellation, avoids an abandoned probe and retains real deadlines. Regression tests cover both successful and failing ping completion and timeout resource release. Windows drive-letter paths, junction commands and Windows Job fault injection are replaced on POSIX with actual outside paths, symlinks and a real post-spawn failure boundary. POSIX credential fixtures are private at creation; the negative loose-permission test remains intact. Windows Python 3.11 also lacked os.path.isjunction and skipped final junction containment; exact mount-point reparse-tag detection now retains the same refusal for junctions and child paths, backed by real Windows junction tests. No supported Python version was removed.
 
-- Engineering Release Candidate only; no push, remote tag, GitHub Release or remote CI run.
-- Package version remains 0.1.0; branch and Git commit identify this engineering candidate.
-- R01 unsafe PTY entry points remain disabled; no unsupported process-tree ownership guarantee.
-- R02 environment-blocked: no independent Linux/WSL environment; docker-desktop is not used as a POSIX acceptance environment. Controlled syscall tests do not establish actual POSIX permissions.
-- Windows local single-trust-domain acceptance only. No other-machine, Linux, WSL or Docker production guarantee.
-- Deterministic model substitutes only; no real conversational model, paid API or model download.
-- evleven R1 is an external real MCP process and persistent service; it is not an embedded model or PyHarness storage implementation. Deterministic keyword/ID recovery does not establish semantic retrieval.
-- No complete manual GUI/WebView2 interaction validation; native Qt offscreen and desktop loopback HTTP were exercised.
-- Synchronous-tool cancellation and remote MCP timeout do not guarantee stopping remote work or reversing side effects; unknown writes must not be blindly retried.
-- Ruff is undeclared and unavailable, so it was not run; no formal type-check gate is configured.
-- Dependency installation can need the configured package source or an existing cache; not an offline portable package.
-- Review scope does not prove transactional rollback for every possible component constructor, nor preservation of every original MCP request exception if cleanup itself fails.
-- Precommit report cannot embed its own future commit or the hash of an archive containing itself. Resolve HEAD in the committed checkout; exact postcommit evidence and rebuilt artifact checksums are provided alongside distribution artifacts.
+## Reproduction and remaining limits
+
+See [docs/CI.md](../docs/CI.md). `scripts/ci_verify.py` requires a separate output directory. Frozen `uv.lock` dependencies install into fresh environments. HOME/config/cache/temp/coverage/artifacts remain isolated; tests block non-loopback networking and undeclared subprocesses. All data are synthetic. Linux uses real non-root permissions; Windows prechecks cover loopback addresses and resource cleanup. Workflow permission is only `contents: read`, with no `pull_request_target`.
+
+No real conversation model, paid API, model download, complete manual GUI/WebView2, WSL/Docker production deployment or all-platform guarantee is claimed. Client cancellation/timeout cannot establish remote stop or undo side effects. Unknown remote writes must be reconciled without blind retry. Ruff remains unavailable and is not a gate; no formal type-check gate exists. Installation may require package-index access. R01 remains constrained. Final wheel/sdist are rebuilt from the final PR head and delivered with SHA256SUMS; historical archive hashes in JSON are explicitly baseline-only.

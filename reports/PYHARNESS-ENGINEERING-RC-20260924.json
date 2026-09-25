@@ -2,9 +2,9 @@
   "candidate_branch": "codex/pyharness-engineering-rc-20260924",
   "base_commit": "41d74db15f47bee5813976bd11435dff1be166ef",
   "final_commits": [
-    "HEAD (resolve with git rev-parse HEAD after local commit)"
+    "HEAD (documentation commit must also pass CI; exact final SHA and rebuilt hashes recorded by final external attestation)"
   ],
-  "verification_stage": "reviewed-precommit-source",
+  "verification_stage": "remote-validated-source-before-documentation-commit",
   "candidate_manifest_sha256": "dc1680b2ca310e9de505252a1d130a039a17c4bd1a1da19ec85f29754951ea26",
   "candidate_manifest_scope": "Canonical JSON [{path,sha256}] sorted by path, excluding reports/ to avoid self-reference; full private classification manifest is separate.",
   "source_test_manifest_sha256": "63ee6897655b2c1a4120c7667e043a11d958910f5d75db46ce0cd9558c5842e0",
@@ -520,10 +520,22 @@
     ]
   },
   "posix": {
-    "status": "environment-blocked",
+    "status": "confirmed-fixed",
     "controlled_syscall_tests": true,
-    "real_linux_wsl": false,
-    "docker_desktop_excluded": true
+    "real_linux": true,
+    "real_wsl": false,
+    "runner": "GitHub-hosted ubuntu-24.04",
+    "non_root": true,
+    "umask": "022",
+    "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+    "workflow_run_url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277",
+    "python": [
+      "3.11.16",
+      "3.13.15"
+    ],
+    "tests_each": 20,
+    "skipped_each": 0,
+    "scope": "Actual Linux filesystem permissions; no all-POSIX, WSL or Docker claim"
   },
   "reviewer_findings": [
     {
@@ -596,7 +608,7 @@
     "wheel": "e296494e0d4aba276abb4b38d167a0f1d7906e29af816b3dbaef677d912941ba",
     "sdist": "16357af0b90a97ca5a56cb7f66fb9514debaed700a5638c1d06cb1705d64e95c"
   },
-  "artifact_scope": "Precommit installation artifacts only; final rebuilt artifact hashes are in external postcommit attestation",
+  "artifact_scope": "Historical initial RC archives only. Final exact PR commit archives are rebuilt after final remote CI and recorded in the external final attestation and Draft PR.",
   "remediation": {
     "F01": "confirmed-fixed",
     "F02": "confirmed-fixed",
@@ -614,18 +626,18 @@
     "F14": "confirmed-fixed",
     "F15": "confirmed-fixed",
     "R01": "safely-constrained",
-    "R02": "environment-blocked",
+    "R02": "confirmed-fixed",
     "R03": "confirmed-fixed",
     "R04": "confirmed-fixed",
     "G01": "confirmed-fixed",
     "G02": "confirmed-fixed"
   },
   "limitations": [
-    "Engineering Release Candidate only; no push, remote tag, GitHub Release or remote CI run.",
+    "Engineering Release Candidate pushed as a Draft PR; unmerged, no remote tag or GitHub Release.",
     "Package version remains 0.1.0; branch and Git commit identify this engineering candidate.",
     "R01 unsafe PTY entry points remain disabled; no unsupported process-tree ownership guarantee.",
-    "R02 environment-blocked: no independent Linux/WSL environment; docker-desktop is not used as a POSIX acceptance environment. Controlled syscall tests do not establish actual POSIX permissions.",
-    "Windows local single-trust-domain acceptance only. No other-machine, Linux, WSL or Docker production guarantee.",
+    "R02 confirmed-fixed on the recorded GitHub-hosted Ubuntu 24.04 Python 3.11/3.13 runs; no all-POSIX proof.",
+    "Local Windows and recorded hosted Windows/Ubuntu validation only; no WSL, Docker, other-machine production or multi-user guarantee.",
     "Deterministic model substitutes only; no real conversational model, paid API or model download.",
     "evleven R1 is an external real MCP process and persistent service; it is not an embedded model or PyHarness storage implementation. Deterministic keyword/ID recovery does not establish semantic retrieval.",
     "No complete manual GUI/WebView2 interaction validation; native Qt offscreen and desktop loopback HTTP were exercised.",
@@ -635,7 +647,7 @@
     "Review scope does not prove transactional rollback for every possible component constructor, nor preservation of every original MCP request exception if cleanup itself fails.",
     "Precommit report cannot embed its own future commit or the hash of an archive containing itself. Resolve HEAD in the committed checkout; exact postcommit evidence and rebuilt artifact checksums are provided alongside distribution artifacts."
   ],
-  "pushed": false,
+  "pushed": true,
   "published": false,
   "commands": [
     "$PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests/unit/test_remediation_isolation.py",
@@ -645,5 +657,952 @@
     "$PYTHON -B -m pytest -p no:cacheprovider -o addopts= tests/integration/test_evleven_r1.py",
     "git diff --check"
   ],
-  "command_context": "All execution used isolated configuration/home/temp/cache and external source copies. pytest commands require declared dev dependencies and explicit synthetic fixtures; do not use real user configuration."
+  "command_context": "All execution used isolated configuration/home/temp/cache and external source copies. pytest commands require declared dev dependencies and explicit synthetic fixtures; do not use real user configuration.",
+  "baseline_evidence_commit": "3101ca96ff4a2121fef8cf62ddda90a57eaa2089",
+  "pr": {
+    "number": 1,
+    "url": "https://github.com/zinuotiger/pyharness/pull/1",
+    "base": "main",
+    "head": "codex/pyharness-engineering-rc-20260924",
+    "draft": true,
+    "merged": false
+  },
+  "remote_validation": {
+    "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+    "run_id": 36079689277,
+    "run_url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277",
+    "jobs": [
+      {
+        "completedAt": "2026-09-25T00:57:28Z",
+        "conclusion": "success",
+        "databaseId": 107898671821,
+        "name": "ubuntu-24.04 / Python 3.13 / full, permissions, package",
+        "startedAt": "2026-09-25T00:54:55Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-25T00:54:57Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-25T00:54:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:54:58Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v4",
+            "number": 2,
+            "startedAt": "2026-09-25T00:54:57Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:54:58Z",
+            "conclusion": "success",
+            "name": "Run actions/setup-python@v5",
+            "number": 3,
+            "startedAt": "2026-09-25T00:54:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:54:59Z",
+            "conclusion": "success",
+            "name": "Run astral-sh/setup-uv@v6",
+            "number": 4,
+            "startedAt": "2026-09-25T00:54:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:11Z",
+            "conclusion": "success",
+            "name": "Minimal Linux Qt offscreen dynamic libraries (no desktop or display service)",
+            "number": 5,
+            "startedAt": "2026-09-25T00:54:59Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:16Z",
+            "conclusion": "success",
+            "name": "Clean environment from frozen uv.lock (includes declared native test dependencies)",
+            "number": 6,
+            "startedAt": "2026-09-25T00:55:11Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:17Z",
+            "conclusion": "success",
+            "name": "Authorization AST and governance read-side gates; Git whitespace",
+            "number": 7,
+            "startedAt": "2026-09-25T00:55:16Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:20Z",
+            "conclusion": "success",
+            "name": "Host configuration, process and network isolation sentinels",
+            "number": 8,
+            "startedAt": "2026-09-25T00:55:17Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:10Z",
+            "conclusion": "success",
+            "name": "Full pytest without ignored modules; coverage at least 75 percent",
+            "number": 9,
+            "startedAt": "2026-09-25T00:55:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:20Z",
+            "conclusion": "success",
+            "name": "High-risk remediation regression (including real loopback listeners)",
+            "number": 10,
+            "startedAt": "2026-09-25T00:57:10Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:23Z",
+            "conclusion": "success",
+            "name": "R02 real POSIX permissions; non-root; umask 022; no skipped cases",
+            "number": 11,
+            "startedAt": "2026-09-25T00:57:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:24Z",
+            "conclusion": "success",
+            "name": "Wheel and sdist; external clean base installation; Windows optional entry prechecks",
+            "number": 12,
+            "startedAt": "2026-09-25T00:57:23Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:25Z",
+            "conclusion": "success",
+            "name": "Upload allowlisted summaries, sanitized JUnit and distribution archives",
+            "number": 13,
+            "startedAt": "2026-09-25T00:57:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:25Z",
+            "conclusion": "success",
+            "name": "Post Run astral-sh/setup-uv@v6",
+            "number": 24,
+            "startedAt": "2026-09-25T00:57:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:25Z",
+            "conclusion": "success",
+            "name": "Post Run actions/setup-python@v5",
+            "number": 25,
+            "startedAt": "2026-09-25T00:57:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:25Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v4",
+            "number": 26,
+            "startedAt": "2026-09-25T00:57:25Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 27,
+            "startedAt": "2026-09-25T00:57:26Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671821"
+      },
+      {
+        "completedAt": "2026-09-25T00:57:30Z",
+        "conclusion": "success",
+        "databaseId": 107898671913,
+        "name": "ubuntu-24.04 / Python 3.11 / full, permissions, package",
+        "startedAt": "2026-09-25T00:54:55Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-25T00:54:58Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-25T00:54:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:54:59Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v4",
+            "number": 2,
+            "startedAt": "2026-09-25T00:54:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:00Z",
+            "conclusion": "success",
+            "name": "Run actions/setup-python@v5",
+            "number": 3,
+            "startedAt": "2026-09-25T00:54:59Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:01Z",
+            "conclusion": "success",
+            "name": "Run astral-sh/setup-uv@v6",
+            "number": 4,
+            "startedAt": "2026-09-25T00:55:00Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:13Z",
+            "conclusion": "success",
+            "name": "Minimal Linux Qt offscreen dynamic libraries (no desktop or display service)",
+            "number": 5,
+            "startedAt": "2026-09-25T00:55:01Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:15Z",
+            "conclusion": "success",
+            "name": "Clean environment from frozen uv.lock (includes declared native test dependencies)",
+            "number": 6,
+            "startedAt": "2026-09-25T00:55:13Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:16Z",
+            "conclusion": "success",
+            "name": "Authorization AST and governance read-side gates; Git whitespace",
+            "number": 7,
+            "startedAt": "2026-09-25T00:55:15Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:18Z",
+            "conclusion": "success",
+            "name": "Host configuration, process and network isolation sentinels",
+            "number": 8,
+            "startedAt": "2026-09-25T00:55:16Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:10Z",
+            "conclusion": "success",
+            "name": "Full pytest without ignored modules; coverage at least 75 percent",
+            "number": 9,
+            "startedAt": "2026-09-25T00:55:18Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:21Z",
+            "conclusion": "success",
+            "name": "High-risk remediation regression (including real loopback listeners)",
+            "number": 10,
+            "startedAt": "2026-09-25T00:57:10Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:23Z",
+            "conclusion": "success",
+            "name": "R02 real POSIX permissions; non-root; umask 022; no skipped cases",
+            "number": 11,
+            "startedAt": "2026-09-25T00:57:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:24Z",
+            "conclusion": "success",
+            "name": "Wheel and sdist; external clean base installation; Windows optional entry prechecks",
+            "number": 12,
+            "startedAt": "2026-09-25T00:57:23Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Upload allowlisted summaries, sanitized JUnit and distribution archives",
+            "number": 13,
+            "startedAt": "2026-09-25T00:57:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Post Run astral-sh/setup-uv@v6",
+            "number": 24,
+            "startedAt": "2026-09-25T00:57:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Post Run actions/setup-python@v5",
+            "number": 25,
+            "startedAt": "2026-09-25T00:57:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v4",
+            "number": 26,
+            "startedAt": "2026-09-25T00:57:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:26Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 27,
+            "startedAt": "2026-09-25T00:57:26Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671913"
+      },
+      {
+        "completedAt": "2026-09-25T00:58:34Z",
+        "conclusion": "success",
+        "databaseId": 107898671998,
+        "name": "windows-latest / Python 3.13 / full, permissions, package",
+        "startedAt": "2026-09-25T00:54:58Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-25T00:55:01Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-25T00:54:59Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:10Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v4",
+            "number": 2,
+            "startedAt": "2026-09-25T00:55:01Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:10Z",
+            "conclusion": "success",
+            "name": "Run actions/setup-python@v5",
+            "number": 3,
+            "startedAt": "2026-09-25T00:55:10Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:12Z",
+            "conclusion": "success",
+            "name": "Run astral-sh/setup-uv@v6",
+            "number": 4,
+            "startedAt": "2026-09-25T00:55:10Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:12Z",
+            "conclusion": "skipped",
+            "name": "Minimal Linux Qt offscreen dynamic libraries (no desktop or display service)",
+            "number": 5,
+            "startedAt": "2026-09-25T00:55:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:20Z",
+            "conclusion": "success",
+            "name": "Clean environment from frozen uv.lock (includes declared native test dependencies)",
+            "number": 6,
+            "startedAt": "2026-09-25T00:55:12Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:21Z",
+            "conclusion": "success",
+            "name": "Authorization AST and governance read-side gates; Git whitespace",
+            "number": 7,
+            "startedAt": "2026-09-25T00:55:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:26Z",
+            "conclusion": "success",
+            "name": "Host configuration, process and network isolation sentinels",
+            "number": 8,
+            "startedAt": "2026-09-25T00:55:21Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:57:56Z",
+            "conclusion": "success",
+            "name": "Full pytest without ignored modules; coverage at least 75 percent",
+            "number": 9,
+            "startedAt": "2026-09-25T00:55:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:15Z",
+            "conclusion": "success",
+            "name": "High-risk remediation regression (including real loopback listeners)",
+            "number": 10,
+            "startedAt": "2026-09-25T00:57:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:15Z",
+            "conclusion": "skipped",
+            "name": "R02 real POSIX permissions; non-root; umask 022; no skipped cases",
+            "number": 11,
+            "startedAt": "2026-09-25T00:58:15Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:24Z",
+            "conclusion": "success",
+            "name": "Wheel and sdist; external clean base installation; Windows optional entry prechecks",
+            "number": 12,
+            "startedAt": "2026-09-25T00:58:15Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:26Z",
+            "conclusion": "success",
+            "name": "Upload allowlisted summaries, sanitized JUnit and distribution archives",
+            "number": 13,
+            "startedAt": "2026-09-25T00:58:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:26Z",
+            "conclusion": "success",
+            "name": "Post Run astral-sh/setup-uv@v6",
+            "number": 24,
+            "startedAt": "2026-09-25T00:58:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:26Z",
+            "conclusion": "success",
+            "name": "Post Run actions/setup-python@v5",
+            "number": 25,
+            "startedAt": "2026-09-25T00:58:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:28Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v4",
+            "number": 26,
+            "startedAt": "2026-09-25T00:58:26Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:58:28Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 27,
+            "startedAt": "2026-09-25T00:58:28Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898671998"
+      },
+      {
+        "completedAt": "2026-09-25T00:55:58Z",
+        "conclusion": "success",
+        "databaseId": 107898672169,
+        "name": "Windows / Python 3.13 / security, acceptance, e2e, invariants, structure",
+        "startedAt": "2026-09-25T00:54:55Z",
+        "status": "completed",
+        "steps": [
+          {
+            "completedAt": "2026-09-25T00:54:58Z",
+            "conclusion": "success",
+            "name": "Set up job",
+            "number": 1,
+            "startedAt": "2026-09-25T00:54:56Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:05Z",
+            "conclusion": "success",
+            "name": "Run actions/checkout@v4",
+            "number": 2,
+            "startedAt": "2026-09-25T00:54:58Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:06Z",
+            "conclusion": "success",
+            "name": "Run actions/setup-python@v5",
+            "number": 3,
+            "startedAt": "2026-09-25T00:55:05Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:07Z",
+            "conclusion": "success",
+            "name": "Run astral-sh/setup-uv@v6",
+            "number": 4,
+            "startedAt": "2026-09-25T00:55:06Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:14Z",
+            "conclusion": "success",
+            "name": "Clean locked dependency environment",
+            "number": 5,
+            "startedAt": "2026-09-25T00:55:07Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:20Z",
+            "conclusion": "success",
+            "name": "Security gate",
+            "number": 6,
+            "startedAt": "2026-09-25T00:55:14Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:24Z",
+            "conclusion": "success",
+            "name": "Acceptance gate",
+            "number": 7,
+            "startedAt": "2026-09-25T00:55:20Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:34Z",
+            "conclusion": "success",
+            "name": "End-to-end governed runtime gate (deterministic model)",
+            "number": 8,
+            "startedAt": "2026-09-25T00:55:24Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:46Z",
+            "conclusion": "success",
+            "name": "Invariants gate",
+            "number": 9,
+            "startedAt": "2026-09-25T00:55:34Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:49Z",
+            "conclusion": "success",
+            "name": "Structure and shell-service contract gate",
+            "number": 10,
+            "startedAt": "2026-09-25T00:55:46Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:51Z",
+            "conclusion": "success",
+            "name": "Production authorization and governance reachability gate",
+            "number": 11,
+            "startedAt": "2026-09-25T00:55:49Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:52Z",
+            "conclusion": "success",
+            "name": "Upload sanitized gate evidence",
+            "number": 12,
+            "startedAt": "2026-09-25T00:55:51Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:52Z",
+            "conclusion": "success",
+            "name": "Post Run astral-sh/setup-uv@v6",
+            "number": 22,
+            "startedAt": "2026-09-25T00:55:52Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:52Z",
+            "conclusion": "success",
+            "name": "Post Run actions/setup-python@v5",
+            "number": 23,
+            "startedAt": "2026-09-25T00:55:52Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:55Z",
+            "conclusion": "success",
+            "name": "Post Run actions/checkout@v4",
+            "number": 24,
+            "startedAt": "2026-09-25T00:55:52Z",
+            "status": "completed"
+          },
+          {
+            "completedAt": "2026-09-25T00:55:55Z",
+            "conclusion": "success",
+            "name": "Complete job",
+            "number": 25,
+            "startedAt": "2026-09-25T00:55:55Z",
+            "status": "completed"
+          }
+        ],
+        "url": "https://github.com/zinuotiger/pyharness/actions/runs/36079689277/job/107898672169"
+      }
+    ],
+    "summaries": [
+      {
+        "suite": "full",
+        "collected": 2413,
+        "passed": 2393,
+        "failed": 0,
+        "skipped": 20,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.11.16",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "coverage": {
+          "covered_lines": 16906,
+          "num_statements": 20311,
+          "percent_covered": 83.23568509674561,
+          "percent_covered_display": "83",
+          "missing_lines": 3405,
+          "excluded_lines": 57,
+          "percent_statements_covered": 83.23568509674561,
+          "percent_statements_covered_display": "83"
+        },
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\full-summary.json"
+      },
+      {
+        "suite": "high-risk",
+        "collected": 178,
+        "passed": 178,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.11.16",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\high-risk-summary.json"
+      },
+      {
+        "suite": "isolation",
+        "collected": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.11.16",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\isolation-summary.json"
+      },
+      {
+        "sha256": {
+          "pyharness-0.1.0-py3-none-any.whl": "7744473f3c3d37edd6a1e34f8ffcf28d4f80d4f6ebbcc2c2f90cee8993088967",
+          "pyharness-0.1.0.tar.gz": "f0a0edd8534d48fdc47f22cbcad1e328ec92cc40b9ea6dd4d33b3b5ee19edb29"
+        },
+        "modes": {
+          "base": {
+            "install": "passed",
+            "isolated_import": "passed",
+            "cli_help": "passed",
+            "precheck": "not_applicable"
+          }
+        },
+        "full_manual_gui": "not_run",
+        "real_model": "not_run",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\package-summary.json"
+      },
+      {
+        "suite": "posix",
+        "collected": 20,
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.11.16",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "euid": 1001,
+        "real_posix_filesystem": true,
+        "required_umask": "022",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\posix-summary.json"
+      },
+      {
+        "authorization_ast": "passed",
+        "governance_read_paths": "passed",
+        "git_diff_check": "passed",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.11-1c063da32f3ca563d6f026aacb81657232a99d36\\static-summary.json"
+      },
+      {
+        "suite": "full",
+        "collected": 2413,
+        "passed": 2393,
+        "failed": 0,
+        "skipped": 20,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "coverage": {
+          "covered_lines": 16916,
+          "num_statements": 20311,
+          "percent_covered": 83.28491950174782,
+          "percent_covered_display": "83",
+          "missing_lines": 3395,
+          "excluded_lines": 57,
+          "percent_statements_covered": 83.28491950174782,
+          "percent_statements_covered_display": "83"
+        },
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\full-summary.json"
+      },
+      {
+        "suite": "high-risk",
+        "collected": 178,
+        "passed": 178,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\high-risk-summary.json"
+      },
+      {
+        "suite": "isolation",
+        "collected": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\isolation-summary.json"
+      },
+      {
+        "sha256": {
+          "pyharness-0.1.0-py3-none-any.whl": "7744473f3c3d37edd6a1e34f8ffcf28d4f80d4f6ebbcc2c2f90cee8993088967",
+          "pyharness-0.1.0.tar.gz": "f0a0edd8534d48fdc47f22cbcad1e328ec92cc40b9ea6dd4d33b3b5ee19edb29"
+        },
+        "modes": {
+          "base": {
+            "install": "passed",
+            "isolated_import": "passed",
+            "cli_help": "passed",
+            "precheck": "not_applicable"
+          }
+        },
+        "full_manual_gui": "not_run",
+        "real_model": "not_run",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\package-summary.json"
+      },
+      {
+        "suite": "posix",
+        "collected": 20,
+        "passed": 20,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Linux",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "euid": 1001,
+        "real_posix_filesystem": true,
+        "required_umask": "022",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\posix-summary.json"
+      },
+      {
+        "authorization_ast": "passed",
+        "governance_read_paths": "passed",
+        "git_diff_check": "passed",
+        "artifact_path": "artifacts\\ci-ubuntu-24.04-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\static-summary.json"
+      },
+      {
+        "suite": "full",
+        "collected": 2413,
+        "passed": 2374,
+        "failed": 0,
+        "skipped": 39,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "coverage": {
+          "covered_lines": 16948,
+          "num_statements": 20311,
+          "percent_covered": 83.44246959775491,
+          "percent_covered_display": "83",
+          "missing_lines": 3363,
+          "excluded_lines": 57,
+          "percent_statements_covered": 83.44246959775491,
+          "percent_statements_covered_display": "83"
+        },
+        "artifact_path": "artifacts\\ci-windows-latest-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\full-summary.json"
+      },
+      {
+        "suite": "high-risk",
+        "collected": 178,
+        "passed": 178,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-windows-latest-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\high-risk-summary.json"
+      },
+      {
+        "suite": "isolation",
+        "collected": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\ci-windows-latest-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\isolation-summary.json"
+      },
+      {
+        "sha256": {
+          "pyharness-0.1.0-py3-none-any.whl": "eaba71bf50b8348b3d8a2a096717af7a85fc3450a2b284b1dc54d8574d1b5394",
+          "pyharness-0.1.0.tar.gz": "32ab13b2e93a8b96dc7d3e9026c1c181bed0e220799fb921bb894124138fb854"
+        },
+        "modes": {
+          "base": {
+            "install": "passed",
+            "isolated_import": "passed",
+            "cli_help": "passed",
+            "precheck": "not_applicable"
+          },
+          "native": {
+            "install": "passed",
+            "isolated_import": "passed",
+            "cli_help": "passed",
+            "precheck": "passed"
+          },
+          "desktop": {
+            "install": "passed",
+            "isolated_import": "passed",
+            "cli_help": "passed",
+            "precheck": "passed"
+          }
+        },
+        "full_manual_gui": "not_run",
+        "real_model": "not_run",
+        "artifact_path": "artifacts\\ci-windows-latest-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\package-summary.json"
+      },
+      {
+        "authorization_ast": "passed",
+        "governance_read_paths": "passed",
+        "git_diff_check": "passed",
+        "artifact_path": "artifacts\\ci-windows-latest-py3.13-1c063da32f3ca563d6f026aacb81657232a99d36\\static-summary.json"
+      },
+      {
+        "suite": "acceptance",
+        "collected": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\acceptance-summary.json"
+      },
+      {
+        "suite": "e2e",
+        "collected": 52,
+        "passed": 52,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\e2e-summary.json"
+      },
+      {
+        "suite": "invariants",
+        "collected": 193,
+        "passed": 193,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\invariants-summary.json"
+      },
+      {
+        "suite": "security",
+        "collected": 55,
+        "passed": 55,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\security-summary.json"
+      },
+      {
+        "authorization_ast": "passed",
+        "governance_read_paths": "passed",
+        "git_diff_check": "passed",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\static-summary.json"
+      },
+      {
+        "suite": "structural",
+        "collected": 21,
+        "passed": 21,
+        "failed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "exit_code": 0,
+        "python": "3.13.15",
+        "os": "Windows",
+        "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+        "artifact_path": "artifacts\\windows-layered-gates-1c063da32f3ca563d6f026aacb81657232a99d36\\structural-summary.json"
+      }
+    ],
+    "scope": "GitHub-hosted Windows and Ubuntu 24.04; R02 real non-root POSIX filesystem, not all POSIX platforms"
+  },
+  "pytest_evidence_stage": "Historical reviewed precommit baseline; current remote matrix is in remote_validation",
+  "historical_fields_scope": "Top-level pytest, coverage, skip_details, high_risk, fault_injection, property_tests, concurrency_tests, mutation_tests, evleven_r1, installation_steps, base_install, native_install, desktop_install, windows and manifests describe the initial locally accepted RC. Current remote evidence is under remote_validation and posix; final exact-head local reruns, R1, mutation, installation and rebuilt archive hashes are in the external final attestation and Draft PR.",
+  "remote_ci_repairs": [
+    {
+      "commit": "38dcfb2185cfea6ed4b64ce6c0cf91ee1b14b483",
+      "reason": "A depth-one checkout made git show --check treat HEAD as a root commit; fetch the parent without removing the check."
+    },
+    {
+      "commit": "106af94488ca1f9c03563b73f046d3c4473f16b3",
+      "reason": "Ubuntu required libegl1 and libopengl0 for existing real Qt offscreen tests; retain all tests and collect independent POSIX/package evidence after other stage failures."
+    },
+    {
+      "commit": "1c063da32f3ca563d6f026aacb81657232a99d36",
+      "reason": "Correct spill POSIX directory/file permissions, exclusive temporary ownership and Python 3.11 newline API; keep probe cancellation in its owner task to avoid a reproduced Python 3.11 wait_for completion/cancel race; correct platform-specific test input and fault-injection assumptions without removing assertions."
+    }
+  ],
+  "remote_ci_remediation_rounds": 3
 }

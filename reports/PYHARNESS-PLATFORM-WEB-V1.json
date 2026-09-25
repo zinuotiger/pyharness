@@ -8,17 +8,17 @@
   "changed_files": 42,
   "modified_files": 14,
   "new_files": 28,
-  "real_docker": "environment_blocked_daemon_unavailable",
+  "real_docker": "remote-confirmed on Ubuntu GitHub-hosted runner",
   "real_model": "environment_blocked_no_safe_connection_in_isolated_validation",
   "isolated_fallback": "forbidden_and_tested",
-  "code_change_e2e": "fake_model_and_backend_real_governance_queue_approval_patch_export_restart",
+  "code_change_e2e": "deterministic_model_real_docker_governance_queue_approval_patch_export_restart_confirmed_see_remote_commit",
   "browser": {
     "pages": 12,
     "checks": 14,
     "uncaught_errors": 0
   },
   "webview": "real_hidden_window_passed",
-  "pushed": false,
+  "pushed": true,
   "published": false,
   "pre_final_suite": {
     "collected": 2505,
@@ -50,15 +50,15 @@
     "failed": 0
   },
   "remote_acceptance": {
-    "status": "pending_first_pr_workflow",
+    "status": "windows_browser_fix_pending_revalidation",
     "base_branch": "codex/pyharness-engineering-rc-20260924",
     "head_branch": "feat/pyharness-platform-web-v1",
     "starting_commit": "40b80541c41038c161e73b96be6f6ab0e7d9e6fa",
-    "pr_url": null,
-    "windows": "pending",
-    "ubuntu_3_11": "pending",
-    "ubuntu_3_13": "pending",
-    "real_docker": "pending_ubuntu_real_container_job",
+    "pr_url": "https://github.com/zinuotiger/pyharness/pull/2",
+    "windows": "full_suite_and_package_passed_browser_startup_failed",
+    "ubuntu_3_11": "passed",
+    "ubuntu_3_13": "passed",
+    "real_docker": "remote-confirmed on Ubuntu GitHub-hosted runner",
     "real_model": "environment-blocked / manual acceptance pending",
     "max_remote_fix_rounds": 3,
     "exact_head_evidence": "CI summary and PR head SHA",
@@ -73,6 +73,20 @@
       "browser": "passed",
       "package": "passed",
       "review_confirmed_medium_fixed": 3
-    }
-  }
+    },
+    "workflow_url": "https://github.com/zinuotiger/pyharness/actions/runs/36194415836",
+    "tested_commit": "5cf4ced8931c4da94d4f26c54dacb6ad0d1da817",
+    "docker_tests": {
+      "collected": 13,
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    "docker_daemon": "28.0.4",
+    "host_fallback": false,
+    "remote_fix_rounds": 1,
+    "repair_reason": "Windows synthetic known-folder directory layout prevented Chromium DevTools startup"
+  },
+  "local_docker": "environment_blocked_daemon_unavailable",
+  "historical_scope": "Top-level changed_files, pre_final_suite, precommit_suite and targeted_platform describe original local acceptance at 40b80541; remote_acceptance carries this follow-up evidence."
 }

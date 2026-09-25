@@ -35,8 +35,10 @@ def environment(root: Path) -> dict[str, str]:
             "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "SSL_CERT_FILE",
             "SSL_CERT_DIR", "LANG", "LC_ALL"}
     env = {k: v for k, v in os.environ.items() if k.upper() in keep}
+    # Windows known-folder APIs expand USERPROFILE independently of APPDATA.
+    # Chromium refuses DevTools if the synthetic default directory is missing.
     for key, name in (("HOME", "home"), ("USERPROFILE", "home"),
-                      ("APPDATA", "appdata"), ("LOCALAPPDATA", "localappdata"),
+                      ("APPDATA", "home/AppData/Roaming"), ("LOCALAPPDATA", "home/AppData/Local"),
                       ("TMP", "tmp"), ("TEMP", "tmp"), ("TMPDIR", "tmp"),
                       ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config")):
         path = root / name

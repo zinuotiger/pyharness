@@ -9,6 +9,34 @@ from tests.unit.test_platform_safety import app
 from pyharness.errors import PyHError
 from pyharness.application.platform_projection import project
 
+
+@pytest.mark.controlled_process
+def test_browser_synthetic_windows_known_folders_exist(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    from scripts.ci_verify import environment
+    env=environment(tmp_path/'isolated')
+    home=Path(env['USERPROFILE'])
+    assert Path(env['LOCALAPPDATA'])==home/'AppData/Local'
+    assert Path(env['APPDATA'])==home/'AppData/Roaming'
+    assert Path(env['LOCALAPPDATA']).is_dir() and Path(env['APPDATA']).is_dir()
+    if os.name=='nt':
+        code='import ctypes; b=ctypes.create_unicode_buffer(260); result=ctypes.windll.shell32.SHGetFolderPathW(None,28,None,0,b); assert result==0,result; print(b.value)'
+        result=subprocess.check_output([sys.executable,'-B','-c',code],env=env,text=True).strip()
+        assert Path(result).resolve()==Path(env['LOCALAPPDATA']).resolve()
+
+
+def test_browser_uses_existing_chrome_before_edge_on_hosted_windows(tmp_path,monkeypatch):
+    from scripts.platform_browser_smoke import find_browser
+    monkeypatch.setenv('PROGRAMFILES',str(tmp_path));monkeypatch.delenv('PROGRAMFILES(X86)',raising=False)
+    chrome=tmp_path/'Google/Chrome/Application/chrome.exe';edge=tmp_path/'Microsoft/Edge/Application/msedge.exe'
+    for path in (chrome,edge):path.parent.mkdir(parents=True);path.write_bytes(b'')
+    assert find_browser()==str(chrome)
+    chrome.unlink()
+    assert find_browser()==str(edge)
+
 def options(*extra):
     return parser().parse_args(['--execute','--base-url','http://127.0.0.1:1/v1','--model','synthetic','--key-env','SYNTHETIC_MODEL_KEY','--input-price','1','--output-price','2',*extra])
 

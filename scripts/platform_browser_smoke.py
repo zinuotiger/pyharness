@@ -17,9 +17,15 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
 
+def find_browser():
+    # Prefer the existing cross-platform Chrome; never download a browser bundle.
+    roots=[Path(os.environ[k]) for k in ('PROGRAMFILES','PROGRAMFILES(X86)') if os.environ.get(k)]
+    candidates=[root/relative for relative in ('Google/Chrome/Application/chrome.exe','Microsoft/Edge/Application/msedge.exe') for root in roots]
+    return next((str(p) for p in candidates if p.is_file()),None) or shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+
+
 async def smoke(output, expect_docker=None):
-    candidates=[Path(os.environ.get(k,''))/'Microsoft/Edge/Application/msedge.exe' for k in ('PROGRAMFILES(X86)','PROGRAMFILES')]
-    executable=next((str(p) for p in candidates if p.is_file()),None) or shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+    executable=find_browser()
     if executable is None:
         raise RuntimeError('An existing Chrome/Edge browser is required; no browser download is performed')
     from scripts.ci_verify import environment
@@ -198,7 +204,7 @@ async def smoke(output, expect_docker=None):
         (output/'browser-console.json').write_text(json.dumps({'errors':errors,'console':console},ensure_ascii=False,indent=2),encoding='utf-8')
     report={'status':'passed','screenshots':shots,'model':'deterministic, not a real model',
         'checks':['twelve rendered pages','empty states','create/publish/test correct Agent','real queue message roundtrip','SSE offline reconnect','API failure and retry','draft refresh barrier','session attachment ownership','fixed version after publication','in-flight request session fence','clear attachment preserves draft','safe dates','Ctrl+K','mobile viewport'],
-        'uncaught_errors':len(errors),'http_contracts':[204,404,409,422,503],'sandbox_health':health,'viewport':'1440x900 and 1280x900',
+        'uncaught_errors':len(errors),'browser':Path(executable).name,'http_contracts':[204,404,409,422,503],'sandbox_health':health,'viewport':'1440x900 and 1280x900',
         'commit':__import__('subprocess').check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
     (output/'browser-summary.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(report,ensure_ascii=False))

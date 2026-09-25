@@ -1,14 +1,16 @@
 # PyHarness Platform Web V1 verification report
 
-Status: local MVP implemented; independent review passed. Real Docker and real-model acceptance remain environment-blocked. Final commit-bound verification is recorded in the external delivery manifest.
+## Original local acceptance (40b80541)
 
-Baseline: ad9a0e8591999b6c81766b05f98ebceca93fd56e. Branch: feat/pyharness-platform-web-v1. Three read-only design agents and two independent read-only reviewers completed. Main and RC worktrees are protected; no push/tag/remote release is authorized.
+Status: local MVP implemented; independent review passed. Local Docker and real-model acceptance remain environment-blocked; see the remote follow-up for confirmed Ubuntu Docker results. Final commit-bound verification is recorded in the external delivery manifest.
+
+Baseline: ad9a0e8591999b6c81766b05f98ebceca93fd56e. Branch: feat/pyharness-platform-web-v1. Three read-only design agents and two independent read-only reviewers completed. Main and RC worktrees are protected. The original local-only acceptance did not authorize push; the remote follow-up below authorizes the feature branch and a stacked Draft PR only.
 
 The checkpoint is external to the repository and contains original tracked-file hashes, identity, toolchain, route/method inventory and command outputs. Validation uses scripts/ci_verify.py with synthetic configuration, HOME, credentials and sessions. Output directories are supplied externally; the repository contains no test runtime data.
 
 Intermediate full suite: 2477 collected, 2437 passed, 0 failed, 40 skipped, coverage 81.69598556608028%, exit 0. Targeted platform suite after fault tests: 47 passed, 1 skipped (Windows symlink privilege), exit 0. Browser acceptance passed with no uncaught script errors using a fresh headless Edge context and deterministic model transport.
 
-Docker CLI is installed; daemon health returned unavailable. Real container limits/network/process security tests are environment-blocked. No real-model credentials were read or used, so real-model smoke is environment-blocked. Governed code-change automation uses a deterministic model and fake backend with the real queue, ToolExecutor, approval, files, patch, export and restart replay chain. It does not demonstrate an actual Docker test command.
+Docker CLI is installed; daemon health returned unavailable. At the original local acceptance, real container limits/network/process checks were environment-blocked. No real-model credentials were read or used, so real-model smoke is environment-blocked. Governed code-change automation uses a deterministic model and fake backend with the real queue, ToolExecutor, approval, files, patch, export and restart replay chain. It does not demonstrate an actual Docker test command.
 
 Known MVP boundaries are documented in architecture/platform-web-v1 and security/sandbox-boundary: no interactive PTY, no network allowlist, unknown provider capabilities/context length, classic skill/plugin lifecycle UI, escaped basic Markdown preview, local-only bounded Git clone, label-verified orphan recovery, no power-loss atomicity across multiple patch files. No SaaS/microVM/security guarantees are implied.
 
@@ -44,18 +46,24 @@ Browser: 12 pages and 14 checks, no uncaught JavaScript errors, screenshots incl
 
 The platform uses the existing single local tenant/session ownership model. Published Agent versions are immutable, while explicitly versioned knowledge sources remain independently replaceable. Approval UI offers one-shot grant/reject; modifying a proposed operation means rejecting and resubmitting, and persistent trust is not silently enabled. There is no interactive PTY. Model capability/context fields are unknown without provider evidence. These are explicit MVP limitations, not claims of a complete SaaS or perfect isolation.
 
-Protected workspace verification is read-only: RC retains the baseline commit with a clean status; main retains its original HEAD and pre-existing engineering changes. No task command writes either workspace. The final external manifest records exact HEAD/status evidence. No push, PR, tag or remote release was performed.
+Protected workspace verification is read-only: RC retains the baseline commit with a clean status; main retains its original HEAD and pre-existing engineering changes. No task command writes either workspace. The final external manifest records exact HEAD/status evidence. At the original local checkpoint no push or PR had been performed. The remote follow-up below records the subsequently authorized push and Draft PR. No tag or Release is created.
 
-## Final precommit verification
+## Original local precommit verification
 
 2508 collected, 2467 passed, 0 failed, 41 skipped, coverage 82.94563219936354%; exit 0. The final targeted Platform suite has 59 passed and 1 privilege-dependent skip. These results include local Git cloning and default/non-default tenant service-owned HTTP shutdown. Postcommit results and the exact commit SHA are recorded in the external delivery manifest to avoid a self-referential commit hash in this file.
 
 ## Remote acceptance follow-up
 
-Starting Platform commit: `40b80541c41038c161e73b96be6f6ab0e7d9e6fa`. The stacked Draft PR targets `codex/pyharness-engineering-rc-20260924` from `feat/pyharness-platform-web-v1`. Remote acceptance is pending the first PR workflow; no real Docker pass is claimed yet.
+Starting Platform commit: `40b80541c41038c161e73b96be6f6ab0e7d9e6fa`. The stacked Draft PR targets `codex/pyharness-engineering-rc-20260924` from `feat/pyharness-platform-web-v1`. [Draft PR #2](https://github.com/zinuotiger/pyharness/pull/2) is open against the RC branch. The first PR workflow completed with a Windows browser startup failure; Ubuntu and real Docker results are confirmed below.
 
 The existing RC Windows/Ubuntu matrix and layered gates are preserved. Added checks cover Platform APIs, system-browser automation at 1440x900 and 1280x900, 204/404/409/422/503 handling, public path/secret scans, and an independent real Docker job. Docker acceptance uses the fixed versioned Python image and a deterministic model with real queue/governance/approval/artifacts. Missing Docker/image, skipped Docker cases or owned container residue fail the job. The runner records actual image ID, daemon version, non-root user, mount/network/resource policy, process cleanup, artifact integrity and restart replay. Failed or incomplete foreground/background validation blocks patch application.
 
 Linux package acceptance validates base installation/import/CLI; HTTP and browser checks use the isolated source environment. Windows additionally checks installed native/desktop entry points, local HTTP and an actual hidden WebView. Artifact uploads are allowlisted with seven-day retention. Exact tested commit SHA is recorded in each CI summary and the PR head; it is not self-embedded in a commit that contains this report.
 
 Real-model status remains `environment-blocked / manual acceptance pending`. The optional explicit one-call smoke and its budget/billing boundary are documented in [remote acceptance guide](../docs/user-guide/platform-remote-acceptance.md). CI uses fake transport only. No model credentials are added to Actions. Host-approved execution is not OS isolation; no Windows Docker Desktop, microVM, hostile multi-tenant formal proof, network allowlist, PTY or power-loss atomicity claim is made.
+
+### First remote run and bounded repair
+
+[PR workflow 36194415836](https://github.com/zinuotiger/pyharness/actions/runs/36194415836) tested 5cf4ced8931c4da94d4f26c54dacb6ad0d1da817. Ubuntu Python 3.11/3.13 and Windows layered gates passed. Windows full pytest and package/HTTP/WebView passed, but installed Edge rejected DevTools startup before page tests. Repair round 1 creates the standard AppData/Local and AppData/Roaming directories beneath the synthetic USERPROFILE. Windows known-folder lookup otherwise fails and Chromium rejects DevTools despite its fresh profile. Existing Chrome is preferred, with Edge retained as a fallback; a real Windows known-folder subprocess regression verifies the isolated path. Local browser acceptance then passed without changing UI assertions or required gates.
+
+The real Docker job passed **13 collected / 13 passed / 0 failed / 0 skipped** with daemon **28.0.4**, image python:3.13.2-slim-bookworm (sha256:126799e6232bdb19aaaa0ef504f10bb25f3ee1cb05ca7fb6fa5be18cb2385b9a). Isolated runtime is **remote-confirmed on Ubuntu GitHub-hosted runner** for that commit. Checks confirm non-root/private mounts/no socket/read-only root, controlled host-network probe blocking, CPU/memory/PID configuration, actual wallclock/output bounds, process/container/workspace cleanup, no host fallback, approved artifact integrity and restart replay. Successful, failing foreground and failing/incomplete background code-change branches passed. Browser health was available with all 12 pages and zero uncaught errors. Final-head revalidation remains required.

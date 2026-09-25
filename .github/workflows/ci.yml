@@ -1,129 +1,115 @@
 name: CI
 
-# 最小可用 CI(GAP-6):门禁只跑**真实项目命令**,失败必须可观察。
-#
-# 设计取舍:
-# - 单 OS = windows-latest:本项目是 Windows-first(``pywinpty`` 仅 win32、
-#   原生壳按 Windows 桌面形态设计)。在未验证的平台上跑会引入与代码无关的红灯,
-#   那反而是"看起来有 CI"的噪音。
-# - 安装 ``.[dev]``(含 PySide6):让原生壳用例**真的跑**而不是 skip。缺依赖时
-#   ``pytest.importorskip`` 会给出**带理由的 skip**,不会被当成通过。
-# - 分层单独跑(security / acceptance / e2e / structural):失败可归因到层,
-#   而不是混在 1900 条里。
-# - 覆盖率设下限:低于阈值即失败(数字在下方 ``COV_FLOOR`` 统一维护)。
-
 on:
   push:
-    branches: [main]
+    branches: [main, codex/pyharness-engineering-rc-20260924]
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
-  # 覆盖率下限(百分比整数)。随能力增长应上调,不得为凑绿而下调。
   COV_FLOOR: "75"
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  QT_QPA_PLATFORM: offscreen
 
 jobs:
   test:
-    name: 全量测试 + 覆盖率
+    name: ${{ matrix.os }} / Python ${{ matrix.python }} / full, permissions, package
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: "3.13"
+          - os: ubuntu-24.04
+            python: "3.11"
+          - os: ubuntu-24.04
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.12"
+          enable-cache: false
+      - name: Clean environment from frozen uv.lock (includes declared native test dependencies)
+        run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Authorization AST and governance read-side gates; Git whitespace
+        run: python -B scripts/ci_verify.py static --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Host configuration, process and network isolation sentinels
+        run: python -B scripts/ci_verify.py test --suite isolation --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Full pytest without ignored modules; coverage at least 75 percent
+        run: python -B scripts/ci_verify.py test --suite full --cov-fail-under "${{ env.COV_FLOOR }}" --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: High-risk remediation regression (including real loopback listeners)
+        run: python -B scripts/ci_verify.py test --suite high-risk --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: R02 real POSIX permissions; non-root; umask 022; no skipped cases
+        if: runner.os == 'Linux'
+        run: python -B scripts/ci_verify.py test --suite posix --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Wheel and sdist; external clean base installation; Windows optional entry prechecks
+        run: python -B scripts/ci_verify.py package --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Upload allowlisted summaries, sanitized JUnit and distribution archives
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-${{ matrix.os }}-py${{ matrix.python }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/pyharness-ci/artifacts/*-summary.json
+            ${{ runner.temp }}/pyharness-ci/artifacts/environment.json
+            ${{ runner.temp }}/pyharness-ci/artifacts/junit-*.xml
+            ${{ runner.temp }}/pyharness-ci/artifacts/packages/*.whl
+            ${{ runner.temp }}/pyharness-ci/artifacts/packages/*.tar.gz
+            ${{ runner.temp }}/pyharness-ci/artifacts/packages/SHA256SUMS.txt
+          retention-days: 7
+          if-no-files-found: warn
+
+  gates:
+    name: Windows / Python 3.13 / security, acceptance, e2e, invariants, structure
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: pip
-
-      - name: 安装(含可选 native 依赖)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: 环境自检(可选依赖是否在位,必须可见)
-        run: |
-          python -c "import PySide6, sys; print('PySide6', PySide6.__version__)"
-          python -c "import winpty; print('pywinpty (winpty) ok')"
-
-      - name: 全量测试(无 --ignore)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          python -m pytest -q -p no:cacheprovider `
-            --junit-xml=junit.xml
-
-      - name: 覆盖率门禁
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          python -m pytest -q -p no:cacheprovider `
-            --cov=pyharness --cov-report=term-missing `
-            --cov-fail-under=${{ env.COV_FLOOR }} `
-            --junit-xml=junit-cov.xml
-
-      - name: 上传 junit(失败可归因)
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.12"
+          enable-cache: false
+      - name: Clean locked dependency environment
+        run: python -B scripts/ci_verify.py prepare --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Security gate
+        run: python -B scripts/ci_verify.py test --suite security --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Acceptance gate
+        run: python -B scripts/ci_verify.py test --suite acceptance --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: End-to-end governed runtime gate (deterministic model)
+        run: python -B scripts/ci_verify.py test --suite e2e --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Invariants gate
+        run: python -B scripts/ci_verify.py test --suite invariants --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Structure and shell-service contract gate
+        run: python -B scripts/ci_verify.py test --suite structural --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Production authorization and governance reachability gate
+        run: python -B scripts/ci_verify.py static --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Upload sanitized gate evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit
-          path: junit*.xml
+          name: windows-layered-gates-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/pyharness-ci/artifacts/*-summary.json
+            ${{ runner.temp }}/pyharness-ci/artifacts/environment.json
+            ${{ runner.temp }}/pyharness-ci/artifacts/junit-*.xml
+          retention-days: 7
           if-no-files-found: warn
-
-  gates:
-    name: 分层门禁(security / acceptance / e2e / 结构)
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-
-      - name: 安装(含可选 native 依赖)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: 安全门禁(tests/security)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/security
-
-      - name: 验收门禁(tests/acceptance)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/acceptance
-
-      - name: 端到端门禁(tests/e2e)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/e2e
-
-      - name: 不变量门禁(tests/invariants)
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q -p no:cacheprovider -o addopts="" tests/invariants
-
-      - name: 结构门禁(依赖方向 / 外壳↔服务契约)
-        run: |
-          python -m pytest -q -p no:cacheprovider -o addopts="" `
-            tests/unit/test_governance_policy.py `
-            tests/integration/test_shell_service_contract.py
-
-      - name: 生产代码禁止引入测试期旁路(快速静态闸)
-        shell: bash
-        run: |
-          # 治理写侧唯一入口纪律:authorize() 只允许在 tools_executor 被调用。
-          # 用 **AST** 判定而非 grep —— docstring/注释里提到该符号不算调用点
-          # (本仓库已实际踩过这个坑,见 tests/conftest.py::authorize_call_sites)。
-          python -B scripts/check_authorization.py
-          # 治理读侧(AuditSystem / Evidence)必须有生产调用点,否则又是"库级可达、
-          # 产品不可达"——这正是 GAP-7 / GAP-8 的原始形态。
-          for sym in "governance.audit" "archive_task_evidence" "governance_audit("; do
-            if ! grep -rq "$sym" pyharness/ --include=*.py; then
-              echo "::error::治理读侧符号 $sym 无生产调用点"; exit 1
-            fi
-          done
-          echo "静态闸通过"

@@ -79,6 +79,7 @@ import asyncio
 import inspect
 import logging
 import os
+import stat
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Callable, Iterable, Optional
@@ -284,15 +285,28 @@ def _final_realpath(p: str) -> str:
 
 def _is_linkish(p: str) -> bool:
     """p 或其现存祖先是否 symlink/junction(触发 FS-3 realpath 复核的门槛)。"""
+    def is_link(path: str) -> bool:
+        if os.path.islink(path):
+            return True
+        junction = getattr(os.path, "isjunction", None)
+        if junction is not None:
+            return junction(path)
+        if os.name == "nt":
+            # isjunction was added in Python 3.12. Windows 3.11 still exposes
+            # the exact junction reparse tag through lstat; do not skip FS-3.
+            try:
+                return os.lstat(path).st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+            except (OSError, ValueError):
+                return False
+        return False
+
     cur = os.path.normpath(p)
-    if os.path.islink(cur) or (hasattr(os.path, "isjunction")
-                               and os.path.isjunction(cur)):
+    if is_link(cur):
         return True
     parent = os.path.dirname(cur)
     guard = 0
     while parent and parent != cur and guard < 64:  # 向上找现存链点
-        if os.path.islink(parent) or (hasattr(os.path, "isjunction")
-                                      and os.path.isjunction(parent)):
+        if is_link(parent):
             return True
         nxt = os.path.dirname(parent)
         if nxt == parent:

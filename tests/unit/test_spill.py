@@ -1,7 +1,7 @@
 """tests/unit/test_spill.py — spill 输出溢出基础设施单测(specs/spill.py.md F039)。
 
 覆盖面(spec 函数清单逐条 + DIS-SEAM §6.1 GWT + ERR PERS-221/222/223):
-- enter:会话首访惰性建目录(workspace 外)、幂等、会话隔离、权限 600
+- enter:会话首访惰性建目录(workspace 外)、幂等、会话隔离、目录权限 700
   (Windows 尽力而为跳过断言)、mkdir/chmod 失败 → PERS-221
 - put:SpillMeta 字段级 {spilled,ref,chars,lines,preview(头500)}、原子落盘
   原文=文件(G1)、ref 形如 <sid>/spill-xxxx.txt 会话内相对、多次 put 文件名
@@ -26,6 +26,8 @@ code/零副作用。Windows 上权限 600 为尽力而为(spec 偏离 4:ACL 不�
 """
 import sys
 import types
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -88,6 +90,12 @@ def files_in(config: Settings, sid: str = SID) -> list[Path]:
     return sorted(d.glob("spill-*.txt")) if d.exists() else []
 
 
+def read_exact(path: Path) -> str:
+    """Preserve newlines using the API available throughout Python 3.11+."""
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
 def make_long_text(n_lines: int = 250, prefix: str = "L") -> str:
     """多行测试文本(无尾随换行;行号带零填充便于断言)。"""
     return "\n".join(f"{prefix}{i:04d}" for i in range(n_lines))
@@ -121,11 +129,11 @@ class TestEnter:
         assert d1 == d2 and d1.is_dir()
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Windows ACL 尽力而为(spec)")
-    async def test_mode_600(self, tmp_path: Path):
-        """私有区目录权限 600。"""
+    async def test_mode_700(self, tmp_path: Path):
+        """私有目录必须允许所有者遍历，同时拒绝 group/other。"""
         ctx = make_ctx(tmp_path)
         d = await spill.enter(ctx)
-        assert (d.stat().st_mode & 0o777) == 0o600
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
     async def test_mkdir_fail_raises_pers221(self, tmp_path: Path):
         """创建失败 → PERS-221 结构化上抛(查权限与空间)。"""
@@ -159,6 +167,51 @@ class TestEnter:
 
 # ===================================================================== put
 class TestPut:
+    @pytest.mark.skipif(os.name != "posix", reason="requires real POSIX directory and file permissions")
+    async def test_nonroot_private_roundtrip_and_cleanup(self, tmp_path: Path, monkeypatch):
+        """A non-root owner can traverse 0700 directories and read 0600 files."""
+        assert os.geteuid() != 0, "permission acceptance requires a non-root process"
+        ctx = make_ctx(tmp_path)
+        observed = []
+        real_open = os.open
+
+        def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if Path(path).name.endswith(".txt.tmp"):
+                observed.append(Path(path))
+                assert flags & os.O_EXCL
+                assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+                assert os.fstat(fd).st_size == 0
+            return fd
+
+        previous = os.umask(0o022)
+        try:
+            monkeypatch.setattr(os, "open", observe_open)
+            meta = await spill.put("synthetic private spill\nsecond line", ctx=ctx)
+            directory = spill_dir(ctx.config)
+            stored = cfg_root(ctx.config) / meta["ref"]
+            assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+            assert stat.S_IMODE(stored.stat().st_mode) == 0o600
+            assert len(observed) == 1 and not observed[0].exists()
+            assert (await spill.read(meta["ref"], ctx=ctx))["content"] == "synthetic private spill\nsecond line"
+            await spill.purge_session(SID, ctx=ctx)
+            assert not directory.exists()
+        finally:
+            os.umask(previous)
+
+    async def test_temp_collision_preserves_existing_file(self, tmp_path: Path, monkeypatch):
+        """Exclusive creation must neither overwrite nor clean up another file."""
+        ctx = make_ctx(tmp_path)
+        directory = await spill.enter(ctx)
+        monkeypatch.setattr(spill.uuid, "uuid4", lambda: types.SimpleNamespace(hex="a" * 32))
+        existing = directory / "spill-aaaaaaaa.txt.tmp"
+        existing.write_text("existing synthetic output", encoding="utf-8")
+        with pytest.raises(PyHError) as error:
+            await spill.put("replacement synthetic output", ctx=ctx)
+        assert error.value.code == "PERS-221"
+        assert existing.read_text(encoding="utf-8") == "existing synthetic output"
+        assert not (directory / "spill-aaaaaaaa.txt").exists()
+
     async def test_meta_fields_and_file_roundtrip(self, tmp_path: Path):
         """SpillMeta 字段级 + 文件=原文原子落盘(G1:截断不吞事实)。"""
         ctx = make_ctx(tmp_path)
@@ -174,7 +227,7 @@ class TestPut:
         # 落盘文件 = 原文(唯一 spill 文件)
         files = files_in(ctx.config)
         assert len(files) == 1
-        assert files[0].read_text(encoding="utf-8", newline="") == text
+        assert read_exact(files[0]) == text
         # kind 为来源标注(本实现入文件名暂未用,spec 伪码文件名不含 kind)
         assert meta["ref"].endswith(".txt")
 
@@ -237,7 +290,7 @@ class TestPut:
         secret = "token=sk-abcdefgh1234567890 end"
         meta = await spill.put(secret, kind="read", ctx=ctx)
         files = files_in(ctx.config)
-        assert files[0].read_text(encoding="utf-8", newline="") == "token=sk-*** end"
+        assert read_exact(files[0]) == "token=sk-*** end"
         assert "sk-abcdefgh1234567890" not in files[0].read_text(encoding="utf-8")
         assert meta["chars"] == len("token=sk-*** end")   # 计数按脱敏后文本
 
@@ -245,7 +298,7 @@ class TestPut:
         """ctx.redact 缺失时回落 config.redact(默认开启,疑似 32+ 位串打码)。"""
         ctx = make_ctx(tmp_path)                          # redact=None
         meta = await spill.put("key=" + "A" * 32, kind="read", ctx=ctx)
-        disk = files_in(ctx.config)[0].read_text(encoding="utf-8", newline="")
+        disk = read_exact(files_in(ctx.config)[0])
         assert "A" * 32 not in disk                       # 已打码
         assert meta["preview"].endswith("****")
 
@@ -256,8 +309,7 @@ class TestPut:
                               log={"redact_enabled": False})
         raw = "key=" + "B" * 32
         await spill.put(raw, kind="read", ctx=ctx)
-        assert files_in(ctx.config)[0].read_text(
-            encoding="utf-8", newline="") == raw
+        assert read_exact(files_in(ctx.config)[0]) == raw
 
     async def test_put_requires_str(self, tmp_path: Path):
         """非 str 输入契约拒(PERS-221,Consumer 须先 render)。"""
@@ -305,6 +357,15 @@ class TestRead:
         assert meta["lines"] == 4
         out = await spill.read(meta["ref"], start=0, limit=10, ctx=ctx)
         assert out["content"] == text                    # roundtrip 无损
+
+    async def test_unicode_mixed_newlines_roundtrip(self, tmp_path: Path):
+        """3.11-compatible reading retains CRLF, lone CR, LF, and Unicode."""
+        ctx = make_ctx(tmp_path)
+        text = "中文\r\n保留\r单CR\n尾行"
+        meta = await spill.put(text, ctx=ctx)
+        assert read_exact(files_in(ctx.config)[0]) == text
+        result = await spill.read(meta["ref"], ctx=ctx)
+        assert result["content"] == text
 
     async def test_empty_text(self, tmp_path: Path):
         """空文本:落盘空文件,read 返回空 content、more=false。

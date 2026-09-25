@@ -806,6 +806,7 @@ class TestSecrets:
 
     def test_file_ref(self, tmp_path) -> None:
         f = tmp_path / "key.txt"
+        f.touch(mode=0o600)  # Real POSIX credentials require private mode before content.
         f.write_text("sk-file-key-123\n", encoding="utf-8")
         assert resolve_secret_ref(f"file:{f}") == "sk-file-key-123"
 

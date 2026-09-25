@@ -488,15 +488,18 @@ async def test_probe_loop_marks_and_recovers(monkeypatch):
 
 
 async def test_probe_loop_timeout_marks_fail(monkeypatch):
-    """探针 ping 超时(5s wait_for)同判失败(偏离 7):TimeoutError → mark(False),
+    """探针 ping 超时(5s deadline)同判失败(偏离 7):TimeoutError → mark(False),
     连续超时累计到 down。"""
-    async def _always_timeout(coro, timeout=None):
-        coro.close()                          # 关闭被吞的 ping 协程(防泄漏)
-        await asyncio.sleep(0)
-        raise asyncio.TimeoutError()
+    class _AlwaysTimeout:
+        async def __aenter__(self):
+            await asyncio.sleep(0)
+            raise asyncio.TimeoutError()
 
-    monkeypatch.setattr("pyharness.core.llm_fallback.asyncio.wait_for",
-                        _always_timeout)
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr("pyharness.core.llm_fallback.asyncio.timeout",
+                        lambda seconds: _AlwaysTimeout())
     main = FakeAdapter(name=MAIN)                       # ping 本身不再被真正调用
     chain = _chain({MAIN: main, BACKUP: FakeAdapter(name=BACKUP)})
 
@@ -512,7 +515,7 @@ async def test_probe_loop_timeout_marks_fail(monkeypatch):
 
     assert chain.health[MAIN].state == "down"
     assert chain.health[BACKUP].state == "down"         # 两适配器同判失败
-    assert main.pings == 0                              # wait_for 外层即抛,ping 未执行
+    assert main.pings == 0                              # deadline 进入即抛,ping 未执行
 
 
 async def test_probe_recovery_resets_idx_to_main():

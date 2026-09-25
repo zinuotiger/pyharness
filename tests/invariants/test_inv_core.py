@@ -933,7 +933,7 @@ async def _inv05_reject(case: str, tmp_path):
         verdict = None
     elif case == "guard":                                  # 越出 workspace ⇒ g-fs-path
         name, raw, danger, allowed = ("fs.read_file",
-                                      {"path": "C:/Windows/win.ini"}, "none", None)
+                                      {"path": str(tmp_path.parent / (tmp_path.name + "-outside") / "win.ini")}, "none", None)
         verdict = None
     elif case == "critical":
         name, raw, danger, allowed = "fs.delete_file", {"path": "a.txt"}, "critical", None
@@ -1026,7 +1026,7 @@ async def test_inv05_reject_flush_failure_does_not_reach_provider(tmp_path):
     reg = _inv05_registry(prov, name="fs.read_file")
     with pytest.raises(Exception):
         await ToolExecutor(reg).execute(
-            _inv04_call(raw={"path": "C:/Windows/win.ini"}, call_id="c-fail"), ctx)
+            _inv04_call(raw={"path": str(tmp_path.parent / (tmp_path.name + "-outside") / "win.ini")}, call_id="c-fail"), ctx)
 
     assert prov.calls == 0, "落盘失败后 Provider 绝不能被调用(fail-closed)"
     assert not sess.of("tool.result")

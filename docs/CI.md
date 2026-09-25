@@ -10,6 +10,10 @@ Ubuntu runner 通过 `apt-get install --no-install-recommends libegl1 libopengl0
 
 高风险回归、R02 与打包阶段在依赖准备成功且任务未取消时独立执行，即使完整测试已经失败，也继续收集这些阶段的证据。任何正式阶段失败仍使 job 失败；没有 `continue-on-error`，独立阶段通过不覆盖先前失败。
 
+跨平台回归还检查 spill 私有目录为 0700、文件独占创建即 0600，以及 Python 3.11 可用的无损换行读取。目录必须允许所有者遍历；目录和文件不能套用同一个权限值。健康探针在当前任务内使用超时上下文，回归覆盖 ping 完成与关闭取消同时发生，避免 Python 3.11 子任务等待竞态吞掉外部取消。路径越界、symlink 与进程初始化失败测试使用各平台实际存在的边界，保留拒绝、副作用和资源清理断言。
+
+Windows Python 3.11 缺少 `os.path.isjunction` 时，路径守卫通过真实 `lstat` 的 mount-point reparse tag 识别 junction，仍执行最终路径越界检查。回归使用真实 junction，覆盖链点本身、子路径和强制旧接口分支；Linux 的 Windows 专用用例有明确平台 skip，另由真实 symlink 测试验证该平台边界。
+
 `uv.lock` 经 `uv export --frozen --extra dev --no-emit-project` 导出后以 `--require-hashes` 安装到新虚拟环境。不依赖缓存；构建工具固定为 hatchling 1.32.4。安装阶段可访问依赖下载站点；pytest 导入前安装非回环 socket 拒绝边界，现有逐用例 fixture 再限制未声明的子进程。网络边界是测试进程防误用措施，并非针对恶意代码的系统沙箱。
 
 `scripts/ci_verify.py` 必须指定仓库外 `--output-dir`。HOME、USERPROFILE、PH_CFG_PATH、临时数据、下载缓存、coverage、构建输出和安装环境都进入该目录；不会读取已有的 PH 配置或传递 API 凭据。测试数据均为合成数据。脚本拒绝把输出放进源码 checkout。

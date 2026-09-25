@@ -166,17 +166,30 @@ def test_R01_posix_group_is_killed_before_leader_reaped(monkeypatch):
 
 
 @pytest.mark.controlled_process
-@pytest.mark.parametrize('failure',['assign','second-reader'])
+@pytest.mark.parametrize('failure',['assign' if os.name == 'nt' else 'close-stdin','second-reader'])
 def test_process_partial_initialization_cleans_every_owned_resource(tmp_path,monkeypatch,failure):
     import threading
     from pyharness.core import process_owner as module
     made=[];original=module.subprocess.Popen
     def capture(*a,**kw):
-        child=original(*a,**kw);made.append(child);return child
+        child=original(*a,**kw);made.append(child)
+        if failure == 'close-stdin':
+            # POSIX has no Windows Job assignment. Fail the real post-spawn
+            # initialization boundary instead, then allow rollback to close it.
+            stream = child.stdin
+            class FailFirstClose:
+                def __init__(self): self.calls = 0
+                def __getattr__(self, name): return getattr(stream, name)
+                def close(self):
+                    self.calls += 1
+                    if self.calls == 1: raise OSError('stdin close fault')
+                    return stream.close()
+            child.stdin = FailFirstClose()
+        return child
     monkeypatch.setattr(module.subprocess,'Popen',capture)
     if failure=='assign':
         monkeypatch.setattr(module.WindowsJob,'assign',lambda *a:(_ for _ in ()).throw(OSError('assignment fault')))
-    else:
+    elif failure == 'second-reader':
         start=threading.Thread.start;calls=[]
         def failstart(thread):
             calls.append(thread)
@@ -185,7 +198,9 @@ def test_process_partial_initialization_cleans_every_owned_resource(tmp_path,mon
         monkeypatch.setattr(threading.Thread,'start',failstart)
     owner=None
     try:
-        with pytest.raises(OSError):
+        expected = {'assign': 'assignment fault', 'close-stdin': 'stdin close fault',
+                    'second-reader': 'second reader fault'}[failure]
+        with pytest.raises(OSError, match=expected):
             owner=module.ProcessOwner([sys.executable,'-I','-B','-c','import time;time.sleep(30)'],cwd=tmp_path,env=dict(os.environ))
             owner.collect(3)
         assert made and all(child.poll() is not None for child in made)

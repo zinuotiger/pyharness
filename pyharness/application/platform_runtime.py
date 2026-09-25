@@ -90,6 +90,21 @@ class PlatformRuntime:
             return
         import difflib
         from pyharness.application.platform_projection import summary
+        # Capture validation before pause/unpause: an in-flight Docker exec must
+        # remain incomplete even if snapshot coordination changes its CLI state.
+        commands=list(self.command_results.get(task,[]))
+        process_results=[dict(self.platform.sandboxes.process_status(ident,token))
+                         for token in self.process_tokens.get(task,[])]
+        for result in process_results:
+            # A still-running, cancelled or failed process is not validation.
+            code=result.get('exit_code',-1)
+            if result.get('running') or result.get('cancelled') or 'error_code' in result or type(code) is not int:
+                code=-1
+            commands.append({'tool':'proc.start','exit_code':code,'output':summary(result.get('output',''),4000),
+                             'incomplete':result.get('running',False)})
+            await ctx.session.append('platform.sandbox',{'action':'executed',
+                'record':self.platform.sandboxes.records[ident].model_dump(),
+                'command_summary':'background process completion','exit_code':code},actor='system',task_id=task,sync=True)
         async with self.platform.sandboxes.snapshot(ident) as root:
             after=self._text_files(root)
         before=self.baselines.get(task,{})
@@ -101,16 +116,6 @@ class PlatformRuntime:
             original=before.get(name)
             changes.append({'path':name,'before_sha256':self.baseline_hashes.get(task,{}).get(name),'after':value})
             patch.extend(difflib.unified_diff((original or '').splitlines(True),(value or '').splitlines(True),fromfile='a/'+name,tofile='b/'+name))
-        commands=list(self.command_results.get(task,[]))
-        for token in self.process_tokens.get(task,[]):
-            result=self.platform.sandboxes.process_status(ident,token)
-            # A still-running, cancelled or failed process is not validation.
-            code=result.get('exit_code',-1)
-            commands.append({'tool':'proc.start','exit_code':code,'output':summary(result.get('output',''),4000),
-                             'incomplete':result.get('running',False)})
-            await ctx.session.append('platform.sandbox',{'action':'executed',
-                'record':self.platform.sandboxes.records[ident].model_dump(),
-                'command_summary':'background process completion','exit_code':code},actor='system',task_id=task,sync=True)
         validation='failed' if any(c['exit_code']!=0 for c in commands) else 'passed' if commands else 'not_run'
         if changes:
             await self.platform.record_generated(ctx,'changes.patch',''.join(patch).encode(),manifest=changes,validation_status=validation)

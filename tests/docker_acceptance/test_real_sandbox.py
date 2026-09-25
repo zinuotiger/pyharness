@@ -200,7 +200,9 @@ async def test_real_governed_code_change_and_restart(manager,tmp_path,adapter_fa
         patch=next(a for a in artifacts if a['filename']=='changes.patch')
         test_report=next(a for a in artifacts if a['filename']=='test-report.json')
         _,test_bytes=await p.artifact_content(test_report['artifact_id'],preview=True)
-        assert json.loads(test_bytes)[0]['exit_code']==test_exit if not background else json.loads(test_bytes)[0]['exit_code']!=0
+        command_report=json.loads(test_bytes)
+        assert (command_report[0]['exit_code']==test_exit if not background else command_report[0]['exit_code']!=0),command_report
+        assert patch['validation_status']==('failed' if test_exit else 'passed')
         _,raw=await p.artifact_content(patch['artifact_id'],preview=True)
         assert hashlib.sha256(raw).hexdigest()==patch['sha256']
         with pytest.raises(PyHError):await p.artifact_content(patch['artifact_id'])
@@ -230,4 +232,5 @@ async def test_real_governed_code_change_and_restart(manager,tmp_path,adapter_fa
         assert len((await reopened.service.platform.approvals())['approvals'])==(4 if test_exit==0 else 2)
     finally:await reopened.service.shutdown()
     record(request,real_container=True,real_queue_governance_approval=True,model='deterministic',test_exit=test_exit,
+           background=background,validation_status=patch['validation_status'],recorded_exit_codes=[c['exit_code'] for c in command_report],
            unapproved_source_unchanged=True,failed_test_blocks_patch=bool(test_exit),artifact_sha_verified=True,restart_replay=True,host_fallback=False)

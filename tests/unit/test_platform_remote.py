@@ -102,7 +102,10 @@ def test_trace_keeps_only_valid_typed_sandbox_id_and_redacts_commands():
     assert project('s',[event])['trace'][0]['sandbox_id'] is None
 
 
-@pytest.mark.parametrize('result',[{'exit_code':1},{'running':True},{'cancelled':True},{'error_code':'failed'}])
+@pytest.mark.parametrize('result',[{'exit_code':1},{'running':True},{'cancelled':True},{'error_code':'failed'},
+                                 {'running':True,'exit_code':0},{'cancelled':True,'exit_code':0},
+                                 {'error_code':'failed','exit_code':0},{'exit_code':None},
+                                 {'exit_code':'0'},{'exit_code':False}])
 async def test_background_failure_or_incomplete_marks_patch_unapplicable(tmp_path,monkeypatch,result):
     from pyharness.application.platform_runtime import PlatformRuntime
     from pyharness.application.platform_models import AgentDefinition,SandboxProfile
@@ -122,4 +125,35 @@ async def test_background_failure_or_incomplete_marks_patch_unapplicable(tmp_pat
     try:
         await runtime.finish(SimpleNamespace(task_id='t',session=SimpleNamespace(append=append)))
         assert next(meta for name,meta in captured if name=='changes.patch')['validation_status']=='failed'
+    finally:await manager.close()
+
+
+async def test_background_validation_is_captured_before_snapshot_pause(tmp_path,monkeypatch):
+    from pyharness.application.platform_runtime import PlatformRuntime
+    from pyharness.application.platform_models import AgentDefinition,SandboxProfile
+    from pyharness.core.sandbox import SandboxManager
+    from tests.unit.test_platform_service import FakeBackend
+    from contextlib import asynccontextmanager
+    manager=SandboxManager(tmp_path/'sandboxes',docker=FakeBackend())
+    rec=await manager.create('s~t',SandboxProfile(mode='isolated'))
+    (manager.workspace(rec.sandbox_id)/'code.py').write_text('after')
+    result={'running':True};captured=[];order=[]
+    def status(ident,token):order.append('status');return dict(result)
+    @asynccontextmanager
+    async def snapshot(ident):
+        order.append('snapshot');result.clear();result.update(running=False,exit_code=0)
+        yield manager.workspace(ident)
+    async def generated(ctx,name,raw,**kwargs):captured.append((name,raw,kwargs))
+    async def append(*args,**kwargs):
+        # Session append also yields; every owned token must be sampled first.
+        result.clear();result.update(running=False,exit_code=0)
+    runtime=PlatformRuntime(SimpleNamespace(sandboxes=manager,record_generated=generated),AgentDefinition(name='synthetic'),'s')
+    runtime.sandboxes['t']=rec.sandbox_id;runtime.baselines['t']={'code.py':'before'};runtime.process_tokens['t']=['owned-process','second-owned-process']
+    monkeypatch.setattr(manager,'process_status',status);monkeypatch.setattr(manager,'snapshot',snapshot)
+    try:
+        await runtime.finish(SimpleNamespace(task_id='t',session=SimpleNamespace(append=append)))
+        assert order==['status','status','snapshot']
+        assert next(meta for name,raw,meta in captured if name=='changes.patch')['validation_status']=='failed'
+        report=json.loads(next(raw for name,raw,meta in captured if name=='test-report.json'))
+        assert len(report)==2 and all(c['exit_code']==-1 and c['incomplete'] for c in report)
     finally:await manager.close()

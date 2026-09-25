@@ -1,5 +1,5 @@
 {
-  "status": "remote_CI_confirmed_see_commit_bound_delivery_manifest",
+  "status": "final_remote_repair_requires_commit_bound_CI_evidence",
   "base_commit": "ad9a0e8591999b6c81766b05f98ebceca93fd56e",
   "branch": "feat/pyharness-platform-web-v1",
   "design_agents": 3,
@@ -50,7 +50,7 @@
     "failed": 0
   },
   "remote_acceptance": {
-    "status": "all_five_PR_jobs_passed_at_verified_commit",
+    "status": "final_background_completion_fence_pending_exact_head_CI",
     "base_branch": "codex/pyharness-engineering-rc-20260924",
     "head_branch": "feat/pyharness-platform-web-v1",
     "starting_commit": "40b80541c41038c161e73b96be6f6ab0e7d9e6fa",
@@ -84,7 +84,7 @@
     },
     "docker_daemon": "28.0.4",
     "host_fallback": false,
-    "remote_fix_rounds": 2,
+    "remote_fix_rounds": 3,
     "repair_reason": "Windows synthetic known-folder directory layout prevented Chromium DevTools startup",
     "jobs": [
       {
@@ -115,16 +115,24 @@
     ],
     "screenshot_followup": "CJK font provisioning and target-page render barrier; exact final-head verification is recorded in the external delivery manifest and PR checks",
     "latest_local": {
-      "collected": 2525,
-      "passed": 2484,
+      "collected": 2532,
+      "passed": 2491,
       "failed": 0,
       "skipped": 41,
-      "coverage": 83.08484441459592,
-      "platform_passed": 76,
+      "coverage": 83.0863589559923,
+      "platform_passed": 83,
       "platform_skipped": 1,
       "browser": "passed",
       "package": "passed"
-    }
+    },
+    "last_failed_commit": "8fa46f2c32535c76a687c43c24800dfc6d742178",
+    "last_failed_workflow": "https://github.com/zinuotiger/pyharness/actions/runs/36196772651",
+    "last_failed_docker": {
+      "passed": 12,
+      "failed": 1,
+      "skipped": 0
+    },
+    "final_repair": "copy all background statuses before first await or freeze; reject incomplete and malformed exit states"
   },
   "local_docker": "environment_blocked_daemon_unavailable",
   "historical_scope": "Top-level changed_files, pre_final_suite, precommit_suite and targeted_platform describe original local acceptance at 40b80541; remote_acceptance carries this follow-up evidence."

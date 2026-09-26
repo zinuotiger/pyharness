@@ -509,6 +509,31 @@ class Scheduler:
         await sess.append("schedule.removed", {"name": name}, actor="system")
         self._jobs.pop(name, None)            # 事件落定 → 内存摘除(INV-01)
 
+    async def edit(self, name: str, kind: str, expr: str, intent: str, ctx: Any = None) -> None:
+        """Replace a definition atomically via one existing registration fact.
+
+        Already submitted executions retain their original intent. No remove /
+        re-register window can lose the schedule when persistence fails.
+        """
+        old=self._require(name)
+        spec=self._validate_spec(kind,expr)
+        if not isinstance(intent,str) or not intent.strip():
+            raise_code('EVT-100',field='intent')
+        template={'intent':intent.strip()}
+        first=self._first_fire(kind,expr,now())
+        risky=old.is_risky or self._derive_risky(template)
+        sess=self._session_ctx(ctx)
+        event=await sess.append('schedule.registered',{'name':name,'kind':kind,'expr':expr,
+            'template':template,'is_risky':risky,'paused':old.paused,'next_fire_at':iso(first)},actor='system',sync=True)
+        self._jobs[name]=ScheduleJob(name=name,kind=kind,expr=expr,template=template,
+            is_risky=risky,paused=old.paused,next_fire_at=first,last_fired_at=old.last_fired_at,
+            created_seq=event.seq,spec=spec)
+
+    async def run_now(self, name: str, ctx: Any = None) -> None:
+        """Explicit immediate execution through the same Schedule → TaskQueue path."""
+        job=self._require(name)
+        await self._fire(ctx,job,now())
+
     async def pause(self, name: str, ctx: Any = None) -> None:
         """暂停:到点不触发但保留定义与窗口;重复暂停幂等(无事件)。"""
         j = self._require(name)               # 不存在 → BUSY

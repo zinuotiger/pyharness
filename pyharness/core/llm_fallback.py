@@ -213,6 +213,7 @@ class FallbackChain:
         (或 degrade.enabled=false 主模型败)→ LLM-310 终态(err_hist 携带排查)。
         """
         err_hist: list[tuple[str, str]] = []
+        last_diagnostics = None
         enabled = bool(ctx.config.llm.degrade.enabled)
         # 降级总开关(CFG llm.degrade.enabled):关 = 只走当前 idx 适配器,败即 LLM-310
         end = len(self.chain) if enabled else min(self.idx + 1, len(self.chain))
@@ -231,6 +232,7 @@ class FallbackChain:
                                                  sleep_left=sleep_left)
             except PyHError as e:
                 err_hist.append((name, e.code))
+                last_diagnostics = e.ctx.get("diagnostics")
                 if (e.code in _DEGRADE_CODES and enabled
                         and i + 1 < len(self.chain)
                         and self._may_degrade(e, ctx)):
@@ -241,7 +243,7 @@ class FallbackChain:
                 if e.code in _DEGRADE_CODES:
                     break                     # 链尾/降级关:全链耗尽 → LLM-310(偏离 5)
                 raise                         # LLM-304 业务错等:不降级直接上抛
-        raise_code("LLM-310", err_hist=err_hist,
+        raise_code("LLM-310", err_hist=err_hist, diagnostics=last_diagnostics,
                    advice="全链失败,任务终止(不无限降级)")
 
     # ====================================================== 指数退避(F028)
@@ -265,13 +267,18 @@ class FallbackChain:
                     raise_code("CFG-601", reason="structural", adapter=name,
                                missing=method,
                                detail="适配器缺降级链请求方法")
-                return await fn(messages, tools, ctx=ctx)
+                from pyharness.core.llm_diagnostics import call_attempt
+                token = call_attempt.set(attempt + 1)
+                try:
+                    return await fn(messages, tools, ctx=ctx)
+                finally:
+                    call_attempt.reset(token)
             except PyHError as e:
                 if e.code not in _RETRYABLE_CODES:
                     raise                             # LLM-302/304:不重试
                 if attempt == n_attempts - 1:
                     # 退避预算耗尽:交 chat_with_fallback 降级决策
-                    raise_code("LLM-303", model=name, exhausted=True)
+                    raise_code("LLM-303", model=name, exhausted=True, diagnostics=e.ctx.get("diagnostics"))
                 await ctx.session.append(
                     "llm.retry",
                     {"model": name, "attempt": attempt,
@@ -281,7 +288,7 @@ class FallbackChain:
                 wait = delay * random.uniform(1 - jitter, 1 + jitter)
                 if sleep_left is not None:            # 链级退避总预算闸
                     if sleep_left[0] <= 0:
-                        raise_code("LLM-303", model=name, exhausted=True)
+                        raise_code("LLM-303", model=name, exhausted=True, diagnostics=e.ctx.get("diagnostics"))
                     wait = min(wait, sleep_left[0])
                     sleep_left[0] -= wait
                 await asyncio.sleep(wait)

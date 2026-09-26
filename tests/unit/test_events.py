@@ -67,8 +67,10 @@ EXPECTED_ALL = (
     "receipt.emitted",
     # 治理层证据事件(M6;普通攒批,非强同步)
     "evidence.archived",
+    # Platform V1 resource facts share the existing SessionLog.
+    "platform.artifact", "platform.sandbox", "platform.knowledge",
 )
-assert len(EXPECTED_ALL) == 77, "测试词表清单必须恰为 77 名"
+assert len(EXPECTED_ALL) == 80, "测试词表清单必须恰为 80 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -86,7 +88,7 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 def test_vocab_full():
     """词表 77 名(74 核心 + policy.updated/decision.issued/receipt.emitted/
     evidence.archived 治理层事件)。"""
-    assert len(EVENT_TYPES) == 77
+    assert len(EVENT_TYPES) == 80
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 

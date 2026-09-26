@@ -33,8 +33,14 @@ async def auto_title(ctx: Any) -> Optional[str]:
     prompt = (f"给这段会话起一个简洁中文标题,≤24 字,只输出标题本身,"
               f"不要引号/句号/解释:\n用户第一条消息: {first}")
     try:
-        text = await ctx.llm.mini(prompt, ctx=ctx)
+        from pyharness.core.llm_diagnostics import model_call
+        with model_call("title_generation"):
+            text = await ctx.llm.mini(prompt, ctx=ctx)
     except PyHError as e:                        # LLM 失败:标题留空(下次再试)
+        from pyharness.core.llm_diagnostics import public_diagnostics
+        d = public_diagnostics(e.ctx.get("diagnostics"), code=e.code, role="title_generation")
+        await ctx.session.append("system.error", {"code": e.code, "hint": d["summary"],
+            "ctx": {"role": "title_generation", "fatal": False, "diagnostics": d}}, actor="system")
         log.info("auto_title skipped code=%s", e.code)
         return None
     title = text.strip().strip('"“”\' ').splitlines()[0:1]

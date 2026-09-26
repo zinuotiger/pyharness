@@ -152,8 +152,15 @@ class TaskQueue:
         self._done: dict[str, TaskResult] = {}           # 终态缓存(重复等待幂等)
         self._segments: set[str] = set()                 # 已开段 task_id(配对闸,F044)
         self._cancel_pending: Optional[str] = None       # 取消旗标(见 _run_task)
+        self._terminal_lock = asyncio.Lock()
+        self._terminals: dict[str, str] = {}
         self._closing: bool = False                      # 收尾闸(shutdown 幂等位)
-        self._id_counter = itertools.count(1)            # t-N 单调源
+        history = getattr(session, 'events_after', None)
+        self._used_ids = {e.payload['task_id'] for e in history(0)
+                          if e.type.startswith('task.') and e.payload.get('task_id')} if callable(history) else set()
+        numbers = [int(ident[2:]) for ident in self._used_ids
+                   if ident.startswith('t-') and ident[2:].isdigit() and len(ident) < 22]
+        self._id_counter = itertools.count(max(numbers, default=0) + 1)
 
     # ============================================================ 内部辅助
     def _suspended(self) -> bool:
@@ -162,7 +169,10 @@ class TaskQueue:
 
     def _next_id(self) -> str:
         """自动 task_id:t-N 单调(self._seq.next() 语义,itertools 计数实现)。"""
-        return f"t-{next(self._id_counter)}"
+        while True:
+            ident = f"t-{next(self._id_counter)}"
+            if ident not in self._used_ids:
+                return ident
 
     @staticmethod
     def _ms_since(t0: float) -> int:
@@ -175,6 +185,8 @@ class TaskQueue:
         与终态事件 append 同点调用(每任务至多一个终态);_done 供 wait_for 幂等读取,
         _futures 记录在途等待(settle 后移除,防泄漏;等待者持本地引用不受影响)。
         """
+        if task_id in self._done:
+            return
         self._done[task_id] = result
         fut = self._futures.pop(task_id, None)
         if fut is not None and not fut.done():
@@ -222,6 +234,10 @@ class TaskQueue:
                 f"队列已满(≥{self._max_queue}),请等当前任务结束或取消"})
         t = Task(id=task_id or self._next_id(),   # 显式 task_id 供 plan/schedule 溯源
                  intent=intent, meta=meta)
+        if t.id in self._used_ids:
+            raise_code('EVT-100', hint='Task ID has already been used in this session')
+        # Reserve before the first await, including for concurrent submissions.
+        self._used_ids.add(t.id)
         self._q.append(t)                         # FIFO:尾插
         try:
             env = await self._session.append(
@@ -322,7 +338,18 @@ class TaskQueue:
             if self._cancel_pending == t.id:
                 self._cancel_pending = None
                 child.cancel()
-            await child
+            result = await child
+            reason = getattr(result, "reason", None)
+            explicit_ok = reason == "complete" or (isinstance(result, TaskResult) and result.ok)
+            if not explicit_ok:
+                code = getattr(result, "error_code", None) or getattr(result, "code", None) or {
+                    "cancelled": "cancelled", "budget": "LLM-305", "max_turns": "CYC-999",
+                    "stall": "CYC-999"}.get(reason, "CYC-999")
+                await self._terminal_event("task.failed", {"task_id": t.id,
+                    "reason": "cancelled" if reason == "cancelled" else "error", "error": code})
+                self._settle(t.id, TaskResult(ok=False, code=code, summary=code,
+                    duration_ms=self._ms_since(t0)))
+                return
             await self._terminal_event("task.completed",
                 {"task_id": t.id, "reason": "ok"})
             self._settle(t.id, TaskResult(ok=True, duration_ms=self._ms_since(t0)))
@@ -360,6 +387,14 @@ class TaskQueue:
             await self._close_segment_guarded(t.id, start_seq)  # 配对关闭(F058)
 
     async def _terminal_event(self, type_: str, payload: dict) -> None:
+        async with self._terminal_lock:
+            ident = payload['task_id']
+            if ident in self._terminals:
+                return
+            await self._write_terminal_event(type_, payload)
+            self._terminals[ident] = type_
+
+    async def _write_terminal_event(self, type_: str, payload: dict) -> None:
         """终态事件写入(**会话已终态时不吞结算**)。
 
         会话可在任务在途时收尾(`session.finished` 落盘 + 终态位置位)⇒ 本任务的
@@ -396,7 +431,7 @@ class TaskQueue:
                 return
             raise
 
-    async def _run_runner(self, t: Task) -> None:
+    async def _run_runner(self, t: Task) -> Any:
         """执行器调用(子任务体):runner 须可调用 run_for_task(task)。
 
         未装配 runner 时按 CYC-999 快速失败(防 S-1 伪造已执行);接受对象方法或
@@ -410,7 +445,8 @@ class TaskQueue:
             raise_code("CYC-999", hint=f"执行器不可调用: {type(runner).__name__}")
         res = fn(t)
         if inspect.isawaitable(res):
-            await res
+            return await res
+        return res
 
     # ============================================================ 暂停/恢复
     async def pause(self, reason: str, *, by: str = "system") -> None:

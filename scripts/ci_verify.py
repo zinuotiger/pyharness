@@ -35,8 +35,10 @@ def environment(root: Path) -> dict[str, str]:
             "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "SSL_CERT_FILE",
             "SSL_CERT_DIR", "LANG", "LC_ALL"}
     env = {k: v for k, v in os.environ.items() if k.upper() in keep}
+    # Windows known-folder APIs expand USERPROFILE independently of APPDATA.
+    # Chromium refuses DevTools if the synthetic default directory is missing.
     for key, name in (("HOME", "home"), ("USERPROFILE", "home"),
-                      ("APPDATA", "appdata"), ("LOCALAPPDATA", "localappdata"),
+                      ("APPDATA", "home/AppData/Roaming"), ("LOCALAPPDATA", "home/AppData/Local"),
                       ("TMP", "tmp"), ("TEMP", "tmp"), ("TMPDIR", "tmp"),
                       ("XDG_CACHE_HOME", "cache"), ("XDG_CONFIG_HOME", "config")):
         path = root / name
@@ -183,6 +185,8 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     targets = {
         "full": ["tests"], "isolation": ["tests/unit/test_remediation_isolation.py"],
         "posix": ["tests/unit/test_posix_secret_permissions.py"],
+        "platform": ["tests/unit/test_model_failure_contract.py", "tests/unit/test_platform_models.py", "tests/unit/test_platform_service.py", "tests/unit/test_platform_safety.py", "tests/unit/test_platform_remote.py"],
+        "docker": ["tests/docker_acceptance", "--real-docker"],
         "high-risk": [str(p.relative_to(ROOT)) for p in sorted((ROOT / "tests/unit").glob("test_remediation_*.py"))],
         "security": ["tests/security"], "acceptance": ["tests/acceptance"],
         "e2e": ["tests/e2e"], "invariants": ["tests/invariants"],
@@ -209,7 +213,7 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     finally:
         if raw.exists():
             counts = safe_junit(raw, artifacts / ("junit-" + suite + ".xml"))
-            if suite == "posix" and (counts["collected"] == 0 or counts["skipped"]):
+            if suite in {"posix", "docker"} and (counts["collected"] == 0 or counts["skipped"]):
                 code = code or 1
             evidence = {"suite": suite, **counts, "exit_code": code,
                         "python": platform.python_version(), "os": platform.system(),
@@ -243,6 +247,9 @@ def check_archives(paths: list[Path]) -> dict:
         if archive.suffix == ".whl":
             with zipfile.ZipFile(archive) as zf:
                 entries = [(name, zf.read(name)) for name in zf.namelist() if not name.endswith("/")]
+            names={name for name,_ in entries}
+            if not {'pyharness/ui/platform.html','pyharness/ui/index.html'}.issubset(names):
+                raise SystemExit('Missing platform/classic Web resources')
         else:
             with tarfile.open(archive, "r:gz") as tf:
                 entries = [(member.name, tf.extractfile(member).read()) for member in tf.getmembers() if member.isfile()]
@@ -290,7 +297,7 @@ def package(out: Path) -> None:
         venv.EnvBuilder(with_pip=False).create(location)
         installedpy = python_in(location)
         wheel = str(wheels[0]) + ("[" + mode + "]" if mode != "base" else "")
-        run([uv, "pip", "install", "--python", installedpy, "--constraint", out / "requirements.txt", wheel], cwd=out, env=env)
+        run([uv, "pip", "install", "--python", installedpy, "--reinstall-package", "pyharness", "--constraint", out / "requirements.txt", wheel], cwd=out, env=env)
         outside = out / ("outside source 中文 " + mode)
         outside.mkdir(exist_ok=True)
         check = "from pathlib import Path; import sys,pyharness,importlib.metadata as m; assert Path(pyharness.__file__).is_relative_to(Path(sys.prefix)); assert m.version('pyharness')=='0.1.0'; print('installed import verified')"
@@ -299,6 +306,8 @@ def package(out: Path) -> None:
         run([cli, "--help"], cwd=outside, env=env)
         if mode != "base":
             run([installedpy, "-I", *PYTHON_ARGS, Path(__file__), "_entry", mode], cwd=outside, env=env, timeout=60)
+        if mode == 'desktop':
+            run([installedpy, "-I", *PYTHON_ARGS, Path(__file__), "_entry", 'webview'], cwd=outside, env=env, timeout=60)
         results[mode] = {"install": "passed", "isolated_import": "passed", "cli_help": "passed",
                          "precheck": "not_applicable" if mode == "base" else "passed"}
     write_json(out / "artifacts" / "package-summary.json", {"sha256": hashes, "modes": results,
@@ -393,7 +402,7 @@ def entry(mode: str) -> None:
         from pyharness import persistence
         if persistence._LOCKS:
             raise SystemExit("Native shutdown retained persistence locks")
-    elif mode == "desktop":
+    elif mode in {"desktop","webview"}:
         import threading
         import httpx
         from pyharness.application.bootstrap import assemble_desktop_ctx
@@ -413,6 +422,28 @@ def entry(mode: str) -> None:
                 response = client.get(f"http://127.0.0.1:{port}/api/sessions", headers={"X-PyHarness-Token": app._api_token})
             if response.status_code != 200:
                 raise RuntimeError("Desktop HTTP precheck failed")
+            if mode=='webview':
+                import webview
+                window=webview.create_window('PyHarness isolated WebView smoke',app.bootstrap_url(host,port),hidden=True)
+                verdict=[]
+                def inspect_page():
+                    try:
+                        if not window.events.loaded.wait(15):
+                            raise RuntimeError('WebView page did not load')
+                        deadline=time.monotonic()+15
+                        while time.monotonic()<deadline:
+                            text=window.evaluate_js('document.querySelector("main")?.innerText || ""')
+                            if text and '你好' in text:
+                                verdict.append('passed');return
+                            time.sleep(.2)
+                        raise RuntimeError('Platform dashboard did not render in WebView')
+                    except Exception as exc:
+                        verdict.append(type(exc).__name__)
+                    finally:
+                        window.destroy()
+                webview.start(inspect_page,debug=False,private_mode=True,storage_path=os.environ['LOCALAPPDATA'])
+                if verdict!=['passed']:
+                    raise RuntimeError('WebView smoke failed: '+str(verdict))
         finally:
             app.shutdown_gracefully()
             worker.join(timeout=10)
@@ -439,7 +470,7 @@ def main(argv=None) -> int:
     parser.add_argument("stage", choices=("prepare", "test", "static", "package"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cov-fail-under", type=int, default=75)
-    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural"))
+    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural", "platform", "docker"))
     parsed = parser.parse_args(args)
     if parsed.cov_fail_under < 75 or parsed.cov_fail_under > 100:
         parser.error("coverage gate must be between 75 and 100 percent")

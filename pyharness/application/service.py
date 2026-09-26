@@ -145,6 +145,13 @@ class ApplicationService:
         root = getattr(getattr(cfg, "storage", None), "root", None)
         return Path(str(root or "~/.pyharness")).expanduser()
 
+    @property
+    def platform(self):
+        if not hasattr(self, '_platform'):
+            from pyharness.application.platform_service import PlatformService
+            self._platform = PlatformService(self)
+        return self._platform
+
     def tenant_root(self) -> Path:
         return self._storage_root() / "tenants" / self.tenant_id
 
@@ -296,6 +303,35 @@ class ApplicationService:
         from pyharness import engine as _eng
         from pyharness.engine import make_runner as _eng_make_runner
         cfg = self.effective_settings()
+        from pyharness.application.platform_service import PlatformService
+        platform_binding = PlatformService.binding(log_)
+        platform_definition = None
+        if platform_binding:
+            from pyharness.application.platform_models import AgentDefinition
+            platform_definition = AgentDefinition.model_validate(platform_binding['definition'])
+            cfg.loop.max_turns = platform_definition.max_rounds
+            cfg.budget.task.max_in_tokens = platform_definition.budget.input_tokens
+            cfg.budget.task.max_out_tokens = platform_definition.budget.output_tokens
+            cfg.budget.task.max_cost_yuan = platform_definition.budget.cost
+            cfg.security.policy.preset = platform_definition.permission_policy
+            cfg.plugins.enabled = []
+            cfg.plugins.mcp_servers = []
+            if platform_definition.mcp_connections:
+                from pyharness.config import McpServerCfg
+                configured=self.platform.connection_definitions()
+                for name in platform_definition.mcp_connections:
+                    connection=configured.get('mcp:'+name)
+                    if connection is None or not connection['config']['enabled']:
+                        raise_code('CFG-601',reason='agent_mcp_connection_disabled')
+                    cfg.plugins.mcp_servers.append(McpServerCfg.model_validate(connection['config']))
+            if platform_definition.model_connection:
+                profiles = self.tenant_state()['profiles']
+                profile = next((p for p in profiles if p['id'] == platform_definition.model_connection), None)
+                if profile is None:
+                    raise_code('CRED-701', reason='agent_model_connection_missing')
+                cfg.llm.model, cfg.llm.base_url = profile['model'], profile['base_url']
+                cfg.llm.api_key = f'tenant:{self.tenant_id}:{profile["id"]}'
+                cfg.llm.fallback_models = []
         if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None:
             # Explicit borrowed test/local adapters do not resolve host credentials.
             models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]
@@ -311,6 +347,13 @@ class ApplicationService:
                 # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
                 # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
                 channel=self.channel, llm_runtime=self.llm_runtime)
+            try:
+                if platform_definition is not None:
+                    from pyharness.application.platform_runtime import PlatformRuntime
+                    PlatformRuntime(self.platform, platform_definition, sid).configure_spine(spine)
+            except BaseException:
+                await spine.close()
+                raise
             self._engines[sid] = spine
         if not getattr(spine, "_plugins_ready", False):
             await _eng._preload_plugins(spine)
@@ -371,7 +414,8 @@ class ApplicationService:
         seen, out = set(), []
         ctx_approval = (getattr(self.ctx, "approval", None)
                         if self.tenant_id == "default" else None)
-        for p in list(self._approvals.values()) + ([ctx_approval] if ctx_approval else []):
+        engine_providers = [getattr(s, 'approval', None) for s in self._engines.values()]
+        for p in list(self._approvals.values()) + engine_providers + ([ctx_approval] if ctx_approval else []):
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
                 out.append(p)
@@ -572,6 +616,10 @@ class ApplicationService:
             await spine.schedule.register(
                 name, str(kind or "cron").strip().lower(), expr,
                 {"intent": intent}, is_risky=is_risky, ctx=ctx)
+        elif action == 'edit':
+            await spine.schedule.edit(name,kind,expr,intent,ctx=ctx)
+        elif action == 'run_now':
+            await spine.schedule.run_now(name,ctx=ctx)
         elif action in {"pause", "resume", "remove"}:
             if not name:
                 raise_code("EVT-100", field="name", advice=f"schedule {action} 需要 name")
@@ -635,6 +683,8 @@ class ApplicationService:
                 await fn(*args, **kw)
             except BaseException as exc:
                 errors.append(exc)
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.stop_actions)
         spines = list(self._engines.values())
         if self.tenant_id == 'default':
             spines.append(getattr(self.ctx, 'engine_spine', None))
@@ -646,6 +696,8 @@ class ApplicationService:
         for queue in self._queues.values():
             if callable(getattr(queue, 'shutdown', None)):
                 await attempt(queue.shutdown, reason='service-shutdown')
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.close)
         if isinstance(self._surface, _session_module().DesktopSessionManager):
             await attempt(self._surface.shutdown_all)
         await attempt(self.llm_runtime.aclose)
@@ -940,15 +992,16 @@ class ApplicationService:
     @admitted
     async def pending_approvals(self) -> dict:
         out: list[dict] = []
-        seen: set[int] = set()
+        seen: set[tuple] = set()
         for p in self.all_approval_providers():
             pending = getattr(p, "_pending", None)
             if not isinstance(pending, dict):
                 continue
             for aid, req in pending.items():
-                if aid in seen:
+                identity = (getattr(req, 'session_id', ''), aid)
+                if identity in seen:
                     continue
-                seen.add(aid)
+                seen.add(identity)
                 out.append({"approval_id": aid,
                             "tool": getattr(req, "tool", ""),
                             "args_summary": getattr(req, "args_summary", ""),

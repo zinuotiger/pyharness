@@ -36,6 +36,17 @@ def pytest_configure(config):
     config.addinivalue_line('markers', 'controlled_process: explicitly permits test-owned subprocesses')
 
 
+def pytest_addoption(parser):
+    parser.addoption('--real-docker', action='store_true', default=False,
+                     help='Explicitly run the synthetic real Docker acceptance suite')
+
+
+def pytest_ignore_collect(collection_path, config):
+    # A separate opt-in integration job; unavailable Docker must FAIL there.
+    if 'docker_acceptance' in collection_path.parts and not config.getoption('--real-docker'):
+        return True
+
+
 @pytest.fixture(autouse=True)
 def isolated_process_environment(tmp_path_factory, monkeypatch, request):
     """Every test starts without host configuration or external capabilities."""

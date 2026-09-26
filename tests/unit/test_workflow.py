@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from pyharness.core.session import SessionLog
-from pyharness.core.task_queue import TaskQueue
+from pyharness.core.task_queue import TaskQueue, TaskResult
 from pyharness.core.workflow import WorkflowRunner, queue_submit_adapter
 from pyharness.errors import PyHError
 
@@ -30,6 +30,7 @@ class _FakeRunner:
         await self.session.append("agent.message",
                                   {"content": f"[{task.id}] ok"}, actor="agent",
                                   task_id=task.id)
+        return TaskResult(ok=True)
 
 
 async def _session() -> SessionLog:

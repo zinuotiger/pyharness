@@ -480,7 +480,7 @@ class TestChat:
             await adp.chat([{"role": "user", "content": "x"}], ctx=_ctx(s))
         assert ei.value.code == "LLM-301"
         assert ei.value.ctx.get("retryable") is True
-        assert _event_types(s) == ["session.created", "llm.request"]  # 失败不计 F029
+        assert _event_types(s) == ["session.created", "llm.request", "llm.error"]  # 失败不计 F029
 
     async def test_wait_for_gate_monkeypatched(self) -> None:
         """真实 wait_for 路径:替换为即抛 TimeoutError,验证总闸分支(非仅归一)。"""
@@ -517,7 +517,7 @@ class TestChat:
             await adp.chat([{"role": "user", "content": "x"}], ctx=_ctx(s))
         assert ei.value.code == code
         assert ei.value.ctx.get("retryable") == (code in ("LLM-301", "LLM-303"))
-        assert _event_types(s) == ["session.created", "llm.request"]   # 失败只留 request
+        assert _event_types(s) == ["session.created", "llm.request", "llm.error"]   # 保留安全诊断
 
     async def test_llm_303_increments_rate_limit_streak(self) -> None:
         """修复:适配器归一 LLM-303 时计入连续限流计数(此前 rate_limit_add 无调用 → 恒 0)。"""
@@ -648,7 +648,7 @@ class TestChatStream:
         with pytest.raises(PyHError) as ei:
             await adp.chat_stream([{"role": "user", "content": "x"}], ctx=_ctx(s))
         assert ei.value.code == "LLM-303"
-        assert _event_types(s) == ["session.created", "llm.request"]
+        assert _event_types(s) == ["session.created", "llm.request", "llm.error"]
 
     async def test_stream_total_gate_301(self) -> None:
         s = await _session()

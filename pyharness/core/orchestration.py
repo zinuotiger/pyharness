@@ -78,6 +78,7 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
         owner=owner,
         task_id=task_id,
         subagent_depth=int(depth),
+        platform_runtime=getattr(spine, 'platform_runtime', None),
         # 通道身份(GAP-11):编排路径(后台 job / 子 Agent)与主链同源——取外壳
         # 装配期声明的 spine.channel;未声明时不写属性,由 principal_of
         # APR-503 fail-closed(与 create_agent 同款三态语义)。

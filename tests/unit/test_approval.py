@@ -659,7 +659,7 @@ async def _pending_provider(queue=None):
     from pyharness.config import load_settings
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core.session import SessionLog
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, TaskResult
 
     s = SessionLog(sid="s-r123-000001")
     await s.append("session.created", {"title": "", "model": "m"}, actor="system")
@@ -706,14 +706,14 @@ async def test_pending_approval_blocks_next_task_until_settled():
     """
     import asyncio as _a
 
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, TaskResult
 
     ran: list[str] = []
 
     class _Runner:
         async def run_for_task(self, task):
             ran.append(task.id)
-            return f"ok:{task.id}"
+            return TaskResult(ok=True)
 
         async def cancel_current(self, task_id):    # noqa: ARG002
             return None
@@ -757,7 +757,7 @@ async def test_cancel_inflight_task_with_pending_approval():
     from pyharness.config import load_settings
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core.session import SessionLog
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, TaskResult
 
     s = SessionLog(sid="s-r124-000001")
     await s.append("session.created", {"title": "", "model": "m"}, actor="system")
@@ -831,7 +831,7 @@ async def test_approval_ttl_timeout_resumes_queue_and_releases_waiter():
     from pyharness.config import load_settings
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core.session import SessionLog
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, TaskResult
 
     s = SessionLog(sid="s-r125-000001")
     await s.append("session.created", {"title": "", "model": "m"}, actor="system")
@@ -845,8 +845,9 @@ async def test_approval_ttl_timeout_resumes_queue_and_releases_waiter():
             call = _SN(name="fs.write_file", call_id="c1", danger="high",
                        raw_args={})
             entered.set()
-            return await prov.request(call, "path=note.txt", ctx,
+            await prov.request(call, "path=note.txt", ctx,
                                       ttl_ms=80)     # 极短 TTL:到点自动 timeout
+            return TaskResult(ok=True)  # Runner explicitly handles the decision
 
         async def cancel_current(self, task_id):   # noqa: ARG002
             return None
@@ -885,7 +886,7 @@ async def test_approval_queue_link_is_per_session():
     from pyharness.config import load_settings
     from pyharness.core.approval import ApprovalProvider
     from pyharness.core.session import SessionLog
-    from pyharness.core.task_queue import TaskQueue
+    from pyharness.core.task_queue import TaskQueue, TaskResult
 
     cfg = load_settings()
     sA = SessionLog(sid="s-r126-a00001")

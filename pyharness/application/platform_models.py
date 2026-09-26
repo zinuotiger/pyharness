@@ -82,12 +82,17 @@ class Run(Model):
     sandbox_id: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    error_diagnostics: dict | None = None
+    error_kind: str | None = None
+    usage_status: str = "unknown"
+    usage_unknown_requests: int = 0
 
 
 class RunStep(Model):
     step_id: str
     run_id: str
     name: str
+    error_code: str | None = None
     status: Literal['pending', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled', 'skipped']
     started_at: str | None = None
     finished_at: str | None = None
@@ -141,6 +146,7 @@ class TraceSpan(Model):
     input_summary: str = ''
     sandbox_id: str | None = None
     output_summary: str = ''
+    error_diagnostics: dict | None = None
     error_code: str | None = None
 
 

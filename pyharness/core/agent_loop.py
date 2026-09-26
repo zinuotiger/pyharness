@@ -99,6 +99,8 @@ class RunContext:
     run_id: str
     input_seq: int
     turn: int = 0                     # 已完成工具轮数(文本轮天然终态,不计数)
+    error_code: Optional[str] = None
+    error_diagnostics: Optional[dict] = None
     reason: Optional[str] = None      # 终态原因(_finish 写入)
     stall_streak: int = 0             # 连续同指纹轮数(收敛闸)
     cancelled: bool = False           # 取消置位(声明式;闸2 下一轮触发)
@@ -113,6 +115,8 @@ class RunResult:
     reason: str
     turns: int
     last_seq: int                     # 收尾时日志当前最大 seq(派生事实)
+    error_code: Optional[str] = None
+    error_diagnostics: Optional[dict] = None
 
 
 # ------------------------------------------------------------ 主循环类
@@ -177,7 +181,7 @@ class AgentLoop:
                     self.current = None               # 单输入收尾(与伪码逐件一致)
                 # 边界终态(取消/预算)后不再自动取队内下一件:用户/资源边界,
                 # 剩余输入保留在队(不静默丢),下次 wake 按 FIFO 继续消费。
-                if last is not None and last.reason in ("cancelled", "budget"):
+                if last is not None and last.reason in ("cancelled", "budget", "error", "max_turns", "stall"):
                     return last
         finally:
             self.current = None
@@ -208,17 +212,23 @@ class AgentLoop:
         except MaxTurnsExceeded:                      # 轮数闸(防御路径)
             return await self._finish(ctx, run, "max_turns")
         except PyHError as e:                         # LLM-310 等结构化错误
+            from pyharness.core.llm_diagnostics import public_diagnostics
+            run.error_code = e.code
+            run.error_diagnostics = public_diagnostics(e.ctx.get("diagnostics"), code=e.code, role="main_agent")
             await ctx.session.append(
                 "system.error",
-                {"code": e.code, "hint": e.to_model_message(), "ctx": e.ctx},
-                actor="system")
+                {"code": e.code, "hint": e.code + ": " + run.error_diagnostics["summary"],
+                 "ctx": {"role": "main_agent", "fatal": True, "diagnostics": run.error_diagnostics}},
+                actor="system", task_id=getattr(ctx, "task_id", None), sync=True)
             return await self._finish(ctx, run, "error")
         except Exception as e:                        # 未预期兜底:CYC-999,堆栈仅本地
-            log.exception("loop fatal run_id=%s", run.run_id)
+            run.error_code = "CYC-999"
+            log.error("loop fatal run_id=%s type=%s", run.run_id, type(e).__name__)
             await ctx.session.append(
                 "system.error",
-                {"code": "CYC-999", "hint": f"{type(e).__name__}: {e}"[:2000]},
-                actor="system")
+                {"code": "CYC-999", "hint": "Main execution failed",
+                 "ctx": {"role": "main_agent", "fatal": True}},
+                actor="system", task_id=getattr(ctx, "task_id", None), sync=True)
             return await self._finish(ctx, run, "error")
 
     # ======================================================== 单轮驱动器
@@ -238,8 +248,10 @@ class AgentLoop:
         # F027:ctx.streaming(桌面 SSE)走 chat_stream——chunk 仅上总线不入日志,
         # 聚合后与 chat 同型返回(append-only 不变式不受影响);CLI/单测默认非流式
         chat_fn = ("chat_stream" if getattr(ctx, "streaming", False) else "chat")
-        resp = await getattr(ctx.llm, chat_fn)(
-            hist, tools=ctx.tools.schemas_for(ctx.scope), ctx=ctx)
+        from pyharness.core.llm_diagnostics import model_call
+        with model_call("main_agent"):
+            resp = await getattr(ctx.llm, chat_fn)(
+                hist, tools=ctx.tools.schemas_for(ctx.scope), ctx=ctx)
         # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""
@@ -356,7 +368,8 @@ class AgentLoop:
         log.info("run finished run_id=%s reason=%s turns=%d last_seq=%s",
                  run.run_id, reason, run.turn, last_seq)
         return RunResult(run_id=run.run_id, reason=reason,
-                         turns=run.turn, last_seq=last_seq)
+                         turns=run.turn, last_seq=last_seq, error_code=run.error_code,
+                         error_diagnostics=run.error_diagnostics)
 
     # ======================================================== 取消传播(F025)
     async def cancel(self, reason: str = "cancelled") -> None:

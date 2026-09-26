@@ -1087,12 +1087,23 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
             if platform_runtime is None:
                 res = await loop.wake(env, ctx=ag_ctx)
             else:
+                res = None
+                execution_raised = False
                 try:
                     res = await asyncio.wait_for(loop.wake(env, ctx=ag_ctx),
                         timeout=platform_runtime.definition.timeout)
-                    await platform_runtime.finish(ag_ctx)
+                    if res is not None and res.reason == "complete":
+                        await platform_runtime.finish(ag_ctx)
+                except BaseException:
+                    execution_raised = True
+                    raise
                 finally:
-                    await platform_runtime.release(ag_ctx)
+                    try:
+                        await platform_runtime.release(ag_ctx)
+                    except Exception as cleanup_error:
+                        if not execution_raised and (res is None or res.reason == "complete"):
+                            raise
+                        log.warning("cleanup after failed execution: %s", type(cleanup_error).__name__)
         finally:
             ag_ctx.task_id = prev_task_id
             ag_ctx.turn_source = prev_src

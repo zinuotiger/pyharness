@@ -154,6 +154,14 @@ def _serialize_event(type_: str, payload: Any) -> str:
             body = {"type": type_, **meta, "payload": inner}
     else:
         body = {"type": type_, "payload": dict(payload or {})}
+    if type_ == 'llm.error' or (type_ == 'system.error' and
+            str(body.get('payload', {}).get('code', '')).startswith('LLM-')):
+        from pyharness.core.llm_diagnostics import public_diagnostics
+        p = body.get('payload', {})
+        context = p.get('ctx') or {}
+        d = public_diagnostics(p.get('diagnostics') or context.get('diagnostics'),
+            code=p.get('code'), role=context.get('role', 'other'))
+        body['payload'] = {'code': d['code'], 'message': d['summary'], 'diagnostics': d}
     return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
 

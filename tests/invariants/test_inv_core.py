@@ -75,7 +75,7 @@ def test_inv02_loop_is_the_only_dynamic_entry_dispatcher():
                     and isinstance(n.args[0], ast.Attribute)
                     and n.args[0].attr == "llm"):
                 sites.append(f"{p.relative_to(_ROOT).as_posix()}:{n.lineno}")
-    assert sites == ["pyharness/core/agent_loop.py:241"], (
+    assert sites == ["pyharness/core/agent_loop.py:253"], (
         "INV-02 违约:llm 门面的动态派发点不在 agent_loop 唯一位置 -> " + str(sites))
 
 

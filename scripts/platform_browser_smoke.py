@@ -197,6 +197,34 @@ async def smoke(output, expect_docker=None):
                 await context.set_offline(False)
                 await page.wait_for_function('state.stream && state.stream.readyState===1',timeout=15000)
                 assert '[DETERMINISTIC TEST MODEL]' in await page.locator('#messages').inner_text()
+                # Main-model failure through the real queue; no model network.
+                from pyharness.errors import PyHError
+                async def failed_model(*args, **kwargs):
+                    raise PyHError('LLM-303')
+                model=llm.adapters[cfg.llm.model]
+                model.chat=model.chat_stream=failed_model
+                failed=await app.service.platform.start_run({'text':'synthetic model failure'})
+                result=await asyncio.wait_for(app.service._queues[failed['session_id']].wait_for(failed['task_id']),10)
+                assert not result.ok and result.code=='LLM-303'
+                await page.evaluate('async sid=>{state.sid=sid;await go("chat")}',failed['session_id'])
+                await page.locator('.inspector [data-run-error]').wait_for()
+                assert 'LLM-303' in await page.locator('.inspector').inner_text()
+                assert await page.locator('.inspector .badge.red').inner_text()=='失败'
+                await page.reload()
+                await page.evaluate('async sid=>{state.sid=sid;await go("chat")}',failed['session_id'])
+                await page.locator('.inspector [data-run-error]').wait_for()
+                assert '100%' not in await page.locator('.inspector').inner_text()
+                await page.screenshot(path=str(output/'failed-inspector.png'),full_page=True)
+                await page.locator('#nav [data-nav="runs"]').click()
+                await page.locator('[data-run-error]').first.wait_for()
+                assert 'LLM-303' in await page.locator('main').inner_text()
+                await page.screenshot(path=str(output/'failed-runs.png'),full_page=True)
+                await page.locator('#nav [data-nav="dashboard"]').click()
+                await page.locator('[data-run-error]').first.wait_for()
+                dashboard=await app.service.platform.dashboard()
+                assert dashboard['failed']==1
+                await page.screenshot(path=str(output/'failed-dashboard.png'),full_page=True)
+                shots.extend(['failed-inspector.png','failed-runs.png','failed-dashboard.png'])
                 await page.set_viewport_size({'width':1280,'height':900})
                 await page.locator('#nav [data-nav="dashboard"]').click()
                 await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')

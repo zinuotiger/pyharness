@@ -223,8 +223,8 @@ def test_completed_run_not_reopened_by_artifact_approval(decision):
     from pyharness.application.platform_projection import project
     def event(seq,kind,p):return SimpleNamespace(seq=seq,type=kind,payload=p,ts='2026-09-26T01:00:00Z',task_id='t',trace=None)
     events=[event(1,'task.enqueued',{'task_id':'t'}),event(2,'task.started',{'task_id':'t'}),
-        event(3,'task.completed',{'task_id':'t'}),event(4,'approval.requested',{'tool':'workspace.export_artifact','args_summary':'synthetic','risk':'high','ttl_ms':1000}),
-        event(5,decision,{'approval_id':4})]
+        event(3,'agent.message',{'content':'explicit success'}),event(4,'task.completed',{'task_id':'t'}),event(5,'approval.requested',{'tool':'workspace.export_artifact','args_summary':'synthetic','risk':'high','ttl_ms':1000}),
+        event(6,decision,{'approval_id':5})]
     assert project('s',events)['runs'][0]['status']=='completed'
 
 

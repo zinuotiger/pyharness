@@ -710,6 +710,8 @@ class PlatformService:
             'month_usage':month_usage,'recent_artifacts':artifacts[-5:],
             'sessions':view['sessions'][:5], 'runs':sorted(view['runs'],key=lambda r:r['queued_at'] or r['started_at'] or '',reverse=True)[:5],
             'pending_approvals':sum(a['status'] == 'pending' for a in (await self.approvals())['approvals']),
+            'failed':sum(r['status'] == 'failed' for r in view['runs']),
+            'completed':sum(r['status'] == 'completed' for r in view['runs']),
             'running':sum(r['status'] in {'running','waiting_approval'} for r in view['runs']),
             'usage':usage, 'knowledge':{'count':len(self.store.read()['knowledge']),
                 'bytes':sum(d['size'] for d in self.store.read()['knowledge'].values())},

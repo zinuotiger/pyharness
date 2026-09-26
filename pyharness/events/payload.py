@@ -98,11 +98,15 @@ class LlmRequestPayload(_PayloadBase):
     degraded_from: Optional[str] = None
     prompt_tokens: Optional[int] = Field(default=None, ge=0)
     n_tools: Optional[int] = Field(default=None, ge=0)
+    role: Optional[str] = None
+    attempt: Optional[int] = Field(default=None, ge=1)
 
 
 class LlmResponsePayload(_PayloadBase):
     """llm.response:content 与 tool_calls 至少其一(空 content=工具调用轮)。"""
     model: str = Field(min_length=1)
+    role: Optional[str] = None
+    request_seq: Optional[int] = Field(default=None, ge=1)
     finish_reason: str = Field(min_length=1)   # stop/tool_calls/length/content_filter/…
     content: str = ""
     tool_calls: Optional[list] = None          # 原生 tool_calls(id/name/arguments 原文)
@@ -137,6 +141,7 @@ class LlmErrorPayload(_PayloadBase):
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     retryable: bool
+    diagnostics: Optional[dict] = None
     attempt: Optional[int] = Field(default=None, ge=0)
 
 

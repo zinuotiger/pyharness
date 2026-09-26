@@ -215,11 +215,24 @@ async def smoke(output, expect_docker=None):
                 await page.locator('.inspector [data-run-error]').wait_for()
                 assert '100%' not in await page.locator('.inspector').inner_text()
                 await page.screenshot(path=str(output/'failed-inspector.png'),full_page=True)
+                # Hold task-center loading so the previous inspector's error
+                # cannot satisfy the new page's readiness check.
+                runs_started=asyncio.Event();runs_release=asyncio.Event()
+                async def hold_runs(route):
+                    runs_started.set();await asyncio.wait_for(runs_release.wait(),5)
+                    await route.continue_()
+                await page.route('**/api/v1/runs',hold_runs)
                 await page.locator('#nav [data-nav="runs"]').click()
+                await asyncio.wait_for(runs_started.wait(),5)
+                assert await page.evaluate('state.page==="runs" && !!document.querySelector(".skeleton")')
+                runs_release.set()
+                await page.wait_for_function('state.page==="runs" && !document.querySelector(".skeleton")')
                 await page.locator('[data-run-error]').first.wait_for()
                 assert 'LLM-303' in await page.locator('main').inner_text()
+                await page.unroute('**/api/v1/runs')
                 await page.screenshot(path=str(output/'failed-runs.png'),full_page=True)
                 await page.locator('#nav [data-nav="dashboard"]').click()
+                await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 await page.locator('[data-run-error]').first.wait_for()
                 dashboard=await app.service.platform.dashboard()
                 assert dashboard['failed']==1

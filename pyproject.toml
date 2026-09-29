@@ -13,6 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 desktop = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -42,6 +46,7 @@ dev = [
 pyharness = "pyharness.cli:main"
 pyharness-desktop = "pyharness.desktop:main"
 pyharness-native = "pyharness.desktop_native:main"
+pyharness-web = "pyharness.web:main"
 
 [build-system]
 requires = ["hatchling"]

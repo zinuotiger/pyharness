@@ -10,7 +10,7 @@ import pathlib
 
 from pyharness.bus import EventBus
 from pyharness.config import load_settings
-from pyharness.core.task_queue import TaskQueue
+from pyharness.core.task_queue import TaskQueue, TaskResult
 from pyharness.engine import build_spine
 
 
@@ -39,7 +39,7 @@ class _Runner:
         await self.session.append("agent.message",
             {"content": f"done:{task.id}", "model": "m"}, actor="agent",
             task_id=task.id)
-        return f"ok:{task.id}"
+        return TaskResult(ok=True)
 
     async def cancel_current(self, task_id):        # noqa: ARG002
         return None

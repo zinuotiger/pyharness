@@ -271,9 +271,9 @@ def _restore_call_names(calls: list, rev: dict) -> None:
 class ProviderStatusError(Exception):
     """内置传输层 HTTP 状态错(类别判定用,ADI §7;body 文案不上行 ERR §5.1)。"""
 
-    def __init__(self, status_code: int, detail: str = "") -> None:
+    def __init__(self, status_code: int, detail: str = "", *, diagnostics=None) -> None:
         self.status_code = int(status_code)
-        self.detail = detail[:200]
+        self.diagnostics = dict(diagnostics or {})
         super().__init__(f"HTTP {self.status_code}")
 
 
@@ -461,7 +461,7 @@ def normalize_exc(e: Exception) -> str:
         return "LLM-301"                           # 编排总闸(180s)
     if isinstance(e, ProviderStatusError) or (httpx is not None
                                               and isinstance(e, httpx.HTTPStatusError)):
-        return _http_status_code(int(getattr(e, "status_code", 0)))
+        return _http_status_code(int(getattr(e, "status_code", getattr(getattr(e, "response", None), "status_code", 0))))
     if isinstance(e, ProviderProtocolError):
         return "LLM-304"                           # 响应结构非法(内容过滤/坏 JSON)
     oa = _openai_module()
@@ -523,16 +523,20 @@ def _llm_cfg_from_ctx(ctx: Any, fallback: Any = None) -> Any:
 
 def _request_payload(model: str, degraded_from: Optional[str], tools: Any) -> dict:
     """llm.request payload(EVENT-SCHEMA 字段级;降级来源非空才带)。"""
-    p: dict = {"model": model, "n_tools": len(tools or [])}
+    from pyharness.core.llm_diagnostics import call_role, call_attempt
+    p: dict = {"model": model, "n_tools": len(tools or []),
+               "role": call_role.get(), "attempt": call_attempt.get()}
     if degraded_from:
         p["degraded_from"] = degraded_from
     return p
 
 
 def _response_payload(model: str, finish_reason: str, content: str,
-                      calls: list[ToolCall]) -> dict:
+                      calls: list[ToolCall], request_seq=None) -> dict:
     """llm.response payload:content 与 tool_calls 至少其一;arguments 原文回填(INV-06)。"""
-    p: dict = {"model": model, "finish_reason": finish_reason, "content": content}
+    from pyharness.core.llm_diagnostics import call_role
+    p: dict = {"model": model, "finish_reason": finish_reason, "content": content,
+               "role": call_role.get(), "request_seq": request_seq}
     if calls:
         p["tool_calls"] = [{"id": c.id, "name": c.name, "arguments": c.raw_json}
                            for c in calls]
@@ -662,8 +666,7 @@ class OpenAICompatAdapter(LLMAdapter):
         """choices[0].message + finish_reason;choices 空数组 = 内容过滤 → LLM-304(不回空)。"""
         choices = getattr(raw, "choices", None) or []
         if not choices:
-            raise_code("LLM-304",
-                       hint="choices 空数组(内容过滤/协议异常),不回空文本冒充成功")
+            raise ProviderProtocolError("Missing choices")
         c0 = choices[0]
         return c0.message, (c0.finish_reason or "unknown")
 
@@ -682,28 +685,32 @@ class OpenAICompatAdapter(LLMAdapter):
                "tools": tools_clean or None,    # 无工具整字段省略在传输层(wire 规则)
                "temperature": cfg_llm.temperature,  # 0-1.5(越窗已在配置层 CFG-601 拒)
                "max_tokens": cfg_llm.max_tokens}    # 单次输出上限(默认 4096)
-        await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
-                                                                 tools), actor="llm")
+        request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
+                                                                 tools), actor="llm", task_id=getattr(ctx, "task_id", None))
+        from pyharness.core.llm_diagnostics import observed_wait
+        observation = {}
         try:
-            raw = await asyncio.wait_for(           # 总时长闸(F017);只取消本任务
-                transport.complete(req), timeout=self.timeout.total_s)
+            raw = await observed_wait(           # 总时长闸(F017);只取消本任务
+                transport.complete(req), timeout=self.timeout.total_s, observation=observation)
         except Exception as e:                      # noqa: BLE001 传输细分统一归一(ADI §7.2)
             code = normalize_exc(e)                 # 非 API 异常:原样上抛(不上 LLM 码)
             if code == "LLM-303":
                 self._note_rate_limit(ctx)          # 归一 303 计入连续限流(降级判定用)
-            raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES)
-        msg, finish = self._first_message(raw)
+            await self._raise_diagnostic(e, code, ctx, request_event.seq)
+        try:
+            msg, finish = self._first_message(raw)
+        except (ProviderProtocolError, AttributeError, IndexError, TypeError) as exc:
+            await self._raise_diagnostic(ProviderProtocolError(), "LLM-304", ctx, request_event.seq, observation=observation)
         content = (msg.content or "") if msg.content is not None else ""
         calls = parse_tool_calls(msg)               # ToolCallSyntaxError 上抛 → TLB-803 回喂
         _restore_call_names(calls, name_map)        # sanitized → fs.read_file 还原
         if not content and not calls:
-            raise_code("LLM-304", model=self.model,
-                       hint="content null 且无 tool_calls(协议异常,不回空文本冒充成功)")
+            await self._raise_diagnostic(ProviderProtocolError(), "LLM-304", ctx, request_event.seq, observation=observation)
         usage = getattr(raw, "usage", None)
         if usage is not None:
             await self.report_usage(usage, self.model, ctx=ctx)   # F029:落 llm.usage+计数器
         env = await ctx.session.append(             # 偏离 1:单条 llm.response 落盘
-            "llm.response", _response_payload(self.model, finish, content, calls),
+            "llm.response", _response_payload(self.model, finish, content, calls, request_event.seq),
             actor="llm")
         return LLMResponse(content=content, tool_calls=calls or None, usage=usage,
                            model=self.model, finish_reason=finish, raw=raw, seq=env.seq)
@@ -719,21 +726,22 @@ class OpenAICompatAdapter(LLMAdapter):
                "tools": tools_clean or None,
                "temperature": cfg_llm.temperature, "max_tokens": cfg_llm.max_tokens,
                "stream": True, "stream_options": {"include_usage": True}}
-        await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
-                                                                 tools), actor="llm")
+        request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
+                                                                 tools), actor="llm", task_id=getattr(ctx, "task_id", None))
+        from pyharness.core.llm_diagnostics import observed_wait
+        observation = {}
         try:
             stream = transport.stream(req)          # 返回异步迭代器(鸭子;可注入替身)
-            text, calls, finish, usage = await asyncio.wait_for(
-                accumulate_stream(stream, ctx), timeout=self.timeout.total_s)
+            text, calls, finish, usage = await observed_wait(
+                accumulate_stream(stream, ctx), timeout=self.timeout.total_s, observation=observation)
         except Exception as e:                      # noqa: BLE001 断流/总闸统一归一
             code = normalize_exc(e)
             if code == "LLM-303":
                 self._note_rate_limit(ctx)          # 归一 303 计入连续限流(降级判定用)
-            raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES)
+            await self._raise_diagnostic(e, code, ctx, request_event.seq)
         _restore_call_names(calls, name_map)        # sanitized → fs.read_file 还原
         if not text and not calls:
-            raise_code("LLM-304", model=self.model,
-                       hint="流式聚合为空(断流/零内容),不回空文本冒充成功")
+            await self._raise_diagnostic(ProviderProtocolError(), "LLM-304", ctx, request_event.seq, observation=observation)
         if usage is not None:                       # 流式计量在 include_usage 末块(F029)
             await self.report_usage(usage, self.model, ctx=ctx)
         elif text or calls:
@@ -746,10 +754,23 @@ class OpenAICompatAdapter(LLMAdapter):
             await self.report_usage(fallback_usage, self.model, ctx=ctx)
         env = await ctx.session.append(             # 聚合完成落单条 llm.response(F027)
             "llm.response", _response_payload(self.model, finish or "unknown",
-                                              text, calls), actor="llm")
+                                              text, calls, request_event.seq), actor="llm")
         return LLMResponse(content=text, tool_calls=calls or None, usage=usage,
                            model=self.model, finish_reason=finish or "unknown",
                            raw=None, seq=env.seq)
+
+    async def _raise_diagnostic(self, exc, code, ctx, request_seq, *, observation=None):
+        from pyharness.core.llm_diagnostics import diagnostics
+        exc.diagnostics = {**(observation or {}), **getattr(exc, "diagnostics", {})}
+        d = diagnostics(exc, code=code, model=self.model, request_seq=request_seq,
+            endpoint=getattr(self._transport, '_base_url', getattr(self._triple, 'base_url', None)))
+        scrub = getattr(self._transport, '_safe_diagnostics', None)
+        if callable(scrub):
+            d = scrub(d)
+        await ctx.session.append('llm.error', {'code': code, 'message': d['summary'],
+            'retryable': d['safe_to_retry'] is True, 'attempt': d['attempt'], 'diagnostics': d},
+            actor='llm', task_id=getattr(ctx, 'task_id', None), sync=True)
+        raise_code(code, model=self.model, retryable=code in _RETRYABLE_CODES, diagnostics=d)
 
     # ------------------------------------------------------ 计量钩子
     async def report_usage(self, usage: Any, model: str, *, ctx: Any) -> Any:
@@ -785,7 +806,13 @@ class OpenAICompatAdapter(LLMAdapter):
                 code = normalize_exc(e)
             except Exception:                       # noqa: BLE001 非 API 异常:探针统一 303
                 code = "LLM-303"
-            raise_code(code, model=self.model, retryable=True)
+            from pyharness.core.llm_diagnostics import diagnostics, model_call
+            with model_call('probe'):
+                d = diagnostics(e, code=code, model=self.model,
+                    endpoint=getattr(transport, '_base_url', None))
+            scrub = getattr(transport, '_safe_diagnostics', None)
+            if callable(scrub): d = scrub(d)
+            raise_code(code, model=self.model, retryable=True, diagnostics=d)
 
 
 # ================================================================ 注册表
@@ -912,6 +939,12 @@ class _OpenAICompatHTTPTransport:
     def __init__(self, base_url: str, api_key: str, timeout: Any) -> None:
         if httpx is None:
             raise_code("CYC-999", module="llm.transport", detail="httpx 缺失,无法构建客户端")
+        # The key is already supplied to transport construction; never resolve or
+        # read credentials for diagnostics. Reject reflected values in metadata.
+        def safe_metadata(d):
+            return {k: ('unknown' if isinstance(v, str) and api_key and api_key in v else v)
+                    for k, v in d.items()}
+        self._safe_diagnostics = safe_metadata
         self._base_url = base_url.rstrip("/")       # 裸域或 /v1 结尾(禁写 /chat/completions)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -941,19 +974,35 @@ class _OpenAICompatHTTPTransport:
         """请求体组装:None 字段剔除(tools 无则整字段省略,qwen 对 [] 语义不稳)。"""
         return {k: v for k, v in req.items() if v is not None}
 
+    def _response_metadata(self, response):
+        from pyharness.core.llm_diagnostics import response_metadata, response_observation
+        metadata = self._safe_diagnostics(response_metadata(response))
+        observation = response_observation.get()
+        if observation is not None:
+            observation.update(metadata)
+        return metadata
+
     async def complete(self, req: dict) -> Any:
         """非流式 POST → raw 命名空间对象(choices/message/tool_calls/usage 鸭子同构)。"""
         # 断网/连接/读超时等 httpx.HTTPError 直传(归一 303);HTTP ≥400 → 状态错(按状态映射)
         self._check_send()
         resp = await self._client.post(self._req_path, json=self._body(req))
+        self._response_metadata(resp)
         if resp.status_code >= 400:
-            raise ProviderStatusError(resp.status_code)
+            raise ProviderStatusError(resp.status_code, diagnostics=self._response_metadata(resp))
         try:
             data = resp.json()
         except ValueError as e:
-            raise ProviderProtocolError("响应体非 JSON") from e
-        if not isinstance(data, dict) or not data.get("choices"):
-            raise ProviderProtocolError("choices 空/响应结构非法")
+            exc = ProviderProtocolError("响应体非 JSON")
+            exc.diagnostics = self._response_metadata(resp)
+            raise exc from None
+        choices = data.get('choices') if isinstance(data, dict) else None
+        message = choices[0].get('message') if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        if (not isinstance(message, dict) or
+                not (isinstance(message.get('content'), str) and message['content'] or message.get('tool_calls'))):
+            exc = ProviderProtocolError("choices 空/响应结构非法")
+            exc.diagnostics = self._response_metadata(resp)
+            raise exc
         return _to_ns(data)
 
     async def stream(self, req: dict) -> AsyncIterator[Any]:
@@ -961,21 +1010,54 @@ class _OpenAICompatHTTPTransport:
         body = self._body(req)
         self._check_send()
         async with self._client.stream("POST", self._req_path, json=body) as resp:
+            self._response_metadata(resp)
             if resp.status_code >= 400:
-                raise ProviderStatusError(resp.status_code)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if not payload:
-                    continue
-                if payload == "[DONE]":
-                    break
+                metadata = self._response_metadata(resp)
+                data = bytearray()
                 try:
-                    data = json.loads(payload)
-                except ValueError as e:
-                    raise ProviderProtocolError("SSE 块非 JSON") from e
-                yield _to_ns(data)
+                    async for chunk in resp.aiter_bytes():
+                        if len(data) + len(chunk) > 16384:
+                            data.clear()
+                            break
+                        data.extend(chunk)
+                    body = json.loads(data)
+                    from pyharness.core.llm_diagnostics import atom
+                    if isinstance(body, dict) and isinstance(body.get('error'), dict):
+                        metadata['provider_code'] = atom(body['error'].get('code'))
+                except (ValueError, httpx.TransportError):
+                    pass
+                raise ProviderStatusError(resp.status_code, diagnostics=self._safe_diagnostics(metadata))
+            try:
+                done = False
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        data = json.loads(payload)
+                    except ValueError:
+                        raise ProviderProtocolError("SSE 块非 JSON") from None
+                    if not isinstance(data, dict):
+                        raise ProviderProtocolError("Invalid stream response")
+                    if 'error' in data:
+                        from pyharness.core.llm_diagnostics import atom
+                        exc = ProviderProtocolError("Provider stream error")
+                        error = data['error']
+                        exc.diagnostics = {'provider_code': atom(error.get('code')) if isinstance(error, dict) else 'unknown'}
+                        raise exc
+                    yield _to_ns(data)
+                if not done:
+                    raise ProviderProtocolError("Incomplete stream")
+            except (httpx.TransportError, ProviderProtocolError) as exc:
+                metadata = self._response_metadata(resp)
+                metadata.update(getattr(exc, 'diagnostics', {}))
+                exc.diagnostics = self._safe_diagnostics(metadata)
+                raise
 
     async def ping(self) -> float:
         """F033 探针:GET /models 往返秒(OpenAI 兼容端点均实现);≥400 → 状态错。"""
@@ -983,7 +1065,7 @@ class _OpenAICompatHTTPTransport:
         self._check_send()
         resp = await self._client.get("/models")
         if resp.status_code >= 400:
-            raise ProviderStatusError(resp.status_code)
+            raise ProviderStatusError(resp.status_code, diagnostics=self._response_metadata(resp))
         return time.perf_counter() - t0
 
 

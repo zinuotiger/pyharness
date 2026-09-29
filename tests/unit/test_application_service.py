@@ -52,6 +52,9 @@ class _Log:
     def stats(self):
         return {"seq": len(self.events)}
 
+    def events_after(self, seq):
+        return [env for env, _ in self.events if env.seq > seq]
+
 
 class _Queue:
     def __init__(self) -> None:

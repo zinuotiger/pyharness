@@ -1,5 +1,8 @@
 # LIMITATIONS.md — 当前能力与已知限制（Current State）
 
+> **Platform Web V1（2026-09-26）**：最新能力及验证见 [Platform 报告](reports/PYHARNESS-PLATFORM-WEB-V1.md)。Docker daemon 不可用，真实隔离测试未运行；真实模型在本轮隔离环境未配置且未读取用户秘密。isolated 不回退宿主，host_approved 无 OS 隔离。网络白名单、嵌入式 PTY、云 Worker、多租户 SaaS 不在本轮交付范围。其余历史报告的测试数不代表本轮。
+
+
 > **Engineering RC（2026-09-24）说明：** 当前被测范围、安装结果与限制以 [STATUS.md](STATUS.md) 和 [候选报告](reports/PYHARNESS-ENGINEERING-RC-20260924.md) 为准。下文是 2026-09-21 的历史快照；其中“当前”“单一权威”、测试数量、native 安装状态和未提交状态均只指当时版本，不能代替本候选证据。
 
 
@@ -328,7 +331,7 @@ F2 之后又做了 **M4 独立验收**（含独立 agent 对抗性复核）与 *
 | **治理层（读侧）** | 决策因果还原 · 被拒清单（含 `executed` 证据位）· 一致性对账 · **凭证逐条重算核验 + prev_hash 链**；全部经 `ApplicationService` → HTTP/原生两壳可达 | `governance/{audit,receipt}.py` · `application/service.py` |
 | **证据面** | 任务段结束按冻结规则归档 `evidence.archived`（仅存引用）；按 `task_id` 聚合查询；索引可由日志完全重建 | `engine.archive_task_evidence` · `governance/evidence.py` |
 | **LLM 出网闸** | 单一汇点 `_chat_any` → `_egress_guard`；会话预算对所有五类出口生效 | `core/llm.py` |
-| **事件真源** | append-only JSONL。`EVENT_TYPES` **77** · `SYNC_TYPES` **14** · `TRANSIENT_TYPES` **3** · payload 模型 **77** · **信封字段 10**（本轮新增 `tenant_id`） | `events/vocab.py` · `events/envelope.py` |
+| **事件真源** | append-only JSONL。`EVENT_TYPES` **80** · `SYNC_TYPES` **14** · `TRANSIENT_TYPES` **3** · payload 模型 **80** · **信封字段 10**（Platform V1 新增三个资源事件；写入时显式强同步） | `events/vocab.py` · `events/envelope.py` |
 | **不变量测试面** | INV-01 ~ INV-05 编号化用例（**运行时事实来源**）+ 上下文传播/租户/唯一拒绝出口契约 + **F055 会话根单点派生/隔离/子会话可达** + **声明配置可达防线（AST 级）** + **资源生命周期（后台进程树随会话终止）** | `tests/invariants/`（**193 用例 / 15 文件**） |
 | **编排** | jobs · schedule · subagent · workflow（顺序步骤，符合 ADR-017）· MCP（配置门控） | `core/{jobs,schedule,subagent,workflow,mcp}.py` |
 | **持久化与恢复** | JSONL 真源 + `repair`（F060）+ FTS 派生索引（可整体重建）；**间隔落盘定时器**（有上界崩溃窗口） | `persistence.py` · `repair.py` · `engine.py` |

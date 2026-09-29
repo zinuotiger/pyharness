@@ -16,7 +16,7 @@ import pathlib
 
 from pyharness.bus import EventBus
 from pyharness.config import load_settings
-from pyharness.core.task_queue import TaskQueue
+from pyharness.core.task_queue import TaskQueue, TaskResult
 from pyharness.engine import build_spine
 
 
@@ -39,7 +39,7 @@ class _Runner:
         if self.fail:
             from pyharness.errors import PyHError
             raise PyHError("LLM-310", ctx={"hint": "injected"})
-        return f"ok:{task.id}"
+        return TaskResult(ok=True)
 
     async def cancel_current(self, task_id):        # noqa: ARG002
         return None

@@ -15,6 +15,34 @@ from pyharness.core.user_ask import AskProvider
 from pyharness.errors import PyHError
 
 
+@pytest.mark.parametrize('async_answer', [True, False])
+async def test_invalid_answer_does_not_consume_pending_question(async_answer):
+    session = await _session()
+    provider = AskProvider(session=session)
+    entered = asyncio.Event()
+    append = session.append
+    async def observed(kind, *args, **kwargs):
+        result = await append(kind, *args, **kwargs)
+        if kind == 'user.question': entered.set()
+        return result
+    session.append = observed
+    task = asyncio.create_task(provider.request('synthetic question'))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        ident = provider.pending_list()[0]['ask_id']
+        with pytest.raises(PyHError):
+            if async_answer:
+                await provider.answer_async(ident, text='   ')
+            else:
+                provider.answer(ident, text='   ')
+        assert provider.pending_list()[0]['ask_id'] == ident
+        assert await provider.answer_async(ident, text='valid answer')
+        assert 'valid answer' in await asyncio.wait_for(task, 2)
+    finally:
+        if not task.done(): task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def _session() -> SessionLog:
     s = SessionLog(sid="s-ask-000001")
     await s.append("session.created", {"title": "", "model": "mock"},

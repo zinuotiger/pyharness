@@ -83,6 +83,8 @@ class _Runner:
                 actor="user", task_id=task.id)
         if self.exc is not None:
             raise self.exc
+        from pyharness.core.task_queue import TaskResult
+        return TaskResult(ok=True)
 
 
 class _FakeManager:

@@ -145,6 +145,13 @@ class ApplicationService:
         root = getattr(getattr(cfg, "storage", None), "root", None)
         return Path(str(root or "~/.pyharness")).expanduser()
 
+    @property
+    def platform(self):
+        if not hasattr(self, '_platform'):
+            from pyharness.application.platform_service import PlatformService
+            self._platform = PlatformService(self)
+        return self._platform
+
     def tenant_root(self) -> Path:
         return self._storage_root() / "tenants" / self.tenant_id
 
@@ -201,7 +208,10 @@ class ApplicationService:
         return Settings.model_validate(raw)
 
     def tenant_state(self) -> dict:
-        return self._settings_store.state(self.tenant_id)
+        state = self._settings_store.state(self.tenant_id)
+        if self.tenant_id != 'default':
+            state['tenants'] = [self.tenant_id]
+        return state
 
     def save_model_profile(self, body: dict) -> dict:
         self._ensure_open()
@@ -296,6 +306,36 @@ class ApplicationService:
         from pyharness import engine as _eng
         from pyharness.engine import make_runner as _eng_make_runner
         cfg = self.effective_settings()
+        from pyharness.application.platform_service import PlatformService
+        platform_binding = PlatformService.binding(log_)
+        platform_definition = None
+        if platform_binding:
+            from pyharness.application.platform_models import AgentDefinition
+            platform_definition = AgentDefinition.model_validate(platform_binding['definition'])
+            self.platform.validate_execution_policy(platform_definition)
+            cfg.loop.max_turns = platform_definition.max_rounds
+            cfg.budget.task.max_in_tokens = platform_definition.budget.input_tokens
+            cfg.budget.task.max_out_tokens = platform_definition.budget.output_tokens
+            cfg.budget.task.max_cost_yuan = platform_definition.budget.cost
+            cfg.security.policy.preset = platform_definition.permission_policy
+            cfg.plugins.enabled = []
+            cfg.plugins.mcp_servers = []
+            if platform_definition.mcp_connections:
+                from pyharness.config import McpServerCfg
+                configured=self.platform.connection_definitions()
+                for name in platform_definition.mcp_connections:
+                    connection=configured.get('mcp:'+name)
+                    if connection is None or not connection['config']['enabled']:
+                        raise_code('CFG-601',reason='agent_mcp_connection_disabled')
+                    cfg.plugins.mcp_servers.append(McpServerCfg.model_validate(connection['config']))
+            if platform_definition.model_connection:
+                profiles = self.tenant_state()['profiles']
+                profile = next((p for p in profiles if p['id'] == platform_definition.model_connection), None)
+                if profile is None:
+                    raise_code('CRED-701', reason='agent_model_connection_missing')
+                cfg.llm.model, cfg.llm.base_url = profile['model'], profile['base_url']
+                cfg.llm.api_key = f'tenant:{self.tenant_id}:{profile["id"]}'
+                cfg.llm.fallback_models = []
         if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None:
             # Explicit borrowed test/local adapters do not resolve host credentials.
             models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]
@@ -311,6 +351,13 @@ class ApplicationService:
                 # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
                 # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
                 channel=self.channel, llm_runtime=self.llm_runtime)
+            try:
+                if platform_definition is not None:
+                    from pyharness.application.platform_runtime import PlatformRuntime
+                    PlatformRuntime(self.platform, platform_definition, sid).configure_spine(spine)
+            except BaseException:
+                await spine.close()
+                raise
             self._engines[sid] = spine
         if not getattr(spine, "_plugins_ready", False):
             await _eng._preload_plugins(spine)
@@ -371,7 +418,11 @@ class ApplicationService:
         seen, out = set(), []
         ctx_approval = (getattr(self.ctx, "approval", None)
                         if self.tenant_id == "default" else None)
-        for p in list(self._approvals.values()) + ([ctx_approval] if ctx_approval else []):
+        engine_providers = [getattr(s, 'approval', None) for s in self._engines.values()]
+        for spine in self._engines.values():
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            engine_providers.extend(getattr(runner, 'approval_providers', {}).values())
+        for p in list(self._approvals.values()) + engine_providers + ([ctx_approval] if ctx_approval else []):
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
                 out.append(p)
@@ -572,6 +623,10 @@ class ApplicationService:
             await spine.schedule.register(
                 name, str(kind or "cron").strip().lower(), expr,
                 {"intent": intent}, is_risky=is_risky, ctx=ctx)
+        elif action == 'edit':
+            await spine.schedule.edit(name,kind,expr,intent,ctx=ctx)
+        elif action == 'run_now':
+            await spine.schedule.run_now(name,ctx=ctx)
         elif action in {"pause", "resume", "remove"}:
             if not name:
                 raise_code("EVT-100", field="name", advice=f"schedule {action} 需要 name")
@@ -583,8 +638,26 @@ class ApplicationService:
 
     @admitted
     async def list_subagents(self, sid: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        return {"status": _json_safe(_as_dict(spine.subagent.status()))}
+        from pyharness.application.platform_projection import subtask_history
+        log_ = await self.require_session(sid)
+        spine = self._engines.get(sid)
+        status = (_json_safe(_as_dict(spine.subagent.status())) if spine is not None else
+                  {'running': 0, 'limit': 8, 'active_children': []})
+        history = subtask_history(sid, log_.events_after(0), status['active_children'])
+        waiting = {item['session_id'] for item in (await self.pending_approvals())['pending']}
+        for row in history:
+            if row['status'] == 'running' and row['session_id'] in waiting:
+                row['status'] = 'waiting_approval'
+            if row['error_code'] == 'runtime_interrupted':
+                # A silent child still owns durable terminal facts in its log.
+                # Do not construct an engine or replay work to recover history.
+                from pyharness.application.platform_projection import summary
+                child_log = await self.require_session(row['session_id'])
+                for event in child_log.events_after(0):
+                    if event.type in {'subagent.joined','subagent.failed'} and event.payload.get('sub_id') == row['session_id']:
+                        row.update(status='completed' if event.type=='subagent.joined' else 'failed',
+                            finished_at=event.ts,summary=summary(event.payload.get('summary','')),error_code=None)
+        return {"status": status, 'history': history}
 
     @admitted
     async def spawn_subagent(self, sid: str, task: str, *,
@@ -635,6 +708,8 @@ class ApplicationService:
                 await fn(*args, **kw)
             except BaseException as exc:
                 errors.append(exc)
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.stop_actions)
         spines = list(self._engines.values())
         if self.tenant_id == 'default':
             spines.append(getattr(self.ctx, 'engine_spine', None))
@@ -646,6 +721,8 @@ class ApplicationService:
         for queue in self._queues.values():
             if callable(getattr(queue, 'shutdown', None)):
                 await attempt(queue.shutdown, reason='service-shutdown')
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.close)
         if isinstance(self._surface, _session_module().DesktopSessionManager):
             await attempt(self._surface.shutdown_all)
         await attempt(self.llm_runtime.aclose)
@@ -940,15 +1017,16 @@ class ApplicationService:
     @admitted
     async def pending_approvals(self) -> dict:
         out: list[dict] = []
-        seen: set[int] = set()
+        seen: set[tuple] = set()
         for p in self.all_approval_providers():
             pending = getattr(p, "_pending", None)
             if not isinstance(pending, dict):
                 continue
             for aid, req in pending.items():
-                if aid in seen:
+                identity = (getattr(req, 'session_id', ''), aid)
+                if identity in seen:
                     continue
-                seen.add(aid)
+                seen.add(identity)
                 out.append({"approval_id": aid,
                             "tool": getattr(req, "tool", ""),
                             "args_summary": getattr(req, "args_summary", ""),
@@ -1013,6 +1091,11 @@ class ApplicationService:
     def ask_providers(self) -> list:
         seen, out = set(), []
         for spine in list(self._engines.values()):
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            for child_provider in getattr(runner, 'ask_providers', {}).values():
+                if id(child_provider) not in seen:
+                    seen.add(id(child_provider))
+                    out.append(child_provider)
             p = getattr(spine, "ask", None)
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
@@ -1068,6 +1151,32 @@ class ApplicationService:
                    hint="未知/已答复的 ask_id")
 
     # ------------------------------------------------------------ attachments / workflow / budget
+    @admitted
+    async def memory_action(self, body: dict) -> dict:
+        """Explicit team namespace backed by the existing SessionKV owner."""
+        import re
+        from pyharness.core.kv import SessionKV
+        if not isinstance(body,dict) or set(body)-{'op','key','value'}:
+            raise_code('EVT-100',field='memory')
+        op=body.get('op')
+        key=body.get('key')
+        value=body.get('value')
+        if op not in {'get','set','delete','keys'}:
+            raise_code('EVT-100',field='memory.op')
+        if op!='keys' and (not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',key)):
+            raise_code('EVT-100',field='memory.key')
+        if op=='set' and (not isinstance(value,str) or len(value)>4096):
+            raise_code('EVT-100',field='memory.value')
+        if not hasattr(self,'_team_memory'):
+            self._team_memory=SessionKV(self.tenant_root()/'memory.kv.json',session_id='team:'+self.tenant_id)
+        kv=self._team_memory
+        if op=='set':
+            keys=kv.apply_op('keys')
+            names=[] if keys=='(空)' else keys.split('、')
+            if key not in names and len(names)>=100:
+                raise_code('EVT-100',field='memory.quota')
+        return {'scope':'team','result':kv.apply_op(op,key=key,value=value)}
+
     @admitted
     async def upload_attachment(self, sid: str, attachment: dict) -> dict:
         self._ensure_open()

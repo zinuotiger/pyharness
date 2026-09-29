@@ -71,7 +71,7 @@ class AskProvider:
 
         未知 ask_id(已答/超时/过期)→ 返回 False(幂等忽略,防重放)。"""
         aid = int(ask_id)
-        waiter = self._pending.pop(aid, None)
+        waiter = self._pending.get(aid)
         if waiter is None:
             return False
         choice_v = (str(choice or "").strip())[:500] or None
@@ -79,6 +79,7 @@ class AskProvider:
         if not choice_v and not text_v:
             raise_code("EVT-100", field="answer",
                        hint="答复须给 choice 或 text 至少其一")
+        self._pending.pop(aid)
         if self._session is not None:
             coro = self._write_answer_and_settle(
                 aid, waiter, choice_v, text_v, by)
@@ -98,7 +99,7 @@ class AskProvider:
                            text: Optional[str] = None, by: str = "user") -> bool:
         """异步答复:先强同步落 user.answer,再唤醒等待者并返回成功。"""
         aid = int(ask_id)
-        waiter = self._pending.pop(aid, None)
+        waiter = self._pending.get(aid)
         if waiter is None:
             return False
         choice_v = (str(choice or "").strip())[:500] or None
@@ -106,6 +107,7 @@ class AskProvider:
         if not choice_v and not text_v:
             raise_code("EVT-100", field="answer",
                        hint="答复须给 choice 或 text 至少其一")
+        self._pending.pop(aid)
         if self._session is not None:
             try:
                 await self._session.append(

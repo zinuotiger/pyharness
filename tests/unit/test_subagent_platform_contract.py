@@ -29,8 +29,10 @@ async def test_child_model_failure_is_not_successful_join(tmp_path, adapter_fact
         manager = ctx.engine_spine.subagent
         child = await manager.spawn(SubagentSpec(task='synthetic child', depth=1),
                                     SimpleNamespace(round_seq=1))
+        # Register the join before yielding. On Python 3.11 an outer wait_for
+        # schedules another task, allowing a fast child to be reaped first.
         with pytest.raises(PyHError) as caught:
-            await asyncio.wait_for(manager.join(child), 5)
+            await manager.join(child, timeout=5)
         assert caught.value.code == 'LLM-303'
         events = list(ctx.session.events_after(0))
         assert any(e.type == 'subagent.failed' and e.payload['sub_id'] == child for e in events)
@@ -60,10 +62,10 @@ async def test_public_subtask_history_survives_restart(tmp_path, adapter_factory
         child = await app.service.spawn_subagent(sid, 'synthetic task', notify=notify)
         manager = app.service._engines[sid].subagent
         if outcome == 'completed':
-            assert await asyncio.wait_for(manager.join(child), 5) == 'done'
+            assert await manager.join(child, timeout=5) == 'done'
         elif outcome == 'failed':
             with pytest.raises(PyHError):
-                await asyncio.wait_for(manager.join(child), 5)
+                await manager.join(child, timeout=5)
         else:
             await asyncio.wait_for(entered.wait(), 5)
             assert await app.service.cancel_subagent(sid, child)
@@ -149,7 +151,7 @@ async def test_child_write_waits_for_parent_approval(tmp_path, adapter_factory, 
         assert any(r['status'] == 'pending' for r in rows)
         if decision == 'approve':
             await app.service.decide_approval(ident, 'approve', sid=child)
-            assert await asyncio.wait_for(manager.join(child), 5) == 'done'
+            assert await manager.join(child, timeout=5) == 'done'
             assert (root/'synthetic.txt').read_text('utf-8') == 'approved child output'
             assert (await app.service.list_subagents(sid))['history'][0]['status'] == 'completed'
         else:

@@ -21,3 +21,7 @@
 ## 限制
 
 本地模型加真实 Docker 的人工闭环、外部语义 RAG、第三方 MCP、公网 TLS/身份系统、真机触摸和跨机器凭据恢复未在本轮验收。PTY 未开放。原有 Ubuntu 真实 Docker CI 保留，其确定性模型不能冒充真实供应商。所有测试数据和构建产物位于仓库外；无模型 Key、密码、用户数据库、会话或私有检查点进入提交。PR 保持 Draft，不合并、不打标签、不创建 Release。
+
+## Python 3.11 远程回归修复
+
+首轮 PR workflow 的 Ubuntu Python 3.11 完整测试暴露 4 个新增测试时序失败，其余 4 个正式 job 通过。相同失败在本地独立 Python 3.11 环境复现：外层 `asyncio.wait_for` 额外调度任务，导致快速子任务在 join 登记前已经回收，或“尚未开始”的工作流先于取消调用执行。两个测试文件改用现有 `join(timeout=5)` 与 `asyncio.timeout(5)`，保留失败码、成功结果、取消状态、零 Run 和重启历史的全部断言。相关 19 项测试在 Python 3.11 通过；修复后本地 Python 3.11 完整测试 2596 passed / 41 skipped、Coverage 83.70%，Python 3.13 完整测试 2596 passed / 41 skipped、Coverage 83.69%。业务实现、测试数量及正式 CI 门禁均未改变。最终跨平台结果以修复提交对应的 PR workflow 为准。

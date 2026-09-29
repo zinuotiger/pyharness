@@ -121,7 +121,10 @@ async def test_workflow_cancel_stops_queued_work_and_restarts_cancelled(tmp_path
         workflow=await app.service.platform.workflows.start({'steps':['blocked','never'],'idempotency_key':'cancel'})
         if wait_until_started:
             await asyncio.wait_for(entered.wait(),5)
-        await asyncio.wait_for(app.service.platform.workflows.cancel(workflow['workflow_id']),5)
+        # Keep cancellation in this task: wait_for creates a separate task on
+        # Python 3.11 and can start the supposedly not-yet-started workflow.
+        async with asyncio.timeout(5):
+            await app.service.platform.workflows.cancel(workflow['workflow_id'])
         row=(await app.service.platform.workflows.list())['workflows'][0]
         assert row['status']=='cancelled'
         runs=(await app.service.platform.runs())['runs']

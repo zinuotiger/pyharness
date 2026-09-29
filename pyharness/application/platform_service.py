@@ -39,10 +39,18 @@ class PlatformService:
         self.locks = {}
         self.actions = {}
         self.connection_clients = {}
+        from pyharness.application.platform_workflow import PlatformWorkflows
+        self.workflows = PlatformWorkflows(self)
 
     def agents(self):
         data = self.store.read()
         return {'agents':list(data['agents'].values()), 'templates':copy.deepcopy(TEMPLATES)}
+
+    def validate_execution_policy(self, definition):
+        from pyharness.application.accounts import Accounts
+        if Accounts.manages_tenant(self.service._storage_root(), self.service.tenant_id):
+            if definition.sandbox_profile.mode == 'host_approved' or definition.mcp_connections:
+                fail('account_host_execution_forbidden')
 
     def save_agent(self, body, ident=None):
         agent = AgentDefinition.model_validate(body)
@@ -198,10 +206,46 @@ class PlatformService:
                     fail('new_session_required')
                 definition = (self.new_binding_version(body['agent_id'],int(body.get('agent_version',0)))['snapshot']
                               if body.get('agent_id') else AgentDefinition(name='计划助手').model_dump())
+                self.validate_execution_policy(AgentDefinition.model_validate(definition))
                 await log.append('user.message', {'content':'计划任务运行策略已绑定',
                     'meta':{'platform':{'definition':definition,'agent_id':definition['agent_id'],
                                        'agent_version':definition['current_version']}}},actor='user',sync=True)
         return sid
+
+    async def chat_readiness(self, body=None):
+        """Read public model metadata only; never resolve a credential or probe a provider."""
+        body = body or {}
+        definition = None
+        if body.get('session_id'):
+            log = await self.service.require_session(body['session_id'])
+            binding = self.binding(log)
+            if binding:
+                definition = binding['definition']
+        if definition is None and body.get('agent_id'):
+            definition = self.new_binding_version(body['agent_id'], int(body.get('agent_version') or 0))['snapshot']
+        if definition is not None:
+            self.validate_execution_policy(AgentDefinition.model_validate(definition))
+        connection = (definition or {}).get('model_connection')
+        state = self.service.tenant_state()
+        ident = connection or state['active']
+        profile = next((p for p in state['profiles'] if p['id'] == ident), None)
+        cfg = self.service.effective_settings()
+        model = profile['model'] if profile else cfg.llm.model
+        code = None
+        from pyharness.application.accounts import Accounts
+        if not state['active'] and Accounts.manages_tenant(self.service._storage_root(), self.service.tenant_id):
+            code = 'tenant_model_profile_required'
+        elif connection and profile is None:
+            code = 'model_connection_missing'
+        elif profile and (not profile.get('has_api_key') and not profile.get('api_key_source')):
+            code = 'model_credential_missing'
+        elif profile and profile.get('credential_status') == 'blocked_host_reference':
+            code = 'model_credential_missing'
+        elif profile is None and not self.service.llm_runtime.has_borrowed_adapter(model):
+            if model == 'unconfigured' or self.service.tenant_id != 'default':
+                code = 'model_not_configured'
+        return {'ready': code is None, 'code': code, 'model': model if code is None else None,
+                'profile_id': profile['id'] if profile else None, 'network_tested': False}
 
     async def start_run(self, body):
         from pyharness.application.platform_models import RunRequest
@@ -209,6 +253,9 @@ class PlatformService:
         text = str(body.get('text') or '').strip()
         if not text or len(text) > 32000:
             fail('invalid_message')
+        readiness = await self.chat_readiness(body)
+        if not readiness['ready']:
+            fail(readiness['code'])
         sid = body.get('session_id') or await self.service.create_session()
         async with self.locks.setdefault(sid, asyncio.Lock()):
             log = await self.service.require_session(sid)
@@ -224,6 +271,7 @@ class PlatformService:
                 definition = AgentDefinition.model_validate(version['snapshot'])
             else:
                 definition = AgentDefinition(name='通用助手')
+            self.validate_execution_policy(definition)
             # Binding a pre-existing legacy runtime would misrepresent applied policy.
             if not binding and sid in self.service._engines:
                 fail('new_session_required')
@@ -253,8 +301,17 @@ class PlatformService:
                     'agent_id':definition.agent_id or None, 'agent_version':definition.current_version or None,
                     'definition':definition.model_dump(), 'retry_count':int(body.get('retry_count', 0))}
             await log.append('user.message', {'content':text, 'meta':{'platform':meta}}, actor='user', sync=True)
-            queue = await self.service.queue_for(sid, log)
-            await queue.submit(text, task_id=task, meta={'channel':self.service.channel, 'session_id':sid})
+            try:
+                queue = await self.service.queue_for(sid, log)
+                await queue.submit(text, task_id=task, meta={'channel':self.service.channel, 'session_id':sid})
+            except Exception as exc:
+                # Accepted user input must have a durable, visible terminal Run even
+                # when runtime construction fails before TaskQueue can enqueue it.
+                from pyharness.errors import PyHError
+                if not any(e.type == 'task.enqueued' and e.payload.get('task_id') == task for e in log.events_after(0)):
+                    await log.append('task.enqueued', {'task_id': task, 'pos':1}, actor='system', task_id=task, sync=True)
+                code = exc.code if isinstance(exc, PyHError) else 'runtime_start_failed'
+                await log.append('task.failed', {'task_id':task, 'reason':'runtime_start_failed', 'error':code}, actor='system', task_id=task, sync=True)
             return {'run_id':f'{sid}~{task}', 'session_id':sid, 'task_id':task}
 
     async def cancel(self, ident):
@@ -632,22 +689,13 @@ class PlatformService:
 
     async def connection_action(self, ident, action):
         if ident.startswith('model:') and action=='test':
-            from pyharness.core.llm import AdapterTriple, TimeoutLimits, build_client
+            from pyharness.application.model_probe import probe
             profile=next((p for p in self.service.tenant_state()['profiles'] if p['id']==ident[6:]),None)
             if profile is None: fail('connection_not_found')
-            ref=f"tenant:{self.service.tenant_id}:{profile['id']}"
-            store=self.service._settings_store
-            client=None
-            try:
-                triple=AdapterTriple(base_url=profile['base_url'],model=profile['model'],api_key_ref=ref,
-                    credential_store=store,credential_binding=store.binding(ref,profile['base_url']))
-                client=build_client(triple,TimeoutLimits())
-                latency=await asyncio.wait_for(client.ping(),10)
-                result={'status':'available','latency_ms':latency*1000,'probe':'GET /models; no generation','capabilities':'not_probed'}
-            except Exception:
-                result={'status':'unavailable','probe':'GET /models; no generation','code':'model_connection_failed'}
-            finally:
-                if client: await client.aclose()
+            lock=self.locks.setdefault('probe:'+ident,asyncio.Lock())
+            if lock.locked(): fail('model_probe_busy')
+            async with lock:
+                result=await probe(self.service,profile)
             with self.store.transaction() as data:
                 data['preferences'].setdefault('model_probes',{})[ident[6:]]={**result,'checked_at':datetime.now(timezone.utc).isoformat()}
             return result
@@ -736,6 +784,7 @@ class PlatformService:
             raise BaseExceptionGroup('connection cleanup failed',errors)
 
     async def stop_actions(self):
+        await self.workflows.close()
         tasks=list(self.actions.values())
         for task in tasks:
             if not task.done():

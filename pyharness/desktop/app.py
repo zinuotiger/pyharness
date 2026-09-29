@@ -107,6 +107,8 @@ class DesktopApp:
         self.mount_api()
         from .platform_api import mount_platform
         mount_platform(self)
+        from .accounts_api import mount_accounts
+        mount_accounts(self)
         bus = getattr(ctx, "bus", None)
         if bus is not None:
             self._sub = self._subscribe_all(bus)
@@ -234,6 +236,10 @@ class DesktopApp:
 
     @staticmethod
     def _declared_tenant(request: Request) -> str:
+        from .accounts_api import principal
+        account = principal(request)
+        if account:
+            return account['tenant']
         """客户端**声明**的租户(头优先,其次 ``?tenant=``,缺省 ``default``)。"""
         return normalize_tenant_id(
             request.headers.get("x-pyharness-tenant")
@@ -284,6 +290,9 @@ class DesktopApp:
 
     def _operator_ok(self, request: Request) -> bool:
         """是否持有全局(操作者)令牌;未配置令牌时视为放行(沿用既有语义)。"""
+        from .accounts_api import principal
+        if principal(request):
+            return False
         expected = self._api_token
         if not expected:
             return True
@@ -298,12 +307,22 @@ class DesktopApp:
         若 default 也要租户令牌,引导页与全部既有流程即刻断。收益全在非 default:
         此前任何人只要**报对租户名**即可进入(只有归属校验 R31-1,没有资格校验)。
         """
+        from .accounts_api import principal
+        account = principal(request)
+        if account:
+            return account['tenant'] == tenant
         if tenant == "default":
             return True
         return self._verify_tenant_token(
             tenant, self._presented_tenant_token(request))
 
     async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
+        from .accounts_api import inspect_request, principal
+        rejected = inspect_request(self, request)
+        if rejected is not None:
+            return rejected
+        if request.url.path.startswith('/api/account/') or request.url.path == '/login':
+            return await call_next(request)
         # ① 鉴权先行:未出示 / 出示错误的本租户令牌 ⇒ 401。**先于**归属判定,故不会向
         #    未授权方泄露"该租户下是否存在某会话"(403 与 404 之差即是信息)。
         declared = self._declared_tenant(request)
@@ -326,7 +345,8 @@ class DesktopApp:
                           "拒绝服务(既不按客户端自报头判定,也不跨租户改判)"})
         token = self._tenant_var.set(tenant)
         try:
-            return await call_next(request)
+            from .accounts_api import serve_with_quota
+            return await serve_with_quota(self, request, call_next)
         finally:
             self._tenant_var.reset(token)
 
@@ -462,6 +482,9 @@ class DesktopApp:
         (引导/外联);全部数据端点(含读端与 SSE)强制鉴权——此前 39 个读端点
         匿名、SSE 无鉴权,任何本地进程可枚举全部会话。
         """
+        from .accounts_api import principal
+        if principal(request):
+            return
         expected = self._api_token
         if not expected:
             return
@@ -721,6 +744,8 @@ class DesktopApp:
         declared = self._declared_tenant(request)
         tenant_tok = self._presented_tenant_token(request)
         operator = self._operator_ok(request)
+        from .accounts_api import principal
+        account = principal(request)
         tenant_ok = (declared != "default"
                      and self._verify_tenant_token(declared, tenant_tok))
         if operator and declared != "default":
@@ -728,7 +753,10 @@ class DesktopApp:
             if store is not None:
                 tenant_tok = store.api_token(declared)
                 tenant_ok = True
-        if not (operator or tenant_ok):
+        if not (operator or tenant_ok or account):
+            if 'text/html' in request.headers.get('accept', ''):
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse('/login', status_code=303)
             return JSONResponse(status_code=401, content={
                 "code": "CRED-701",
                 "advice": "引导页需要凭证:全局 API token,或所声明租户的租户令牌"
@@ -753,7 +781,7 @@ class DesktopApp:
         if self._api_token and operator:
             resp.set_cookie("pyharness_token", self._api_token,
                             httponly=True, samesite="strict", path="/")
-        if tenant_ok:
+        if tenant_ok and not account:
             resp.set_cookie("pyharness_tenant_token", tenant_tok,
                             httponly=True, samesite="strict", path="/")
         return resp

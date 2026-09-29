@@ -62,6 +62,10 @@ def mount_platform(desktop):
     async def runs():
         return await service().runs()
 
+    @router.get('/chat/readiness')
+    async def chat_readiness(session_id: str | None = None, agent_id: str | None = None, agent_version: int | None = None):
+        return await service().chat_readiness({'session_id':session_id, 'agent_id':agent_id, 'agent_version':agent_version})
+
     @router.post('/runs')
     async def start_run(body: dict = Body(...)):
         return await service().start_run(body)
@@ -244,6 +248,26 @@ def mount_platform(desktop):
     @router.post('/connections/{ident}/{action}')
     async def connection_action(ident:str,action:str):
         return await service().connection_action(ident,action)
+
+    @router.get('/workflows')
+    async def workflows():
+        return await service().workflows.list()
+
+    @router.get('/memory')
+    async def memory(key: str | None = None):
+        return await desktop.service.memory_action({'op':'get','key':key} if key else {'op':'keys'})
+
+    @router.post('/memory')
+    async def edit_memory(body: dict=Body(...)):
+        return await desktop.service.memory_action(body)
+
+    @router.post('/workflows')
+    async def start_workflow(body: dict=Body(...)):
+        return await service().workflows.start(body)
+
+    @router.post('/workflows/{ident}/cancel')
+    async def cancel_workflow(ident: str):
+        return await service().workflows.cancel(ident)
 
     @router.get('/schedules')
     async def schedules():

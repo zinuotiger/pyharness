@@ -208,7 +208,10 @@ class ApplicationService:
         return Settings.model_validate(raw)
 
     def tenant_state(self) -> dict:
-        return self._settings_store.state(self.tenant_id)
+        state = self._settings_store.state(self.tenant_id)
+        if self.tenant_id != 'default':
+            state['tenants'] = [self.tenant_id]
+        return state
 
     def save_model_profile(self, body: dict) -> dict:
         self._ensure_open()
@@ -309,6 +312,7 @@ class ApplicationService:
         if platform_binding:
             from pyharness.application.platform_models import AgentDefinition
             platform_definition = AgentDefinition.model_validate(platform_binding['definition'])
+            self.platform.validate_execution_policy(platform_definition)
             cfg.loop.max_turns = platform_definition.max_rounds
             cfg.budget.task.max_in_tokens = platform_definition.budget.input_tokens
             cfg.budget.task.max_out_tokens = platform_definition.budget.output_tokens
@@ -415,6 +419,9 @@ class ApplicationService:
         ctx_approval = (getattr(self.ctx, "approval", None)
                         if self.tenant_id == "default" else None)
         engine_providers = [getattr(s, 'approval', None) for s in self._engines.values()]
+        for spine in self._engines.values():
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            engine_providers.extend(getattr(runner, 'approval_providers', {}).values())
         for p in list(self._approvals.values()) + engine_providers + ([ctx_approval] if ctx_approval else []):
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
@@ -631,8 +638,26 @@ class ApplicationService:
 
     @admitted
     async def list_subagents(self, sid: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        return {"status": _json_safe(_as_dict(spine.subagent.status()))}
+        from pyharness.application.platform_projection import subtask_history
+        log_ = await self.require_session(sid)
+        spine = self._engines.get(sid)
+        status = (_json_safe(_as_dict(spine.subagent.status())) if spine is not None else
+                  {'running': 0, 'limit': 8, 'active_children': []})
+        history = subtask_history(sid, log_.events_after(0), status['active_children'])
+        waiting = {item['session_id'] for item in (await self.pending_approvals())['pending']}
+        for row in history:
+            if row['status'] == 'running' and row['session_id'] in waiting:
+                row['status'] = 'waiting_approval'
+            if row['error_code'] == 'runtime_interrupted':
+                # A silent child still owns durable terminal facts in its log.
+                # Do not construct an engine or replay work to recover history.
+                from pyharness.application.platform_projection import summary
+                child_log = await self.require_session(row['session_id'])
+                for event in child_log.events_after(0):
+                    if event.type in {'subagent.joined','subagent.failed'} and event.payload.get('sub_id') == row['session_id']:
+                        row.update(status='completed' if event.type=='subagent.joined' else 'failed',
+                            finished_at=event.ts,summary=summary(event.payload.get('summary','')),error_code=None)
+        return {"status": status, 'history': history}
 
     @admitted
     async def spawn_subagent(self, sid: str, task: str, *,
@@ -1066,6 +1091,11 @@ class ApplicationService:
     def ask_providers(self) -> list:
         seen, out = set(), []
         for spine in list(self._engines.values()):
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            for child_provider in getattr(runner, 'ask_providers', {}).values():
+                if id(child_provider) not in seen:
+                    seen.add(id(child_provider))
+                    out.append(child_provider)
             p = getattr(spine, "ask", None)
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
@@ -1121,6 +1151,32 @@ class ApplicationService:
                    hint="未知/已答复的 ask_id")
 
     # ------------------------------------------------------------ attachments / workflow / budget
+    @admitted
+    async def memory_action(self, body: dict) -> dict:
+        """Explicit team namespace backed by the existing SessionKV owner."""
+        import re
+        from pyharness.core.kv import SessionKV
+        if not isinstance(body,dict) or set(body)-{'op','key','value'}:
+            raise_code('EVT-100',field='memory')
+        op=body.get('op')
+        key=body.get('key')
+        value=body.get('value')
+        if op not in {'get','set','delete','keys'}:
+            raise_code('EVT-100',field='memory.op')
+        if op!='keys' and (not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',key)):
+            raise_code('EVT-100',field='memory.key')
+        if op=='set' and (not isinstance(value,str) or len(value)>4096):
+            raise_code('EVT-100',field='memory.value')
+        if not hasattr(self,'_team_memory'):
+            self._team_memory=SessionKV(self.tenant_root()/'memory.kv.json',session_id='team:'+self.tenant_id)
+        kv=self._team_memory
+        if op=='set':
+            keys=kv.apply_op('keys')
+            names=[] if keys=='(空)' else keys.split('、')
+            if key not in names and len(names)>=100:
+                raise_code('EVT-100',field='memory.quota')
+        return {'scope':'team','result':kv.apply_op(op,key=key,value=value)}
+
     @admitted
     async def upload_attachment(self, sid: str, attachment: dict) -> dict:
         self._ensure_open()

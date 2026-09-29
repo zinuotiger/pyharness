@@ -89,3 +89,13 @@ async def test_empty_steps_rejected():
     with pytest.raises(PyHError) as e:
         await runner.run([])
     assert e.value.code == "EVT-100"
+
+
+async def test_workflow_error_never_exports_transport_exception(caplog):
+    async def fail(intent):
+        raise RuntimeError('Authorization: Bearer synthetic-private-credential')
+    runner=WorkflowRunner(await _session(),fail)
+    with caplog.at_level('DEBUG'):
+        result=await runner.run(['synthetic'],stop_on_fail=True)
+    assert not result[0]['ok']
+    assert 'synthetic-private-credential' not in str(result)+caplog.text

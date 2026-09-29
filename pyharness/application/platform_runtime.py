@@ -21,6 +21,10 @@ class PlatformRuntime:
         self.baseline_hashes = {}
         self.command_results = {}
         self.process_tokens = {}
+        self.failed_children = {}
+
+    def for_child(self, session_id):
+        return PlatformRuntime(self.platform,self.definition.model_copy(deep=True),session_id)
 
     async def sandbox(self, ctx):
         task = str(ctx.task_id or '')
@@ -76,6 +80,9 @@ class PlatformRuntime:
         return result
 
     async def finish(self, ctx):
+        if str(ctx.task_id or '') in self.failed_children:
+            from pyharness.errors import PyHError
+            raise PyHError(self.failed_children[str(ctx.task_id or '')])
         if self.definition.output_schema:
             from pyharness.core.tools_registry import _compile_model
             model=_compile_model('platform.output',self.definition.output_schema)
@@ -140,6 +147,8 @@ class PlatformRuntime:
         self.calls[task] = self.calls.get(task, 0) + 1
         if self.calls[task] > self.definition.budget.tool_calls:
             fail('agent_tool_budget_exceeded')
+        if name=='storage.kv' and self.definition.memory_scope=='team':
+            return (await self.platform.service.memory_action(args))['result']
         if name.startswith(('exec.', 'proc.', 'fs.')):
             if self.definition.sandbox_profile.mode == 'disabled':
                 fail('sandbox_disabled')
@@ -208,7 +217,14 @@ class PlatformRuntime:
                 TenantSettingsStore._atomic_write(target,after.encode())
                 return 'Private sandbox patch applied'
             fail('sandbox_operation_unsupported')
-        # Privileged connectors and orchestration cannot bypass the sandbox.
+        if name == 'subagent.spawn':
+            try:
+                return await original()
+            except Exception as exc:
+                self.failed_children[task] = str(getattr(exc,'code','CYC-999'))
+                raise
+        # Privileged connectors cannot bypass the sandbox. Child orchestration
+        # above keeps the published definition and owns a distinct runtime.
         if name.startswith('mcp.') and self.definition.sandbox_profile.mode=='host_approved':
             server=name.split('.')[1]
             if server in self.definition.mcp_connections:

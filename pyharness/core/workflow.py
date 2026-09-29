@@ -55,8 +55,10 @@ class WorkflowRunner:
             ok, summary = False, ""
             try:
                 ok, summary = await self._submit(intent)
-            except Exception as e:                    # noqa: BLE001 单步异常记录
-                summary = f"{type(e).__name__}: {str(e)[:300]}"
+            except Exception:                        # noqa: BLE001 单步异常记录
+                # Transport exceptions may contain headers, URLs or credentials.
+                # Detailed diagnostics belong to their existing bounded owner.
+                summary = 'workflow_step_failed'
             await self._step_event(idx, intent,
                                    "done" if ok else "failed", summary[:2000])
             results.append({"index": idx, "intent": intent, "ok": ok,

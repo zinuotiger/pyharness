@@ -39,6 +39,7 @@ class AgentDefinition(Model):
     description: str = Field(default='', max_length=2000)
     system_prompt: str = Field(default='', max_length=12000)
     model_connection: str | None = None
+    memory_scope: Literal['session','team'] = 'session'
     allowed_tools: list[str] = Field(default_factory=list, max_length=100)
     mcp_connections: list[str] = Field(default_factory=list, max_length=20)
     skills: list[str] = Field(default_factory=list, max_length=30)

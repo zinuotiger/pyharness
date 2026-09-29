@@ -95,6 +95,34 @@ async def test_knowledge_exact_citations_and_no_evidence(platform):
     assert p.knowledge_list()['sources']==[]
 
 
+async def test_keyword_provider_citation_and_deletion_survive_restart(tmp_path):
+    cfg=isolated_settings(tmp_path)
+    app=DesktopApp(cli.assemble_ctx(cfg))
+    try:
+        source=await app.service.platform.add_knowledge({'name':'synthetic rules','text':'alpha evidence\nbeta evidence'})
+        assert app.service.platform.knowledge_list()['provider']=='exact_keyword'
+    finally:
+        await app.service.shutdown()
+    restored=DesktopApp(cli.assemble_ctx(cfg))
+    try:
+        result=await restored.service.platform.query_knowledge('alpha')
+        assert result['answer_allowed'] and result['provider']=='exact_keyword'
+        assert result['citations'][0]['source_id']==source['source_id']
+        assert result['citations'][0]['quote']=='alpha evidence'
+        assert result['citations'][0]['line']==1
+        restored.service.platform.delete_knowledge(source['source_id'])
+    finally:
+        await restored.service.shutdown()
+    deleted=DesktopApp(cli.assemble_ctx(cfg))
+    try:
+        result=await deleted.service.platform.query_knowledge('alpha')
+        assert result['citations']==[] and result['answer_allowed'] is False
+        assert result['reason']=='no_reliable_evidence'
+        assert deleted.service.platform.knowledge_list()['sources']==[]
+    finally:
+        await deleted.service.shutdown()
+
+
 class FakeBackend:
     def __init__(self, error=None):
         self.error=error
@@ -237,6 +265,15 @@ async def test_governed_code_change_approval_patch_export_and_restart(tmp_path,a
         assert (await asyncio.wait_for(p.actions[operation['operation_id']],5))['ok']
         assert (await p.artifact_content(patch['artifact_id']))[1]==raw
         assert all(r.status=='destroyed' for r in p.sandboxes.records.values())
+        view=await p.run(submitted['run_id'])
+        assert view['session_id']==sid and view['agent_id']==draft['agent_id'] and view['agent_version']==1
+        assert view['status']=='completed' and view['token_usage']>0
+        kinds={span['type'] for span in view['trace']}
+        assert {'llm.usage','tool.call','approval.requested','approval.granted','platform.sandbox'}<=kinds
+        assert all(span['run_id']==submitted['run_id'] for span in view['trace'])
+        assert all(item['session_id']==sid and item['run_id']==submitted['run_id'] for item in artifacts)
+        usage=await p.usage(filters={'run_id':submitted['run_id']})
+        assert usage['tool_calls']>=2 and usage['tokens']>0 and usage['run_count']==1
     finally:
         await app.service.shutdown()
     reloaded=DesktopApp(cli.assemble_ctx(cfg))
@@ -244,6 +281,7 @@ async def test_governed_code_change_approval_patch_export_and_restart(tmp_path,a
         assert (await reloaded.service.platform.run(submitted['run_id']))['status']=='completed'
         assert (await reloaded.service.platform.artifact_content(patch['artifact_id']))[1]==raw
         assert len((await reloaded.service.platform.approvals())['approvals'])==4
+        assert (await reloaded.service.platform.run(submitted['run_id']))['trace']==view['trace']
     finally:
         await reloaded.service.shutdown()
 

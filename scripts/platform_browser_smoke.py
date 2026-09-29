@@ -24,6 +24,20 @@ def find_browser():
     return next((str(p) for p in candidates if p.is_file()),None) or shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
 
 
+async def navigate(page, route):
+    if await page.locator('.mobile-sessions').is_visible():
+        if not await page.locator('#settingsEntry').is_visible():
+            await page.locator('.mobile-sessions').click()
+    if route == 'chat':
+        await page.locator('#sessionListHeading').click()
+    else:
+        await page.locator('#settingsEntry').click()
+        await page.locator('.settings-links').wait_for()
+        if route != 'settings':
+            await page.locator(f'.settings-links [data-nav="{route}"]').click()
+
+
+
 async def smoke(output, expect_docker=None):
     executable=find_browser()
     if executable is None:
@@ -62,13 +76,16 @@ async def smoke(output, expect_docker=None):
                 page.on('pageerror',lambda error:errors.append(str(error)))
                 page.on('console',lambda message:console.append({'type':message.type,'text':message.text}))
                 await page.goto(f'http://127.0.0.1:{port}/')
+                from scripts.platform_chat_contract import verify_chat_shell
+                await verify_chat_shell(page, output)
+                await page.evaluate('go("dashboard")')
                 await page.get_by_text('还没有会话',exact=True).wait_for()
                 assert await page.locator('.error').count()==0
                 await page.evaluate('document.fonts.ready')
                 cdp=await context.new_cdp_session(page)
                 await cdp.send('DOM.enable');await cdp.send('CSS.enable')
                 document=await cdp.send('DOM.getDocument')
-                label=await cdp.send('DOM.querySelector',{'nodeId':document['root']['nodeId'],'selector':'#nav .label'})
+                label=await cdp.send('DOM.querySelector',{'nodeId':document['root']['nodeId'],'selector':'#sessionListHeading'})
                 fonts=(await cdp.send('CSS.getPlatformFontsForNode',{'nodeId':label['nodeId']}))['fonts']
                 assert fonts and sum(f['glyphCount'] for f in fonts)>=3
                 if sys.platform.startswith('linux'):
@@ -79,7 +96,7 @@ async def smoke(output, expect_docker=None):
                 await page.unroute('**/api/v1/acceptance-no-content')
                 for status in (404,409,422):
                     await page.route('**/api/v1/usage',lambda route,request,s=status:route.fulfill(status=s,content_type='application/json',body=json.dumps({'code':str(s),'message':'controlled contract error'})))
-                    await page.locator('#nav [data-nav="usage"]').click()
+                    await navigate(page, 'usage')
                     await page.get_by_text('加载失败',exact=True).wait_for()
                     assert str(status) in await page.locator('.error').inner_text()
                     await page.unroute('**/api/v1/usage')
@@ -92,14 +109,14 @@ async def smoke(output, expect_docker=None):
                 dashboard=await (await context.request.get(f'http://127.0.0.1:{port}/api/v1/dashboard')).json()
                 assert dashboard['health']['docker']['status']==health['status']
                 for route in ['dashboard','chat','runs','approvals','sandboxes','agents','artifacts','knowledge','connections','schedules','usage','settings']:
-                    await page.locator(f'#nav [data-nav="{route}"]').click()
+                    await navigate(page, route)
                     await page.wait_for_function('(route)=>state.page===route && !document.querySelector(".skeleton")',arg=route)
                     await page.evaluate('document.fonts.ready')
                     assert await page.locator('.error').count()==0,await page.locator('main').inner_text()
                     path=output/(route+'.png')
                     await page.screenshot(path=str(path),full_page=True)
                     shots.append(path.name)
-                await page.locator('#nav [data-nav="agents"]').click()
+                await navigate(page, 'agents')
                 await page.get_by_role('button',name='通用助手',exact=True).click()
                 await page.get_by_role('button',name='保存草稿',exact=True).click()
                 await page.get_by_role('button',name='发布',exact=True).click()
@@ -127,6 +144,10 @@ async def smoke(output, expect_docker=None):
                 await page.unroute('**/api/v1/sessions')
                 assert await page.locator('#messageText').input_value()=='draft must survive async refresh'
                 sid_a=await page.evaluate('state.sid')
+                await page.locator('#sessionSearch').fill('no matching synthetic session')
+                assert await page.locator('#sessionList [data-session]:visible').count()==0
+                await page.locator('#sessionSearch').fill('')
+                assert await page.locator(f'#sessionList [data-session="{sid_a}"]').is_visible()
                 # Publishing v2 must not rebind this existing v1 conversation.
                 await page.evaluate('(id)=>post("agents/"+id+"/publish")',agent_id)
                 await page.locator('#messageText').fill('continue fixed version')
@@ -146,7 +167,8 @@ async def smoke(output, expect_docker=None):
                 await page.locator('#messageText').fill('background session request')
                 await page.get_by_role('button',name='发送 ↑',exact=True).click()
                 await asyncio.wait_for(posted.wait(),5)
-                await page.evaluate('newSession()')
+                await page.get_by_role('button',name='+ 新建会话',exact=True).click()
+                await page.wait_for_function('(sid)=>state.sid!==sid && !document.querySelector(".skeleton")',arg=sid_a)
                 sid_b=await page.evaluate('state.sid')
                 await page.locator('#messageText').fill('B draft must stay')
                 post_release.set()
@@ -182,13 +204,13 @@ async def smoke(output, expect_docker=None):
                 assert await page.locator('#messageText').input_value()=='draft must survive async refresh'
                 # Force a transport failure, verify an actionable error, then retry.
                 await page.route('**/api/v1/usage',lambda route:route.fulfill(status=503,content_type='application/json',body='{"code":"synthetic_failure"}'))
-                await page.locator('#nav [data-nav="usage"]').click()
+                await navigate(page, 'usage')
                 await page.get_by_text('加载失败',exact=True).wait_for()
                 await page.unroute('**/api/v1/usage')
                 await page.get_by_role('button',name='重试',exact=True).click()
                 await page.locator('.skeleton').first.wait_for(state='detached')
                 assert await page.locator('.error').count()==0
-                await page.locator('#nav [data-nav="chat"]').click()
+                await navigate(page, 'chat')
                 await page.locator('#messageText').wait_for()
                 # A real offline/online cycle forces EventSource reconnect/catch-up.
                 await context.set_offline(True)
@@ -207,11 +229,20 @@ async def smoke(output, expect_docker=None):
                 result=await asyncio.wait_for(app.service._queues[failed['session_id']].wait_for(failed['task_id']),10)
                 assert not result.ok and result.code=='LLM-303'
                 await page.evaluate('async sid=>{state.sid=sid;await go("chat")}',failed['session_id'])
+                await page.locator('.run-notice [data-run-error]').wait_for()
+                assert 'LLM-303' in await page.locator('.run-notice').inner_text()
+                assert await page.locator('#inspectorToggle').get_attribute('aria-expanded')=='false'
+                await page.locator('#inspectorToggle').wait_for()
+                if await page.locator('#inspectorToggle').get_attribute('aria-expanded')=='false':
+                    await page.locator('#inspectorToggle').click()
                 await page.locator('.inspector [data-run-error]').wait_for()
                 assert 'LLM-303' in await page.locator('.inspector').inner_text()
                 assert await page.locator('.inspector .badge.red').inner_text()=='失败'
                 await page.reload()
                 await page.evaluate('async sid=>{state.sid=sid;await go("chat")}',failed['session_id'])
+                await page.locator('#inspectorToggle').wait_for()
+                if await page.locator('#inspectorToggle').get_attribute('aria-expanded')=='false':
+                    await page.locator('#inspectorToggle').click()
                 await page.locator('.inspector [data-run-error]').wait_for()
                 assert '100%' not in await page.locator('.inspector').inner_text()
                 await page.screenshot(path=str(output/'failed-inspector.png'),full_page=True)
@@ -222,7 +253,7 @@ async def smoke(output, expect_docker=None):
                     runs_started.set();await asyncio.wait_for(runs_release.wait(),5)
                     await route.continue_()
                 await page.route('**/api/v1/runs',hold_runs)
-                await page.locator('#nav [data-nav="runs"]').click()
+                await navigate(page, 'runs')
                 await asyncio.wait_for(runs_started.wait(),5)
                 assert await page.evaluate('state.page==="runs" && !!document.querySelector(".skeleton")')
                 runs_release.set()
@@ -231,7 +262,7 @@ async def smoke(output, expect_docker=None):
                 assert 'LLM-303' in await page.locator('main').inner_text()
                 await page.unroute('**/api/v1/runs')
                 await page.screenshot(path=str(output/'failed-runs.png'),full_page=True)
-                await page.locator('#nav [data-nav="dashboard"]').click()
+                await navigate(page, 'dashboard')
                 await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 await page.locator('[data-run-error]').first.wait_for()
                 dashboard=await app.service.platform.dashboard()
@@ -239,14 +270,17 @@ async def smoke(output, expect_docker=None):
                 await page.screenshot(path=str(output/'failed-dashboard.png'),full_page=True)
                 shots.extend(['failed-inspector.png','failed-runs.png','failed-dashboard.png'])
                 await page.set_viewport_size({'width':1280,'height':900})
-                await page.locator('#nav [data-nav="dashboard"]').click()
+                await navigate(page, 'dashboard')
                 await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 assert await page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 await page.screenshot(path=str(output/'desktop-1280.png'),full_page=True)
                 await page.set_viewport_size({'width':390,'height':844})
-                await page.locator('#nav [data-nav="dashboard"]').click()
+                await navigate(page, 'dashboard')
                 await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')
                 await page.screenshot(path=str(output/'mobile.png'),full_page=True)
+                from scripts.platform_management_contract import verify_management
+                await verify_management(browser,page,app,f'http://127.0.0.1:{port}',output)
+                shots.extend(['chat-initial.png','chat-inspector-open.png','chat-1280.png','chat-mobile.png','account-team.png','team-memory.png','model-probe-ui-synthetic.png','workflow-failed.png','chat-input-failure.png','desktop-1280.png','mobile.png','subtask-failed.png','question-answer.png','workflow-browser-closed.png'])
                 await browser.close()
                 assert not errors,errors
     finally:
@@ -254,10 +288,11 @@ async def smoke(output, expect_docker=None):
         await asyncio.wait_for(task,10)
         await app.service.shutdown()
         (output/'browser-console.json').write_text(json.dumps({'errors':errors,'console':console},ensure_ascii=False,indent=2),encoding='utf-8')
-    report={'status':'passed','screenshots':shots,'model':'deterministic, not a real model',
-        'checks':['twelve rendered pages','empty states','create/publish/test correct Agent','real queue message roundtrip','SSE offline reconnect','API failure and retry','draft refresh barrier','session attachment ownership','fixed version after publication','in-flight request session fence','clear attachment preserves draft','safe dates','Ctrl+K','mobile viewport'],
+    report={'status':'passed','screenshots':sorted(p.name for p in output.glob('*.png')),'model':'deterministic, not a real model',
+        'checks':['twelve rendered pages','empty states','create/publish/test correct Agent','real queue message roundtrip','SSE offline reconnect','API failure and retry','draft refresh barrier','session attachment ownership','fixed version after publication','in-flight request session fence','clear attachment preserves draft','safe dates','Ctrl+K','mobile viewport','two-column default chat; management via settings; inspector opt-in; responsive chat', 'default chat and settings navigation','Enter/Shift+Enter/IME and duplicate submission','failed send preserves draft','account provision/login/logout','team memory write/read','synthetic model probe confirmation and duplicate guard','persistent workflow failure'],
         'uncaught_errors':len(errors),'browser':Path(executable).name,'rendered_cjk_fonts':fonts,'screenshots_wait_for_target_page':True,'http_contracts':[204,404,409,422,503],'sandbox_health':health,'viewport':'1440x900 and 1280x900',
-        'commit':__import__('subprocess').check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
+        'commit':__import__('subprocess').check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
+        'working_tree_dirty':bool(__import__('subprocess').check_output(['git','status','--porcelain'],cwd=ROOT,text=True).strip())}
     (output/'browser-summary.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps(report,ensure_ascii=False))
 

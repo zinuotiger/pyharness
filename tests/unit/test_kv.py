@@ -39,6 +39,15 @@ def test_persistence_across_instances(tmp_path):
     assert raw == {"note": "跨实例存活"}
 
 
+def test_corruption_remains_fail_closed_on_repeated_reads(tmp_path):
+    path=tmp_path/'broken.kv.json'
+    path.write_text('{broken',encoding='utf-8')
+    kv=SessionKV(path,session_id='synthetic')
+    for _ in range(2):
+        with pytest.raises(PyHError,match='PERS-221'):
+            kv.apply_op('get',key='preference')
+
+
 def test_empty_and_ops(tmp_path):
     kv = _kv(tmp_path)
     assert kv.apply_op("keys") == "(空)"

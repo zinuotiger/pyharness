@@ -38,6 +38,44 @@ def summary(value, limit=800):
     return redact_text(text)[:limit]
 
 
+def subtask_history(session_id, events, active_children=()):
+    """Read delegation facts without restarting children or trusting summaries as instructions."""
+    rows = {}
+    active = {row['sub_id'] for row in active_children}
+    anchors = {}
+    task = None
+    for event in events:
+        p = event.payload
+        if event.type == 'segment.start':
+            task = p.get('task_id')
+        anchors[event.seq] = getattr(event, 'task_id', None) or task
+        if event.type == 'subagent.spawned':
+            child = p['sub_id']
+            parent_task = anchors.get(p.get('parent_seq')) or task
+            rows[child] = {
+                'session_id': child, 'parent_session_id': session_id,
+                'parent_run_id': f'{session_id}~{parent_task}' if parent_task else None,
+                'task': summary(p.get('task', ''), 800), 'status': 'running',
+                'created_at': event.ts, 'finished_at': None, 'summary': '',
+                'error_code': None,
+            }
+        child = p.get('sub_id')
+        if event.type == 'system.cancelled' and str(p.get('what', '')).startswith('subagent:'):
+            child = p['what'].removeprefix('subagent:')
+        if child in rows and rows[child]['status'] == 'running':
+            status = {'subagent.joined':'completed', 'subagent.failed':'failed',
+                      'system.cancelled':'cancelled'}.get(event.type)
+            if status:
+                rows[child].update(status=status, finished_at=event.ts,
+                                   summary=summary(p.get('summary', '')))
+        if event.type == 'segment.end':
+            task = None
+    for child, row in rows.items():
+        if row['status'] == 'running' and child not in active:
+            row.update(status='failed', error_code='runtime_interrupted')
+    return list(rows.values())
+
+
 def project(session_id, events, live_tasks=()):
     runs, spans, steps, approvals = {}, [], {}, {}
     bindings, active, tool_spans = {}, [], {}

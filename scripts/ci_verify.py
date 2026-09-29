@@ -431,9 +431,13 @@ def entry(mode: str) -> None:
                         if not window.events.loaded.wait(15):
                             raise RuntimeError('WebView page did not load')
                         deadline=time.monotonic()+15
+                        chat_seen=False
                         while time.monotonic()<deadline:
+                            if not chat_seen and window.evaluate_js('!!document.querySelector("#compose")'):
+                                chat_seen=True
+                                window.evaluate_js('go("dashboard")')
                             text=window.evaluate_js('document.querySelector("main")?.innerText || ""')
-                            if text and '你好' in text:
+                            if chat_seen and text and '你好' in text:
                                 verdict.append('passed');return
                             time.sleep(.2)
                         raise RuntimeError('Platform dashboard did not render in WebView')

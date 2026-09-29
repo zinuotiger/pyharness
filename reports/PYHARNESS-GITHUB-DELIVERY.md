@@ -25,3 +25,5 @@
 ## Python 3.11 远程回归修复
 
 首轮 PR workflow 的 Ubuntu Python 3.11 完整测试暴露 4 个新增测试时序失败，其余 4 个正式 job 通过。相同失败在本地独立 Python 3.11 环境复现：外层 `asyncio.wait_for` 额外调度任务，导致快速子任务在 join 登记前已经回收，或“尚未开始”的工作流先于取消调用执行。两个测试文件改用现有 `join(timeout=5)` 与 `asyncio.timeout(5)`，保留失败码、成功结果、取消状态、零 Run 和重启历史的全部断言。相关 19 项测试在 Python 3.11 通过；修复后本地 Python 3.11 完整测试 2596 passed / 41 skipped、Coverage 83.70%，Python 3.13 完整测试 2596 passed / 41 skipped、Coverage 83.69%。业务实现、测试数量及正式 CI 门禁均未改变。最终跨平台结果以修复提交对应的 PR workflow 为准。
+
+第二次 PR workflow 的三个完整测试步骤通过，但 Ubuntu Python 3.11 浏览器验收发现 `platform_management_contract.py` 同样通过外层 `wait_for` 延迟 join 登记。第二轮修复仅将这一浏览器验收调用改为现有 `join(timeout=10)`；保留必须出现 `LLM-303`、子任务失败历史及页面失败状态的断言。业务代码和 CI 配置仍未改变。修复后完整浏览器 smoke 在本地 Python 3.11 和 3.13 均通过：12 页面、各 31 张截图、未捕获 JavaScript 错误为 0。最终远程结果保存在最终提交的交付清单和 PR 正文中；本轮远程修复上限为两轮。

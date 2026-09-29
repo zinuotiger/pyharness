@@ -107,7 +107,9 @@ async def verify_management(browser, page, app, base, output):
     child=await app.service.spawn_subagent(sid,'synthetic child failure')
     manager=app.service._engines[sid].subagent
     try:
-        await asyncio.wait_for(manager.join(child),10)
+        # Join must capture the live handle before a fast child is reaped;
+        # an outer wait_for schedules another task on Python 3.11.
+        await manager.join(child,timeout=10)
         raise AssertionError('The configured failing adapter must fail the child')
     except PyHError as error:
         assert error.code=='LLM-303'

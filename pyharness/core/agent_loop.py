@@ -245,13 +245,23 @@ class AgentLoop:
         sysprompt = getattr(ctx, "sysprompt", None)
         if sysprompt is not None:
             hist = sysprompt.assemble(hist, ctx=ctx)
+        runtime = getattr(ctx, 'platform_runtime', None)
+        if runtime is not None:
+            hist = runtime.evidence_messages(hist,ctx)
+            from pyharness.application.vision import model_messages
+            hist = await model_messages(runtime, hist, ctx)
+        vision_input = any(isinstance(m.get('content'), list) and any(
+            part.get('type') == 'image_url' for part in m['content'] if isinstance(part, dict)) for m in hist)
         # F027:ctx.streaming(桌面 SSE)走 chat_stream——chunk 仅上总线不入日志,
         # 聚合后与 chat 同型返回(append-only 不变式不受影响);CLI/单测默认非流式
         chat_fn = ("chat_stream" if getattr(ctx, "streaming", False) else "chat")
         from pyharness.core.llm_diagnostics import model_call
         with model_call("main_agent"):
             resp = await getattr(ctx.llm, chat_fn)(
-                hist, tools=ctx.tools.schemas_for(ctx.scope), ctx=ctx)
+                hist, tools=[] if vision_input else ctx.tools.schemas_for(ctx.scope), ctx=ctx)
+        if vision_input and resp.tool_calls:
+            from pyharness.errors import PyHError
+            raise PyHError('vision_tools_not_allowed')
         # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""

@@ -46,21 +46,34 @@ def _with_message_origin(log_: Any, msgs: list[dict]) -> list[dict]:
 
     普通用户输入同样写 ``origin=None``(键恒在,便于前端统一判断)。
     """
-    origins = [getattr(e, "origin", None) for e in log_.events_after(0)
-               if getattr(e, "type", "") == "user.message"]
+    events = [e for e in log_.events_after(0) if e.type == 'user.message']
+    origins = [getattr(e, 'origin', None) for e in events]
+    answers = [e for e in log_.events_after(0) if e.type == 'agent.message']
+    j = 0
     out: list[dict] = []
     k = 0
     for m in msgs:
         row = dict(m)
         if row.get("role") == "user":
             row["origin"] = origins[k] if k < len(origins) else None
+            if k < len(events):
+                row['seq'] = events[k].seq
+                row['artifact_ids'] = (events[k].payload.get('meta') or {}).get('platform', {}).get('artifact_ids', [])
             k += 1
+        elif row.get('role') == 'assistant' and row.get('content') and not row.get('tool_calls'):
+            if j < len(answers): row['seq'] = answers[j].seq
+            j += 1
         out.append(row)
     if k != len(origins):                  # 不变式破损:宁可少标记也不错标
         log.warning("user.message 与派生 user 消息数不一致(events=%d msgs=%d)",
                     len(origins), k)
         for row in out:
             row.pop("origin", None)
+            row.pop('seq', None)
+            row.pop('artifact_ids', None)
+    if j != len(answers):
+        for row in out:
+            if row.get('role') == 'assistant': row.pop('seq', None)
     return out
 
 
@@ -764,8 +777,14 @@ class ApplicationService:
         msgs = log_.derive_messages()
         stats_fn = getattr(log_, "stats", None)
         to_seq = int((stats_fn().get("seq") or 0)) if callable(stats_fn) else 0
+        projected = _with_message_origin(log_, msgs)
+        records = {r['artifact_id']:r for r in (await self.platform.artifacts())['artifacts']
+                   if r['session_id'] == sid}
+        for row in projected:
+            row['attachments'] = [{k:records[i][k] for k in ('artifact_id','filename','media_type','size','preview_type')}
+                                  for i in row.pop('artifact_ids', []) if i in records]
         return {"sid": sid, "after_seq": int(after_seq), "to_seq": to_seq,
-                "messages": _with_message_origin(log_, msgs)}
+                "messages": projected}
 
     @admitted
     async def session_timeline(self, sid: str, after_seq: int = 0,
@@ -1163,6 +1182,15 @@ class ApplicationService:
         value=body.get('value')
         if op not in {'get','set','delete','keys'}:
             raise_code('EVT-100',field='memory.op')
+        from pyharness.application.accounts import Accounts, current_actor
+        actor = current_actor.get()
+        if actor is not None and actor.get('tenant') != self.tenant_id:
+            raise_code('GRD-403', reason='memory_tenant_mismatch')
+        if Accounts.manages_tenant(self._storage_root(), self.tenant_id):
+            roles = Accounts(self._storage_root()).teams(actor['user_id']) if actor else []
+            role = next((r['role'] for r in roles if r['id']==self.tenant_id),None)
+            if role is None or (op in {'set','delete'} and role!='owner'):
+                raise_code('GRD-403', reason='team_memory_read_only')
         if op!='keys' and (not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',key)):
             raise_code('EVT-100',field='memory.key')
         if op=='set' and (not isinstance(value,str) or len(value)>4096):
@@ -1289,6 +1317,10 @@ class ApplicationService:
                 if self.tenant_id == "default" else (self.tenant_root() / "plugins")) / pid
         results: list[dict] = []
         for sid, spine in list(self._engines.items()):
+            if getattr(spine, 'platform_runtime', None) is not None:
+                results.append({'session': str(sid), 'ok': False,
+                                'error': 'Platform Agent 禁止宿主插件生命周期操作'})
+                continue
             mgr = spine.plugins
             try:
                 if kind == "load":

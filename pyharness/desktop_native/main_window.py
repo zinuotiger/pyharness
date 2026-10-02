@@ -53,6 +53,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.skill_registry_url.setText(controller.default_registry_url)
         self._wire_signals()
+        from pathlib import Path
+        from .appearance import NativeAppearance
+        storage = getattr(controller.service, '_storage_root', None)
+        appearance_path = Path(storage())/'appearance'/'native.ini' if callable(storage) else None
+        self.appearance = NativeAppearance(self, appearance_path)
 
         self._interaction_timer = QTimer(self)
         self._interaction_timer.timeout.connect(self._poll_interactions)
@@ -908,5 +913,7 @@ class MainWindow(QMainWindow):
                 self._seen_asks.add(key)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.appearance.destroy()
+        self._interaction_timer.stop()
         self._spawn(self.controller.close())
         super().closeEvent(event)

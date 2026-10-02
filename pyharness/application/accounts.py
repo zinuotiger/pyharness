@@ -9,9 +9,19 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager, closing
+from contextvars import ContextVar
 from pathlib import Path
 
 from pyharness.core.tenant_settings import normalize_tenant_id
+
+# Request submission identity only; queued runners rebind it from their own
+# server-authored task event, never from the queue pump's inherited context.
+current_actor = ContextVar('pyharness_account_actor', default=None)
+
+
+def public_actor(account):
+    return ({'user_id':account['user_id'],'tenant':account['tenant']}
+            if account else None)
 
 
 class AccountError(ValueError):

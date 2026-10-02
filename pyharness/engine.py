@@ -1076,6 +1076,8 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
         # 不跨会话串。异常/取消路径经 finally 还原。
         prev_task_id = getattr(ag_ctx, "task_id", None)
         ag_ctx.task_id = getattr(task, "id", None)
+        from pyharness.application.accounts import current_actor
+        actor_token = current_actor.set((env.payload.get('meta') or {}).get('platform', {}).get('actor'))
         # KF-C(A4/R24):把**框架侧**"本轮来源"提到 ctx —— 到点触发那一轮此前**无任何
         # 通道**告知模型"这是定时触发" ⇒ 模型只会复述任务状态("提醒已设好"),而不是
         # 产出提醒本身。取值只取 `task.meta.source`(**受控**:由 schedule._fire 写入),
@@ -1090,7 +1092,10 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                 res = None
                 execution_raised = False
                 try:
-                    res = await asyncio.wait_for(loop.wake(env, ctx=ag_ctx),
+                    async def governed_turn():
+                        await platform_runtime.prepare_evidence(env,ag_ctx)
+                        return await loop.wake(env,ctx=ag_ctx)
+                    res = await asyncio.wait_for(governed_turn(),
                         timeout=platform_runtime.definition.timeout)
                     if res is not None and res.reason == "complete":
                         await platform_runtime.finish(ag_ctx)
@@ -1105,6 +1110,7 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
                             raise
                         log.warning("cleanup after failed execution: %s", type(cleanup_error).__name__)
         finally:
+            current_actor.reset(actor_token)
             ag_ctx.task_id = prev_task_id
             ag_ctx.turn_source = prev_src
         # F042/#7 自动标题:run 正常完成后命名一次(幂等;LLM 失败静默留空)

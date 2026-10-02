@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def utcnow() -> str:
@@ -44,6 +44,7 @@ class AgentDefinition(Model):
     mcp_connections: list[str] = Field(default_factory=list, max_length=20)
     skills: list[str] = Field(default_factory=list, max_length=30)
     knowledge_sources: list[str] = Field(default_factory=list, max_length=30)
+    require_evidence: bool = False
     permission_policy: Literal['strict', 'standard'] = 'strict'
     sandbox_profile: SandboxProfile = Field(default_factory=SandboxProfile)
     budget: Budget = Field(default_factory=Budget)
@@ -53,6 +54,12 @@ class AgentDefinition(Model):
     output_schema: dict = Field(default_factory=dict)
     status: Literal['draft', 'published', 'deprecated'] = 'draft'
     current_version: int = Field(default=0, ge=0)
+
+    @field_validator('approval_rules')
+    @classmethod
+    def validate_approval_rules(cls, rules):
+        from pyharness.application.approval_policy import validate_rules
+        return validate_rules(rules)
 
 
 class AgentVersion(Model):
@@ -187,3 +194,4 @@ class RunRequest(Model):
     agent_version: int | None = Field(default=None,ge=1)
     retry_count: int = Field(default=0,ge=0,le=1)
     artifact_ids: list[str] = Field(default_factory=list,max_length=10)
+    use_vision: bool = False

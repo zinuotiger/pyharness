@@ -58,6 +58,30 @@ def mount_platform(desktop):
     async def session_metadata(sid: str, body: dict=Body(...)):
         return await service().session_metadata(sid, body)
 
+    @router.get('/history/search')
+    async def history_search(q:str, session_id:str | None=None):
+        return await service().history_search(q,session_id)
+
+    @router.post('/sessions/{sid}/messages/{seq}/edit')
+    async def edit_message(sid:str,seq:int,body:dict=Body(...)):
+        return await service().edit_message(sid,seq,body)
+
+    @router.post('/sessions/{sid}/messages/{seq}/feedback')
+    async def feedback(sid:str,seq:int,body:dict=Body(...)):
+        return await service().feedback(sid,seq,body)
+
+    @router.get('/sessions/{sid}/activity')
+    async def activity(sid:str):
+        return await service().activity(sid)
+
+    @router.post('/sessions/{sid}/subagents/{ident}/cancel')
+    async def cancel_subagent(sid:str,ident:str):
+        return {'ok':await desktop.service.cancel_subagent(sid,ident)}
+
+    @router.post('/sessions/{sid}/jobs/{ident}/cancel')
+    async def cancel_job(sid:str,ident:str):
+        return {'ok':await desktop.service.cancel_job(sid,ident)}
+
     @router.get('/runs')
     async def runs():
         return await service().runs()

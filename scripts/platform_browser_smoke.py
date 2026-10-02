@@ -280,6 +280,8 @@ async def smoke(output, expect_docker=None):
                 await page.screenshot(path=str(output/'mobile.png'),full_page=True)
                 from scripts.platform_management_contract import verify_management
                 await verify_management(browser,page,app,f'http://127.0.0.1:{port}',output)
+                from scripts.platform_theme_contract import verify_theme_and_attachments
+                await verify_theme_and_attachments(browser,app,f'http://127.0.0.1:{port}',output)
                 shots.extend(['chat-initial.png','chat-inspector-open.png','chat-1280.png','chat-mobile.png','account-team.png','team-memory.png','model-probe-ui-synthetic.png','workflow-failed.png','chat-input-failure.png','desktop-1280.png','mobile.png','subtask-failed.png','question-answer.png','workflow-browser-closed.png'])
                 await browser.close()
                 assert not errors,errors

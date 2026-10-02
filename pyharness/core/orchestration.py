@@ -116,11 +116,14 @@ async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,
                                        actor="system", sync=True)
         seg_start = int(getattr(seg_env, "seq", 0) or 0)
     try:
-        if child_runtime is None:
+        if ctx.platform_runtime is None:
             result = await loop.wake(env, ctx=ctx)
         else:
-            result = await asyncio.wait_for(loop.wake(env,ctx=ctx),child_runtime.definition.timeout)
-            if getattr(result,'reason',None)=='complete':
+            async def governed_turn():
+                await ctx.platform_runtime.prepare_evidence(env,ctx)
+                return await loop.wake(env,ctx=ctx)
+            result = await asyncio.wait_for(governed_turn(),ctx.platform_runtime.definition.timeout)
+            if child_runtime is not None and getattr(result,'reason',None)=='complete':
                 await child_runtime.finish(ctx)
     finally:
         if child_runtime is not None:
@@ -277,8 +280,11 @@ class EngineSubagentRunner:
         self.approval_providers[env.sub_id] = approval
         self.ask_providers[env.sub_id] = ask
         try:
+            if env.scope is None:
+                from pyharness.errors import PyHError
+                raise PyHError('GRD-403', ctx={'reason':'child_scope_unavailable'})
             result, start_seq = await _run_on_session(
-                self.spine, env.session, env.scope or getattr(self.spine, "scope", None),
+                self.spine, env.session, env.scope,
                 env.spec.task, task_id=f"subagent:{env.sub_id}",
                 origin=f"subagent:{env.sub_id}", owner="system",
                 depth=int(getattr(env.spec, "depth", 0)), approval=approval, ask=ask)
@@ -313,12 +319,16 @@ class EngineSubagentRunner:
             raise
         finally:
             try:
-                await approval.aclose()
+                from pyharness.core import proc
+                await asyncio.to_thread(proc.close_session, env.sub_id)
             finally:
-                self.approval_providers.pop(env.sub_id, None)
-                self.ask_providers.pop(env.sub_id, None)
-                if getattr(env, 'sub_id', '') in self._stores:
-                    self.close_child(env.sub_id)
+                try:
+                    await approval.aclose()
+                finally:
+                    self.approval_providers.pop(env.sub_id, None)
+                    self.ask_providers.pop(env.sub_id, None)
+                    if getattr(env, 'sub_id', '') in self._stores:
+                        self.close_child(env.sub_id)
 
 
 

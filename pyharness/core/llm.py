@@ -661,6 +661,26 @@ class OpenAICompatAdapter(LLMAdapter):
         """本请求 llm 配置段(ctx.config.llm → 构造 cfg → L1)。"""
         return _llm_cfg_from_ctx(ctx, self._cfg)
 
+    def _output_limit(self, ctx: Any, configured: int) -> int:
+        """Clamp Platform requests to remaining declared output allowance.
+
+        This bounds the submitted generation parameter, not provider billing.
+        The existing sequential run owns its counters; other callers retain
+        their existing limit and budget gate.
+        """
+        runtime = getattr(ctx, 'platform_runtime', None)
+        if runtime is None:
+            return configured
+        counters = getattr(ctx, 'counters', None)
+        if counters is None:
+            from pyharness.errors import raise_code
+            raise_code('CFG-601', reason='platform_usage_counter_missing')
+        remaining = runtime.definition.budget.output_tokens - counters.task_total().out_tokens
+        if remaining <= 0:
+            from pyharness.core.scope import BudgetExhausted
+            raise BudgetExhausted('Platform output token budget exhausted')
+        return min(configured, remaining)
+
     @staticmethod
     def _first_message(raw: Any) -> tuple:
         """choices[0].message + finish_reason;choices 空数组 = 内容过滤 → LLM-304(不回空)。"""
@@ -684,7 +704,7 @@ class OpenAICompatAdapter(LLMAdapter):
         req = {"model": self.model, "messages": list(messages),
                "tools": tools_clean or None,    # 无工具整字段省略在传输层(wire 规则)
                "temperature": cfg_llm.temperature,  # 0-1.5(越窗已在配置层 CFG-601 拒)
-               "max_tokens": cfg_llm.max_tokens}    # 单次输出上限(默认 4096)
+               "max_tokens": self._output_limit(ctx, cfg_llm.max_tokens)}
         request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
                                                                  tools), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
@@ -724,7 +744,7 @@ class OpenAICompatAdapter(LLMAdapter):
         tools_clean, name_map = _sanitize_tools(tools)   # 禁点号工具名清洗(DeepSeek)
         req = {"model": self.model, "messages": list(messages),
                "tools": tools_clean or None,
-               "temperature": cfg_llm.temperature, "max_tokens": cfg_llm.max_tokens,
+               "temperature": cfg_llm.temperature, "max_tokens": self._output_limit(ctx, cfg_llm.max_tokens),
                "stream": True, "stream_options": {"include_usage": True}}
         request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
                                                                  tools), actor="llm", task_id=getattr(ctx, "task_id", None))

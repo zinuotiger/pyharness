@@ -52,16 +52,20 @@ def verify_install():
 
 
 def main():
+    global BASE
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base-dir', type=Path, default=BASE,
+                        help='Isolated trial root containing artifacts and evleven-venv')
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--verify', action='store_true')
     args = parser.parse_args()
+    BASE = args.base_dir.resolve()
     if not __debug__:
         raise RuntimeError('Do not run with -O')
     info = verify_install()
     data = args.data_dir.resolve()
     if not data.is_relative_to(BASE.resolve()):
-        raise RuntimeError('R1 data must remain under .work/integration-evleven')
+        raise RuntimeError('R1 data must remain under the isolated trial root')
     data.mkdir(parents=True, exist_ok=True)
     # Sanitize even when launched manually, not only through StdioTransport.
     keep = {'PATH', 'PATHEXT', 'COMSPEC', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR',

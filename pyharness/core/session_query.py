@@ -520,9 +520,10 @@ class SessionQueryIndex:
                     break
             if registry is not None:
                 # 查重:lookup 命中 = 已注册;抛 TLB-802 = 未注册(静默跳过登记)
-                already = False
+                has = getattr(registry, "has", None)
+                already = has(TOOL_NAME) if callable(has) else False
                 lookup = getattr(registry, "lookup", None)
-                if callable(lookup):
+                if not callable(has) and callable(lookup):
                     try:
                         lookup(TOOL_NAME)
                         already = True

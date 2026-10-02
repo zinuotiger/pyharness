@@ -66,6 +66,20 @@ class DesktopBridge:
             self._pending_calls.pop(call_id, None)
 
     # ---------------- js_api 方法(薄壳,无业务;前端 window.<name> 直调)
+    def _appearance_store(self):
+        from pathlib import Path
+        from pyharness.ui.appearance import FilePreferences
+        return FilePreferences(Path(self.app.service._storage_root())/'appearance'/'webview.json')
+
+    def appearance_load(self) -> dict:
+        return self._appearance_store().load()
+
+    def appearance_save(self, value: dict) -> bool:
+        return self._appearance_store().save(value)
+
+    def appearance_reset(self) -> bool:
+        return self._appearance_store().reset()
+
     def submit(self, sid: str, text: str) -> str:
         """前端回车/发送按钮 → create_message(门面写,无特权)。"""
         return self._run(self.app.create_message(str(sid), {"text": str(text)}))

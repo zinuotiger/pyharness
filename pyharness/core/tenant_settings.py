@@ -337,7 +337,7 @@ class TenantSettingsStore:
 
     def public_profile(self, profile: dict) -> dict:
         fields = ('id', 'label', 'provider', 'model', 'base_url', 'temperature',
-                  'max_tokens', 'fallback_models', 'has_api_key', 'created_at', 'updated_at')
+                  'max_tokens', 'fallback_models', 'supports_vision', 'has_api_key', 'created_at', 'updated_at')
         row = {k: profile[k] for k in fields if k in profile}
         # Compatibility for older metadata written before has_api_key existed.
         if not row.get("has_api_key") and row.get("api_key_source") == "encrypted":
@@ -384,6 +384,12 @@ class TenantSettingsStore:
         if not base_url.startswith(("http://", "https://")):
             raise_code("EVT-100", field="base_url",
                        advice="base_url 必须以 http:// 或 https:// 开头")
+        if 'supports_vision' in body and type(body['supports_vision']) is not bool:
+            raise_code('EVT-100', field='supports_vision')
+        if 'fallback_models' in body and (not isinstance(body['fallback_models'],list)
+                or len(body['fallback_models'])>10
+                or any(not isinstance(v,str) or not v.strip() for v in body['fallback_models'])):
+            raise_code('EVT-100',field='fallback_models')
         for name in ('api_key', 'api_key_ref'):
             if body.get(name) is not None and not isinstance(body[name], str):
                 raise_code('EVT-100', field=name, advice='credential must be a string')
@@ -434,8 +440,9 @@ class TenantSettingsStore:
                                                   current.get("temperature", 0.7))),
             "max_tokens": int((body or {}).get("max_tokens",
                                                current.get("max_tokens", 4096))),
-            "fallback_models": list((body or {}).get("fallback_models") or
-                                    current.get("fallback_models") or []),
+            "fallback_models": list(body.get("fallback_models",
+                                    current.get("fallback_models", []))),
+            "supports_vision": body.get('supports_vision', current.get('supports_vision', False)),
             "api_key_ref": api_key_ref,
             "has_api_key": bool(profile_id in secrets or api_key_ref),
             "created_at": current.get("created_at") or now,

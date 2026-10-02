@@ -415,8 +415,7 @@ class SubagentManager:
                          counters=getattr(parent_scope, "_counters", None),
                          bus=getattr(self, "_bus", None))
         except Exception as exc:                            # noqa: BLE001
-            log.warning("子 scope 构造失败 sub=%s: %s(降级 None)", sub_id, exc)
-            return None
+            raise PyHError('GRD-403', ctx={'reason': 'child_scope_unavailable'}) from exc
 
     # ============================================================ 事件写口
     async def _write_event(self, type_: str, payload: dict, *, actor: str,
@@ -784,7 +783,7 @@ class SubagentManager:
         # ④ 预算 = 父 × spec.budget_ratio(计入父任务:charge_hook 注入位,偏离 3)
         parent_scope = self._parent_scope
         if ctx is not None:
-            parent_scope = parent_scope or getattr(ctx, "scope", None)
+            parent_scope = getattr(ctx, "scope", None) or parent_scope
         limits = None
         if parent_scope is not None:
             limits = _scale_limits(getattr(parent_scope, "limits", None),
@@ -800,6 +799,12 @@ class SubagentManager:
             if callable(factory):
                 child_scope = factory(parent_scope, sub_id, child, limits,
                                       spec.deny_extra)
+            if parent_scope is not None and child_scope is None:
+                raise PyHError('GRD-403', ctx={'reason': 'child_scope_unavailable'})
+            if child_scope is not None and spec.tools_subset is not None:
+                permitted = set(spec.tools_subset)
+                inherited = getattr(child_scope.policy, 'allowed_tools', None)
+                child_scope.policy.allowed_tools = permitted if inherited is None else permitted & inherited
             anchor = self._parent_anchor(ctx)
             # 子会话引导(独立 seq=1;真实 JSONL 由装配注 persistence)
             await self._bootstrap_child(child, sub_id)
@@ -1069,7 +1074,13 @@ class SubagentSpawnProvider:
             notify=(True if args.get("notify") is None
                     else bool(args.get("notify"))))
         sub_id = await self._mgr.spawn(spec, ctx)       # 四道闸内聚(spawn 校验)
-        return await self._mgr.join(sub_id, ctx=ctx)    # 摘要 ≤2KB(join 到终态)
+        try:
+            return await self._mgr.join(sub_id, ctx=ctx)
+        except asyncio.CancelledError:
+            # This provider owns its synchronous child. Independent join timeouts
+            # still leave detached work alive; cancellation must not orphan it.
+            await self._mgr.cancel(sub_id, reason='parent-cancelled')
+            raise
 
 
 __all__ = [

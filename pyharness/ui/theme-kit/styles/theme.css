@@ -1,0 +1,18 @@
+[data-pyh-theme]{position:relative;isolation:isolate}
+[data-pyh-theme]>.phtheme-layer{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+[data-pyh-theme="tech-blue-particle"]{--blue:#66caff;--ink:#e7f3ff;--muted:#acc7de;--line:#305873;--bg:#071322;--card:#10263ceF;--green:#75edbb;--text:#e7f3ff;--panel:#10263c;--panel2:#16334a;--border:#305873;--accent:#66caff;background:radial-gradient(ellipse at 18% 2%,#164563 0,transparent 55%),#071322;color:var(--ink)}
+[data-pyh-theme="dark"]{--bg:#142034;--card:#1e2b41;--ink:#e1e9f6;--muted:#b1bed1;--line:#425570;--blue:#75b3ff;--text:#e1e9f6;--panel:#1e2b41;--panel2:#253951;--border:#425570;--accent:#75b3ff;color:var(--ink)}
+[data-pyh-theme="tech-blue-particle"] :is(.header,.sidebar,.footer,.workspace,.chat,.chat-left,.inspector,.session-panel,.chat-top,dialog,button,th,.quick button,.action,.search,pre){background:var(--card);color:var(--ink);border-color:var(--line)}
+[data-pyh-theme="dark"] :is(.chat,.chat-left,.inspector,.workspace,dialog,button,th,.quick button,.action,.search,pre){background:var(--card);color:var(--ink);border-color:var(--line)}
+[data-pyh-theme="tech-blue-particle"] :is(input,select,textarea){background:#0a1a2d;color:var(--ink);border-color:var(--line)}
+[data-pyh-theme="tech-blue-particle"] :is(.nav button.active,.session-panel button.active,.message.user){background:#173e5e;color:#e7f3ff}
+[data-pyh-theme="tech-blue-particle"] .primary{background:#145e8f;color:#fff;border-color:#66caff}
+[data-pyh-theme="tech-blue-particle"] :is(.badge,.version,.bubble,.search kbd){background:#203e57;color:#c5e7ff}
+[data-pyh-theme="tech-blue-particle"] :is(.error,.danger){color:#ffb0ba;background:#482031}
+[data-pyh-theme="tech-blue-particle"] :is(.warning,.badge.amber){color:#ffda82;background:#3c311d}
+[data-pyh-theme="tech-blue-particle"] .badge.green{color:#8df1bd;background:#143c31}
+[data-pyh-theme="tech-blue-particle"] .badge.blue{color:#a9dcff;background:#173e5e}
+[data-pyh-theme="tech-blue-particle"] :focus-visible{outline:2px solid #91dfff;outline-offset:3px}
+[data-pyh-theme] .phtheme-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:12px 0}
+[data-pyh-theme] .phtheme-controls label{display:flex;align-items:center;gap:6px}
+@media(prefers-reduced-motion:reduce){[data-pyh-theme] .skeleton{animation:none}}

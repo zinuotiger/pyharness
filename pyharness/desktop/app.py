@@ -344,10 +344,13 @@ class DesktopApp:
                 "advice": "会话租户归属不可得、存在歧义,或与请求声明的租户不符;"
                           "拒绝服务(既不按客户端自报头判定,也不跨租户改判)"})
         token = self._tenant_var.set(tenant)
+        from pyharness.application.accounts import current_actor, public_actor
+        actor_token = current_actor.set(public_actor(principal(request)))
         try:
             from .accounts_api import serve_with_quota
             return await serve_with_quota(self, request, call_next)
         finally:
+            current_actor.reset(actor_token)
             self._tenant_var.reset(token)
 
     # ------------------------------------------------ service compatibility
@@ -526,6 +529,7 @@ class DesktopApp:
         a = self.api
         a.add_api_route("/", self._index_page, methods=["GET"])
         a.add_api_route("/classic", self._index_page, methods=["GET"])
+        a.add_api_route('/assets/{asset_path:path}', self._appearance_asset, methods=['GET'])
         a.add_api_route("/api/sessions", self.create_session, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"],
@@ -797,6 +801,23 @@ class DesktopApp:
             log_ = await _await(self._surface_mgr().open_session(sid))
             self._logs[sid] = log_
             return log_
+
+    async def _appearance_asset(self, asset_path: str):
+        """Only package-owned appearance resources, never application data."""
+        from importlib.resources import files
+        from fastapi.responses import Response
+        parts = asset_path.split('/')
+        if (not parts or parts[0] not in {'theme-kit','host-adapters'}
+                or any(not p or p in {'.','..'} or '\\' in p or ':' in p for p in parts)):
+            return Response(status_code=404)
+        suffix=parts[-1].rsplit('.',1)[-1]
+        mime={'js':'text/javascript','css':'text/css','json':'application/json'}.get(suffix)
+        if mime is None:return Response(status_code=404)
+        try:
+            raw=files('pyharness.ui').joinpath(*parts).read_bytes()
+        except (OSError,ValueError):
+            return Response(status_code=404)
+        return Response(raw,media_type=mime,headers={'X-Content-Type-Options':'nosniff','Cache-Control':'no-cache'})
 
     async def _queue_for(self, sid: str, log_: Any) -> TaskQueue:
         """per-session TaskQueue(runner = per-session 真实引擎;真 LLM 已注册)。"""

@@ -64,18 +64,27 @@ def test_inv02_no_direct_conversation_entry_call():
 def test_inv02_loop_is_the_only_dynamic_entry_dispatcher():
     """INV-02(静态):`getattr(ctx.llm, <method>)` 动态派发**仅**允许在 agent_loop 内。
 
-    这是 agent-loop 调用对话出口的真实形态(`agent_loop.py:240-241`),也是
+    这是 AgentLoop.run_turn 调用对话出口的真实形态,也是
     "唯一合法调用方 = agent-loop"这一表述的**可验证实现形式**。
     """
     sites = []
     for p, src in _iter_sources():
-        for n in ast.walk(ast.parse(src)):
+        tree = ast.parse(src)
+        parents = {child: parent for parent in ast.walk(tree)
+                   for child in ast.iter_child_nodes(parent)}
+        for n in ast.walk(tree):
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == "getattr" and n.args
                     and isinstance(n.args[0], ast.Attribute)
                     and n.args[0].attr == "llm"):
-                sites.append(f"{p.relative_to(_ROOT).as_posix()}:{n.lineno}")
-    assert sites == ["pyharness/core/agent_loop.py:253"], (
+                owner = parents.get(n)
+                while owner is not None and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    owner = parents.get(owner)
+                sites.append((p.relative_to(_ROOT).as_posix(),
+                              owner.name if owner is not None else None,
+                              ast.dump(n.args[0])))
+    assert sites == [("pyharness/core/agent_loop.py", "run_turn",
+                      "Attribute(value=Name(id='ctx', ctx=Load()), attr='llm', ctx=Load())")], (
         "INV-02 违约:llm 门面的动态派发点不在 agent_loop 唯一位置 -> " + str(sites))
 
 

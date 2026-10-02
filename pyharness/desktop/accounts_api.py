@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from fastapi import Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pyharness.application.accounts import Accounts, AccountError
@@ -41,7 +43,13 @@ async def serve_with_quota(app, request, call_next):
             if not app.service.tenant_state()['active']:
                 return denied('tenant_model_profile_required',409)
         if path.startswith('/api/v1/agents') and request.method in ('POST','PUT'):
-            body = await request.json()
+            try:
+                raw = await request.body()
+                body = json.loads(raw) if raw else {}
+            except (ValueError, UnicodeDecodeError):
+                return denied('invalid_request',422)
+            if not isinstance(body,dict):
+                return denied('invalid_request',422)
             profile = body.get('sandbox_profile') or {}
             if isinstance(profile,dict) and profile.get('mode') == 'host_approved':
                 return denied('account_host_execution_forbidden')
@@ -92,6 +100,7 @@ def inspect_request(app, request):
                 if account['role'] == 'member' and not (
                     path in ('/api/account/logout','/api/v1/runs','/api/v1/sessions','/api/v1/artifacts')
                     or path.startswith('/api/asks/')
+                    or re.fullmatch(r'/api/v1/sessions/[^/]+/(messages/[0-9]+/(edit|feedback)|(subagents|jobs)/[^/]+/cancel)',path)
                     or (path.startswith('/api/v1/runs/') and path.endswith(('/cancel','/retry')))):
                     return denied('account_role_required')
             # Legacy global-management APIs were designed for the local operator.

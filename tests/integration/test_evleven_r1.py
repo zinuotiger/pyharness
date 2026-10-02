@@ -187,7 +187,7 @@ async def test_cancelled_inflight_request_retires_connection(data):
 
 def test_real_http_fresh_process_cross_session_memory(data):
     result = subprocess.run([sys.executable, str(ROOT/'scripts/evleven_integration.py'),
-        '--data-dir', str(data/'trial')], cwd=ROOT, capture_output=True, text=True,
+        '--base-dir', str(BASE), '--data-dir', str(data/'trial')], cwd=ROOT, capture_output=True, text=True,
         encoding='utf-8', timeout=120)
     (data/'trial-console.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     assert result.returncode == 0, result.stdout + result.stderr

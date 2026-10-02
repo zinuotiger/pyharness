@@ -465,6 +465,15 @@ class ToolExecutor:
         except PyHError as e:
             return await self._on_error(ctx, call, e.code, e.to_model_message())
         call = replace(call, defn=defn)                 # 挂契约(guard 读 danger 面)
+        runtime = getattr(ctx, 'platform_runtime', None)
+        validate_path = getattr(runtime, 'validate_file_call', None)
+        if callable(validate_path):
+            error = validate_path(call.name, call.raw_args, ctx)
+            if error:
+                result = await self._on_error(ctx, call, 'TLB-803', json.dumps(error, ensure_ascii=False))
+                if not error['recoverable']:
+                    raise PyHError('platform_workspace_path_denied')
+                return result
         # ---- 关1b 先验后跑(TLB-803 → 参数校验失败 summary;本函数立即返回,
         # 后续任何一行不执行 —— 畸形参数零调用,INV-06)
         try:

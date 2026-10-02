@@ -1,5 +1,13 @@
 # CFG.md — PyHarness 配置系统全量规范
 
+> 当前实现补充（B07）：七项仅接受兼容值，非默认值由 Settings 拒绝：
+> `loop.step_timeout_s=60`、`loop.tool_concurrency=1`、`loop.thread_pool_size=4`、
+> `security.sandbox.proc_mem_limit_mb=0`、`security.credentials.cache_ttl_s=300`、
+> `plugins.ctx_lazy=true`、`plugins.pre_activate=[storage.spill, credentials, storage.kv]`。
+> 这些兼容值不能证明统一 step 超时、共享线程池或凭据缓存已经接线。
+> 实际工具 timeout 和 Docker memory_mb 为独立控制。下文旧规格的可调范围对这七项
+> 不构成当前支持承诺。模型连接测试为有界生成，不使用 GET /models。
+
 > **类型**:配置系统完整规格 = PRD-Core F021 字段级展开:分层模型、全量配置目录、环境变量映射、校验、重载边界、配置安全;冲突以 PRD §7/NFR、SECURITY.md、DIS-SEAM.md 为准。
 > **版本**:v1.0 | **日期**:2026-09-06 | **读者**:作者 / AI 编码 Agent(照本文实现 `config.py`、`config` 子命令、`test_f021_config.py` 与安全 GWT)。中文,无 TS/TODO/占位。
 

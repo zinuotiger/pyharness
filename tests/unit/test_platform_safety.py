@@ -144,8 +144,11 @@ async def test_knowledge_remote_failure_and_switch(app,monkeypatch):
     p.knowledge_action('settings','provider',{'provider':row['connection_id']})
     async def unavailable(*a,**k): raise asyncio.TimeoutError()
     monkeypatch.setattr(RemoteRagKnowledgeProvider,'query',unavailable)
-    with pytest.raises(PyHError,match='knowledge_unavailable'): await p.query_knowledge('question')
+    with pytest.raises(PyHError,match='knowledge_timeout'): await p.query_knowledge('question')
     assert p.knowledge_list()['status']=='unavailable'
+    async def protocol_error(*a,**k): raise ValueError('invalid protocol')
+    monkeypatch.setattr(RemoteRagKnowledgeProvider,'query',protocol_error)
+    with pytest.raises(PyHError,match='knowledge_unavailable'): await p.query_knowledge('question')
     p.knowledge_action('settings','provider',{'provider':'exact_keyword'})
     assert not (await p.query_knowledge('question'))['answer_allowed']
 

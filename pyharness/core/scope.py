@@ -190,11 +190,13 @@ class ScopePolicy:
     # 仅对**读类**工具放行,写类一律仍拒;两层(g3 与 provider)同判。默认为空 = 无例外。
     read_extra_dirs: list[str] = field(default_factory=list)
     sandbox_level: str = "strict"                  # strict/basic/off(F054)
+    allowed_tools: Optional[set[str]] = None        # None inherits; empty permits none
 
     def model_dump(self) -> dict:
         """值拷贝序列化(ScopePolicy(**model_dump()) 可逆;快照/继承用)。"""
         return {"role": self.role,
                 "deny_tools": set(self.deny_tools),
+                "allowed_tools": None if self.allowed_tools is None else set(self.allowed_tools),
                 "danger_marks": [dict(m) for m in self.danger_marks],
                 "allowed_domains": set(self.allowed_domains),
                 "workspace_root": self.workspace_root,
@@ -305,6 +307,8 @@ class Scope:
         强同步,Provider 零执行(INV-05)。high 危险此处放行,转审批(F015)。"""
         self._ensure_bound()
         p = self.policy
+        if p.allowed_tools is not None and tool_name not in p.allowed_tools:
+            return False
         if tool_name in p.deny_tools:               # 显式禁止(只增,单调)
             return False
         domain = tool_name.split(".", 1)[0] if "." in tool_name else tool_name

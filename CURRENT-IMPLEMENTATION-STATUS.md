@@ -1,5 +1,15 @@
 # 当前实施状态
 
+当前任务为 B01–B24 与 U01–U10 的本地实现和验收，起始源码为
+`29b1bb80a69c1af72ea09643cb3d736c453dcbdb`。唯一当前状态源为
+[34 卡实施矩阵](PYHARNESS-34-CARD-MATRIX.md) 和 [实施报告](reports/PYHARNESS-34-CARD-IMPLEMENTATION.md)。
+本轮不 push、不更新 PR、不公开发布。真实模型与 Docker 已有合成计算器闭环证据；
+这不代表任意真实项目、视觉模型或生产级 SaaS 验收。
+
+以下保留的是 9 月 29 日交付任务的历史说明，不是当前任务授权、状态或验收数字。
+
+## 历史交付记录
+
 本轮任务：整理当前成果、验证最终代码、创建普通提交、推送现有功能分支并更新 Draft PR。起始提交为 `42c0307866696aa2ea7915b9defa051d45ac64d6`；PR base 为 `codex/pyharness-engineering-rc-20260924`。最终提交及对应 CI 结果以 [Draft PR](https://github.com/zinuotiger/pyharness/pull/2) 和仓库外交付摘要为准，不引用旧提交 CI 证明新改动通过。
 
 2026-09-28 已实际恢复 Web 启动，登录页返回 HTTP 200；独立启动复测也成功。此前工具拒绝未提供具体规则，不能再将其描述为持续启动禁令或已查明的自动审批问题。用户随后表示已在 Web 配置模型；本轮不读取该配置或 Key，也不发起供应商请求。这不是完整真实模型闭环通过证据。

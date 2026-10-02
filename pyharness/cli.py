@@ -588,6 +588,11 @@ async def _attach_engine(sh: ShellCtx) -> None:
     if log_ is None:
         raise_code("CYC-999", hint="引擎装配前无会话(chat/run/plan 应先开/建会话)")
     channel = "cli" if not getattr(sh, "headless", True) else None
+    # The bootstrap provider owns verdict subscriptions on this same bus.
+    # Close it before replacing it so only the runtime receives its verdicts.
+    bootstrap_approval = getattr(ctx, "approval", None)
+    if bootstrap_approval is not None:
+        await bootstrap_approval.aclose()
     await _eng.attach_engine_to_ctx(
         ctx, ctx.settings, log_=log_,
         sessions_dir=Path(getattr(getattr(ctx, "storage", None),

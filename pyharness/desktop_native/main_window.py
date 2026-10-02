@@ -912,8 +912,13 @@ class MainWindow(QMainWindow):
                 await self.controller.answer_ask(int(row["ask_id"]), choice=choice, text=text, sid=self.sid)
                 self._seen_asks.add(key)
 
-    def closeEvent(self, event: QCloseEvent) -> None:
+    def dispose(self) -> None:
+        """Detach GUI resources even when the event loop stops before close."""
         self.appearance.destroy()
         self._interaction_timer.stop()
+        self.hide()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.dispose()
         self._spawn(self.controller.close())
         super().closeEvent(event)

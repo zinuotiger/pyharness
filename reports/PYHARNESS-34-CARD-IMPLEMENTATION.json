@@ -31,7 +31,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -73,7 +73,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -116,7 +116,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -158,7 +158,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -203,7 +203,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/browser-summary.json"
@@ -247,7 +247,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -289,7 +289,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -335,7 +335,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/theme-attachment-summary.json"
@@ -378,7 +378,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/theme-attachment-summary.json"
@@ -397,14 +397,15 @@
       "status": "partial",
       "initial_behavior": "图片没有正式模型能力闸",
       "changes": [
-        "显式supports_vision；每轮检查真实runtime连接/模型/endpoint；重试保持附件；不支持能力时零图片出网"
+        "显式supports_vision；每轮检查真实runtime连接/模型/endpoint；重试保持附件；不支持能力时零图片出网",
+        "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留"
       ],
       "files": [
         "pyharness/application/vision.py",
         "pyharness/core/llm.py",
         "pyharness/application/platform_runtime.py"
       ],
-      "functional_impact": "显式supports_vision；每轮检查真实runtime连接/模型/endpoint；重试保持附件；不支持能力时零图片出网",
+      "functional_impact": "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -419,15 +420,20 @@
           "label": "final-full-v2",
           "exit_code": 0,
           "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
-      "limits": "现有shidongai视觉能力未声明；真实视觉供应商验收未执行，只有fake transport协议与拒绝边界",
-      "summary": "显式supports_vision；每轮检查真实runtime连接/模型/endpoint；重试保持附件；不支持能力时零图片出网",
+      "limits": "没有经过确认的真实视觉连接，因此未执行真实图像请求。本阶段未读取连接配置或Secret；沿用已记录的能力元数据，不推断当前供应商能力。",
+      "summary": "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留",
       "final_status": "partial",
       "evidence": [
         "evidence/B24/junit-full-v2.xml"
@@ -469,7 +475,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/browser-summary.json"
@@ -513,7 +519,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -553,7 +559,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -599,7 +605,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -643,7 +649,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -687,7 +693,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -706,13 +712,14 @@
       "status": "partial",
       "initial_behavior": "新Web行为缺当前浏览器证据",
       "changes": [
-        "现有Chrome真实页面/API、错误重试/SSE/草稿/附件/主题；12页36截图无未捕获JS"
+        "现有Chrome真实页面/API、错误重试/SSE/草稿/附件/主题；12页36截图无未捕获JS",
+        "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化"
       ],
       "files": [
         "scripts/platform_browser_smoke.py",
         "scripts/platform_theme_contract.py"
       ],
-      "functional_impact": "现有Chrome真实页面/API、错误重试/SSE/草稿/附件/主题；12页36截图无未捕获JS",
+      "functional_impact": "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -722,20 +729,28 @@
           "label": "browser-final",
           "exit_code": 0,
           "log": "logs/browser-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/browser-summary.json"
       ],
       "external_evidence": [],
-      "limits": "物理中文输入法、真实触屏未覆盖；合成composition事件不代替物理IME",
-      "summary": "现有Chrome真实页面/API、错误重试/SSE/草稿/附件/主题；12页36截图无未捕获JS",
+      "limits": "触屏探测为0；物理中文IME未完成。Computer Use因无法可靠确定Windows浏览器URL而停止，未换通道绕过；合成composition不代替真实IME。",
+      "summary": "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化",
       "final_status": "partial",
       "evidence": [
-        "evidence/B17/browser-final/browser-summary.json"
+        "evidence/B17/browser-final/browser-summary.json",
+        "final-partial-closure-20261003-024521/environment-probe.json",
+        "final-partial-closure-20261003-024521/browser-final/browser-summary.json",
+        "final-partial-closure-20261003-024521/chrome-probe-lifecycle.json"
       ]
     },
     {
@@ -744,13 +759,14 @@
       "status": "partial",
       "initial_behavior": "WebView主题与生命周期缺验证",
       "changes": [
-        "真实隐藏WebView2加载页面、桥接偏好、隐藏暂停和关闭服务；安装入口smoke"
+        "真实隐藏WebView2加载页面、桥接偏好、隐藏暂停和关闭服务；安装入口smoke",
+        "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过"
       ],
       "files": [
         "pyharness/desktop/bridge.py",
         "pyharness/desktop/launcher.py"
       ],
-      "functional_impact": "真实隐藏WebView2加载页面、桥接偏好、隐藏暂停和关闭服务；安装入口smoke",
+      "functional_impact": "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -765,20 +781,28 @@
           "label": "package-final",
           "exit_code": 0,
           "log": "logs/package-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B18/source-entry.json"
       ],
       "external_evidence": [],
-      "limits": "未操作物理窗口IME/高DPI/缩放；隐藏WebView不等于完整人工桌面验收",
-      "summary": "真实隐藏WebView2加载页面、桥接偏好、隐藏暂停和关闭服务；安装入口smoke",
+      "limits": "可见页DPR为2只是观察；最小化/恢复/缩放、文件对话框、物理IME及完整高DPI体验未完成。",
+      "summary": "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过",
       "final_status": "partial",
       "evidence": [
-        "evidence/B18/source-entry.json"
+        "evidence/B18/source-entry.json",
+        "final-partial-closure-20261003-024521/webview-visible-result.json",
+        "final-partial-closure-20261003-024521/webview-visible-foreground.jpg",
+        "final-partial-closure-20261003-024521/final-package-command.json"
       ]
     },
     {
@@ -787,13 +811,17 @@
       "status": "partial",
       "initial_behavior": "Native缺对应主题与动效策略",
       "changes": [
-        "接入QSS/受控Painter、QSettings及生命周期timer；offscreen窗口和安装入口"
+        "接入QSS/受控Painter、QSettings及生命周期timer；offscreen窗口和安装入口",
+        "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过"
       ],
       "files": [
+        "pyharness/desktop_native/app.py",
         "pyharness/desktop_native/appearance.py",
-        "pyharness/desktop_native/main_window.py"
+        "pyharness/desktop_native/main_window.py",
+        "tests/unit/test_native_disposal.py",
+        "tests/unit/test_remediation_delivery.py"
       ],
-      "functional_impact": "接入QSS/受控Painter、QSettings及生命周期timer；offscreen窗口和安装入口",
+      "functional_impact": "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -808,35 +836,46 @@
           "label": "package-final",
           "exit_code": 0,
           "log": "logs/package-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B19/source-entry.json"
       ],
       "external_evidence": [],
-      "limits": "物理IME、高DPI、多屏及人工长时间交互未覆盖",
-      "summary": "接入QSS/受控Painter、QSettings及生命周期timer；offscreen窗口和安装入口",
+      "limits": "单显示器，Qt DPR为2；物理输入、高DPI/多屏和完整人工窗口体验未验。",
+      "summary": "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过",
       "final_status": "partial",
       "evidence": [
-        "evidence/B19/source-entry.json"
+        "evidence/B19/source-entry.json",
+        "final-partial-closure-20261003-024521/native-visible-result.json",
+        "final-partial-closure-20261003-024521/native-visible.jpg",
+        "final-partial-closure-20261003-024521/native-disposal-root-cause.json",
+        "final-partial-closure-20261003-024521/final-package-command.json"
       ]
     },
     {
       "id": "B20",
       "title": "CLI 与 ACP 分开验收",
-      "status": "partial",
+      "status": "completed",
       "initial_behavior": "CLI和ACP结果不能混称",
       "changes": [
-        "安装包CLI中文流式JSONL/退出码；独立真实stdio initialize/chat/read_events/shutdown/重启游标与多会话"
+        "安装包CLI中文流式JSONL/退出码；独立真实stdio initialize/chat/read_events/shutdown/重启游标与多会话",
+        "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留"
       ],
       "files": [
         "pyharness/cli.py",
-        "pyharness/acp.py"
+        "pyharness/acp.py",
+        "tests/unit/test_cli_approval_ownership.py"
       ],
-      "functional_impact": "安装包CLI中文流式JSONL/退出码；独立真实stdio initialize/chat/read_events/shutdown/重启游标与多会话",
+      "functional_impact": "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -851,20 +890,29 @@
           "label": "final-full-v2",
           "exit_code": 0,
           "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
         "evidence/B20/installed-protocols.json"
       ],
-      "limits": "使用本地确定性HTTP传输；审批/Ctrl+C/断连由完整测试覆盖，未做物理终端或第三方ACP客户端人工验收",
-      "summary": "安装包CLI中文流式JSONL/退出码；独立真实stdio initialize/chat/read_events/shutdown/重启游标与多会话",
-      "final_status": "partial",
+      "limits": "使用确定性本地传输，未测试特定第三方ACP品牌客户端；独立真实stdio协议客户端已验证。ConPTY合并输出，stdout/stderr分离由独立pipe证据验证。",
+      "summary": "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留",
+      "final_status": "completed",
       "evidence": [
-        "evidence/B20/installed-protocols.json"
+        "evidence/B20/installed-protocols.json",
+        "final-partial-closure-20261003-024521/terminal-closure.json",
+        "final-partial-closure-20261003-024521/approval-root-cause.json",
+        "final-partial-closure-20261003-024521/final-approval-result.json",
+        "final-partial-closure-20261003-024521/conpty-cancel.json"
       ]
     },
     {
@@ -907,7 +955,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [
@@ -956,7 +1004,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -1005,7 +1053,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -1070,7 +1118,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -1114,7 +1162,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/theme-attachment-summary.json"
@@ -1155,7 +1203,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/appearance-dark.png",
@@ -1194,7 +1242,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/dashboard.png"
@@ -1240,7 +1288,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -1289,7 +1337,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/theme-attachment-summary.json"
@@ -1338,7 +1386,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B18/source-entry.json"
@@ -1406,7 +1454,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [],
       "external_evidence": [],
@@ -1450,7 +1498,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/appearance-classic.png",
@@ -1468,15 +1516,20 @@
     {
       "id": "U09",
       "title": "可选 Native Qt 主题适配",
-      "status": "completed",
+      "status": "partial",
       "initial_behavior": "Native主题无对应路径",
       "changes": [
-        "Qt QSS/Painter实现受控主题，独立timer和偏好重载"
+        "Qt QSS/Painter实现受控主题，独立timer和偏好重载",
+        "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归"
       ],
       "files": [
-        "pyharness/desktop_native/appearance.py"
+        "pyharness/desktop_native/app.py",
+        "pyharness/desktop_native/appearance.py",
+        "pyharness/desktop_native/main_window.py",
+        "tests/unit/test_native_disposal.py",
+        "tests/unit/test_remediation_delivery.py"
       ],
-      "functional_impact": "Qt QSS/Painter实现受控主题，独立timer和偏好重载",
+      "functional_impact": "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归",
       "environment": [
         "Windows local isolated test data",
         "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
@@ -1491,20 +1544,28 @@
           "label": "final-full-v2",
           "exit_code": 0,
           "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B19/source-entry.json"
       ],
       "external_evidence": [],
-      "limits": "不是Web Canvas嵌入Qt；物理操作单列B19",
-      "summary": "Qt QSS/Painter实现受控主题，独立timer和偏好重载",
-      "final_status": "completed",
+      "limits": "与B19统一标准：物理输入、高DPI/多屏和完整人工窗口体验未验，不能仅凭offscreen或DPR观察标completed。",
+      "summary": "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归",
+      "final_status": "partial",
       "evidence": [
-        "evidence/B19/source-entry.json"
+        "evidence/B19/source-entry.json",
+        "final-partial-closure-20261003-024521/native-disposal-root-cause.json",
+        "final-partial-closure-20261003-024521/native-visible-result.json",
+        "final-partial-closure-20261003-024521/final-package-command.json"
       ]
     },
     {
@@ -1541,7 +1602,7 @@
         }
       ],
       "tests": [
-        "Final suite 2683 passed / 41 skipped / 0 failures, coverage 84.13%; see command labels and per-card evidence for external versus synthetic scope."
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
       ],
       "browser_evidence": [
         "evidence/B17/browser-final/theme-attachment-summary.json"
@@ -1558,13 +1619,13 @@
   ],
   "validation": {
     "pytest": {
-      "collected": 2724,
-      "passed": 2683,
+      "collected": 2728,
+      "passed": 2687,
       "skipped": 41,
       "failed": 0,
-      "seconds": 227.226
+      "seconds": 241.653
     },
-    "coverage_percent": 84.12519796615821,
+    "coverage_percent": 84.10358897493546,
     "coverage_floor": 75,
     "skip_reasons": {
       "Provision pinned local evleven R1 wheel first": 16,
@@ -1581,7 +1642,7 @@
       "uncaught_js_errors": 0,
       "transport": "deterministic model"
     },
-    "package": "New local wheel/sdist; base/native/desktop installed; hidden WebView and native offscreen; see external SHA256SUMS and package attestation",
+    "package": "Final repaired wheel installed in base/native/desktop; Native stderr explicitly free of Qt teardown RuntimeError; HTTP and hidden WebView passed. Exact committed rebuild and hashes in external manifest.",
     "assets": 7,
     "static": "authorization AST, Python parse, JS syntax, git diff, pattern secret/path scan passed"
   },
@@ -1779,8 +1840,8 @@
     [
       "物理IME/高DPI/触屏验收",
       "需设备人工操作",
-      "本轮Chrome模拟事件、隐藏WebView、Qt offscreen",
-      "保留B17–B20 partial；不能用截图或单元测试代替"
+      "Chrome自动事件；可见WebView/Qt观察，完整物理输入与DPI未验",
+      "保留B17/B18/B19/U09 partial；不能用截图或单元测试代替"
     ],
     [
       "粒子更低CPU与设备档位",
@@ -1806,5 +1867,37 @@
       "仅本地账户/团队/运行时",
       "需要独立架构和安全评估；不应把本轮结果扩大为生产认证"
     ]
-  ]
+  ],
+  "partial_closure": {
+    "starting_commit": "19945f06ec0bda02f506e3a6a687413831530471",
+    "evidence_directory": "final-partial-closure-20261003-024521",
+    "recorded_utc": "2026-10-02T19:31:58.681641+00:00",
+    "partial_cards": [
+      "B10",
+      "B17",
+      "B18",
+      "B19",
+      "U09"
+    ],
+    "product_fixes": [
+      "CLI bootstrap ApprovalProvider stale verdict subscriber",
+      "Native appearance C++ destruction and early event-loop-stop disposal"
+    ],
+    "source_sha256": {
+      "pyharness/cli.py": "0c45a6810ef2bc24ecc58bb06cdd4924edf405f2d1b6ca5b0b47222f40049ce3",
+      "pyharness/desktop_native/appearance.py": "0d423c1d123915f43733bf6f5d8c1640852bbeca83bf8efb56a8f887648dc896",
+      "pyharness/desktop_native/app.py": "34a3de6480260e07e715ba3687a993e2eb486a521da4d1a8964f11f1354198be",
+      "pyharness/desktop_native/main_window.py": "e83824ede62d20b143c860801e7b53467b50784d04c8738fbff9807bdc2917a0",
+      "tests/unit/test_cli_approval_ownership.py": "3a062cbb827fb9e08a54177badaae27cad8a6fbbb461e213651f1f455f7f3c0d",
+      "tests/unit/test_native_disposal.py": "96d7e5cd5d67ccf2c0d500e98a68e53cd8dc6a4064405ef4bed19abbd1d2ac2b",
+      "tests/unit/test_remediation_delivery.py": "b1acf29bc68f7f36c42347f0ba6449f0b683e88ca72bec84d69271228c4711c3"
+    },
+    "version_binding": "Gates ran on the dirty frozen base plus the listed exact file hashes; final local commit and exact-commit archives bound by external manifest. No remote CI claim.",
+    "new_real_model_requests": 0,
+    "external_integration_reruns": false,
+    "remote_writes": false,
+    "physical_computer_use_stop": "Windows browser URL policy guard stopped further physical UI automation. No alternate route used. Headless browser gate is ordinary deterministic code regression, not physical input evidence.",
+    "historical_package_false_green": "final-partial-closure-20261003-024521/package-initial-adjudication.json",
+    "ctrl_c_not_repeated": true
+  }
 }

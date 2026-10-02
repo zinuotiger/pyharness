@@ -4,6 +4,7 @@ import json
 from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QWidget, QVBoxLayout
+from shiboken6 import isValid
 from pyharness.ui.appearance import normalize
 
 PALETTES = {
@@ -71,9 +72,15 @@ class NativeAppearance:
             action=QAction(label,window);action.triggered.connect(lambda checked=False,m=mode:self.update({'animationMode':m}));self.menu.addAction(action)
         self.banner.visibility_changed = self.sync_timer
         window.installEventFilter(self.banner)
+        window.destroyed.connect(self.destroy)
         self.apply()
 
     def sync_timer(self):
+        if self.dead:
+            return
+        if not isValid(self.window):
+            self.destroy()
+            return
         active=(not self.dead and self.window.isVisible() and not self.window.isMinimized()
                 and self.config['themeId']=='tech-blue-particle' and self.config['animationMode']=='normal')
         if active:self.banner.timer.start()
@@ -98,8 +105,13 @@ QWidget#PyHarnessNativeTheme QWidget:disabled {{color:#7a8797;}}''')
 
     def destroy(self):
         if self.dead:return
-        self.dead=True;self.banner.timer.stop();self.window.removeEventFilter(self.banner)
+        self.dead=True
         self.banner.visibility_changed = None
+        if isValid(self.banner.timer):self.banner.timer.stop()
+        # Qt may destroy a window without delivering closeEvent. Its Python
+        # wrapper can already be invalid while Hide/destruction is dispatched.
+        if not isValid(self.window):return
+        self.window.removeEventFilter(self.banner)
         self.window.setStyleSheet(self.original_style);self.window.setObjectName(self.original_name)
         self.window.menuBar().removeAction(self.menu.menuAction());self.menu.deleteLater()
         self.banner.hide()

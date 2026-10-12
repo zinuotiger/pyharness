@@ -162,11 +162,18 @@ async def test_stream_midway_failure_preserves_received_headers(disconnect):
         httpx.Response(200,headers={'x-request-id':'stream-123'},stream=BrokenStream())),base_url='https://example.test')
     try:
         s=await _session()
+        await s.append('task.enqueued',{'task_id':'partial-stream','pos':1},actor='system')
+        await s.append('segment.start',{'task_id':'partial-stream'},actor='system')
         with pytest.raises(PyHError) as err:
             await OpenAICompatAdapter('fake',transport=t).chat_stream([],ctx=_ctx(s))
         d=err.value.ctx['diagnostics']
         assert d['http_status']==200 and d['request_id']=='stream-123'
-        assert not any(e.type in ('llm.response','llm.usage') for e in s.events_after(0))
+        assert not any(e.type=='llm.response' for e in s.events_after(0))
+        usage=[e.payload for e in s.events_after(0) if e.type=='llm.usage']
+        assert len(usage)==1 and usage[0]['out_tokens']>0 and usage[0]['in_tokens']==0
+        assert usage[0]['estimated'] and usage[0]['input_unknown']
+        run=project(s.sid,s.events_after(0))['runs'][0]
+        assert run['usage_status']=='estimated' and run['token_usage']==usage[0]['out_tokens']
         assert 'sensitive proxy body' not in json.dumps(d)
     finally:
         await t.aclose()

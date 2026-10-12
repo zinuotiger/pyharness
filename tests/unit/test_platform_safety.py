@@ -232,10 +232,17 @@ def test_completed_run_not_reopened_by_artifact_approval(decision):
 
 
 async def test_runs_sorted_globally(app,monkeypatch):
-    async def views():return {'runs':[{'run_id':'new','queued_at':'2026-09-26T03:00:00Z','started_at':None},
-        {'run_id':'old','queued_at':'2026-09-25T03:00:00Z','started_at':None}], 'steps':[]}
-    monkeypatch.setattr(app.service.platform,'all_views',views)
-    assert [r['run_id'] for r in (await app.service.platform.runs())['runs']]==['new','old']
+    from pyharness.events import envelope
+    ids=[]
+    for task,ts in [('new','2026-09-26T03:00:00.000000Z'),('old','2026-09-25T03:00:00.000000Z')]:
+        monkeypatch.setattr(envelope,'_utc_now_ts',lambda ts=ts:ts)
+        sid=await app.service.create_session();log=await app.service.require_session(sid)
+        await log.append('task.enqueued',dict(task_id=task,pos=1),actor='system')
+        ids.append(sid+'~'+task)
+    assert [r['run_id'] for r in (await app.service.platform.runs())['runs']]==ids
+    first=await app.service.platform.runs(limit=1)
+    second=await app.service.platform.runs(limit=1,cursor=first['cursor'])
+    assert [first['runs'][0]['run_id'],second['runs'][0]['run_id']]==ids
 
 
 async def test_large_broker_input_uses_stdin_not_windows_argv(tmp_path,monkeypatch):
@@ -271,24 +278,100 @@ def test_regular_reader_rejects_special_descriptor(tmp_path,monkeypatch):
 
 
 @pytest.mark.controlled_process
-async def test_private_local_git_clone_is_committed_bounded_and_clean(tmp_path):
+@pytest.mark.parametrize('extra_depth',[0,4])
+async def test_private_local_git_clone_is_committed_bounded_and_clean(tmp_path,extra_depth):
     import os,subprocess
     from pyharness.core.sandbox import private_git_clone
-    source=tmp_path/'source';source.mkdir();dest=tmp_path/'copy';dest.mkdir()
+    source=tmp_path/'source';source.mkdir();dest=tmp_path/'copy'
+    for i in range(extra_depth):dest=dest/(f'中文深目录-{i}-'+'x'*55)
+    dest.mkdir(parents=True)
     env=dict(os.environ,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0')
     def git(*args):
         subprocess.run(['git','-c','core.hooksPath='+os.devnull,'-c','commit.gpgsign=false',*args],cwd=source,env=env,
             check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
     git('init','--quiet')
     (source/'code.py').write_bytes(b'committed input')
-    git('add','--','code.py')
+    (source/'binary.bin').write_bytes(bytes(range(256)))
+    (source/'revision.txt').write_text('$Format:%H$',encoding='utf-8')
+    (source/'hidden.txt').write_text('committed export-ignore',encoding='utf-8')
+    (source/'omit').mkdir();(source/'omit/inside.txt').write_text('directory export-ignore',encoding='utf-8')
+    (source/'nested').mkdir();(source/'nested/keep.txt').write_text('nested override',encoding='utf-8')
+    (source/'nested/drop.txt').write_text('nested ignored',encoding='utf-8')
+    (source/'.gitattributes').write_text('hidden.txt export-ignore\nomit export-ignore\nnested/* export-ignore\nrevision.txt export-subst\n',encoding='utf-8')
+    (source/'nested/.gitattributes').write_text('keep.txt -export-ignore\n',encoding='utf-8')
+    git('add','--all')
     git('-c','user.name=Synthetic Test','-c','user.email=synthetic@example.invalid','commit','--quiet','-m','synthetic input')
+    commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,env=env).decode('ascii').strip()
     (source/'code.py').write_bytes(b'uncommitted input')
     (source/'.env').write_bytes(b'synthetic secret')
+    # A bare clone never inherited source-local info attributes/configuration.
+    (source/'.git/info/attributes').write_text('code.py export-ignore\n',encoding='utf-8')
+    marker=tmp_path/'must-not-execute'
+    git('config','tar.tar.command','echo unsafe > '+str(marker))
     await asyncio.wait_for(private_git_clone(source,dest),30)
     assert (dest/'code.py').read_bytes()==b'committed input'
-    assert not (dest/'.private-clone').exists() and not (dest/'.env').exists()
+    assert (dest/'binary.bin').read_bytes()==bytes(range(256))
+    assert (dest/'revision.txt').read_text(encoding='utf-8')==commit
+    assert (dest/'nested/keep.txt').read_text(encoding='utf-8')=='nested override'
+    assert not (dest/'hidden.txt').exists() and not (dest/'omit').exists() and not (dest/'nested/drop.txt').exists()
+    assert not (dest/'.private-clone').exists() and not (dest/'.env').exists() and not marker.exists()
+    assert not list(dest.glob('.private-git-*'))
     assert (source/'code.py').read_bytes()==b'uncommitted input'
+
+
+@pytest.mark.controlled_process
+@pytest.mark.parametrize('violation',['symlink','count','bytes'])
+async def test_committed_git_snapshot_rejects_links_and_resource_limits_before_write(tmp_path,violation):
+    import os,subprocess
+    from pyharness.core.sandbox import private_git_clone
+    source=tmp_path/'source';source.mkdir();dest=tmp_path/'destination';dest.mkdir()
+    env=dict(os.environ,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0')
+    def git(*args,input=None):
+        return subprocess.run(['git','-c','core.hooksPath='+os.devnull,'-c','commit.gpgsign=false',*args],cwd=source,env=env,
+            check=True,input=input,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20).stdout
+    git('init','--quiet')
+    if violation=='count':
+        for i in range(501):(source/f'file-{i}.txt').write_bytes(b'synthetic')
+    else:(source/'file.txt').write_bytes(b'x'*(11*1048576) if violation=='bytes' else b'synthetic')
+    git('add','--all')
+    if violation=='symlink':
+        ident=git('hash-object','-w','--stdin',input=b'../outside').strip().decode('ascii')
+        git('update-index','--add','--cacheinfo','120000',ident,'link')
+    git('-c','user.name=Synthetic Test','-c','user.email=synthetic@example.invalid','commit','--quiet','-m','synthetic bounds')
+    with pytest.raises(PyHError) as error:await private_git_clone(source,dest)
+    assert error.value.code==('path_rejected' if violation=='symlink' else 'workspace_limit')
+    assert not list(dest.iterdir())
+
+
+@pytest.mark.controlled_process
+async def test_git_snapshot_cancellation_reaps_archive_and_metadata(tmp_path,monkeypatch):
+    import os,subprocess,tempfile
+    from pyharness.core.sandbox import private_git_clone
+    source=tmp_path/'source';source.mkdir();dest=tmp_path/'destination';dest.mkdir()
+    env=dict(os.environ,GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0')
+    def git(*args):
+        subprocess.run(['git','-c','core.hooksPath='+os.devnull,'-c','commit.gpgsign=false',*args],cwd=source,env=env,
+            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=20)
+    git('init','--quiet');(source/'large.txt').write_bytes(b'x'*(9*1048576));git('add','--all')
+    git('-c','user.name=Synthetic Test','-c','user.email=synthetic@example.invalid','commit','--quiet','-m','synthetic cancel')
+    before=set(Path(tempfile.gettempdir()).glob('ph-git-*'))
+    original=asyncio.create_subprocess_exec;entered=asyncio.Event();owned=[]
+    async def launch(*args,**kwargs):
+        proc=await original(*args,**kwargs)
+        if 'archive' in args:
+            owned.append(proc)
+            class DelayedReader:
+                async def read(self,size):
+                    entered.set();await asyncio.Event().wait()
+            proc.stdout=DelayedReader()
+        return proc
+    monkeypatch.setattr(asyncio,'create_subprocess_exec',launch)
+    operation=asyncio.create_task(private_git_clone(source,dest))
+    await asyncio.wait_for(entered.wait(),10);operation.cancel()
+    with pytest.raises(asyncio.CancelledError):await operation
+    assert owned and all(proc.returncode is not None for proc in owned)
+    assert set(Path(tempfile.gettempdir()).glob('ph-git-*'))==before
+    assert not list(dest.iterdir()) and (source/'large.txt').stat().st_size==9*1048576
 
 
 async def test_platform_http_operation_owned_by_service_shutdown(app,monkeypatch):

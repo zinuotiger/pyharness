@@ -28,13 +28,15 @@ async def navigate(page, route):
     if await page.locator('.mobile-sessions').is_visible():
         if not await page.locator('#settingsEntry').is_visible():
             await page.locator('.mobile-sessions').click()
-    if route == 'chat':
+    if route == 'dashboard':
+        await page.locator('#workbenchEntry').click()
+    elif route == 'chat':
         await page.locator('#sessionListHeading').click()
     else:
         await page.locator('#settingsEntry').click()
-        await page.locator('.settings-links').wait_for()
+        await page.locator('.settings-nav').wait_for()
         if route != 'settings':
-            await page.locator(f'.settings-links [data-nav="{route}"]').click()
+            await page.locator(f'.settings-nav [data-nav="{route}"]').click()
 
 
 
@@ -126,7 +128,7 @@ async def smoke(output, expect_docker=None):
                 await page.locator('#messageText').wait_for()
                 assert await page.locator('#agentSelect').input_value()==agent_id
                 await page.locator('#messageText').fill('synthetic browser hello')
-                await page.get_by_role('button',name='发送 ↑',exact=True).click()
+                await page.get_by_role('button',name='发送消息',exact=True).click()
                 await page.locator('.message').filter(has_text='[DETERMINISTIC TEST MODEL] received: synthetic browser hello').wait_for(timeout=15000)
                 assert 'Invalid Date' not in await page.locator('body').inner_text()
                 await page.keyboard.press('Control+k')
@@ -144,14 +146,14 @@ async def smoke(output, expect_docker=None):
                 await page.unroute('**/api/v1/sessions')
                 assert await page.locator('#messageText').input_value()=='draft must survive async refresh'
                 sid_a=await page.evaluate('state.sid')
-                await page.locator('#sessionSearch').fill('no matching synthetic session')
-                assert await page.locator('#sessionList [data-session]:visible').count()==0
-                await page.locator('#sessionSearch').fill('')
+                await page.locator('#globalSearch').fill('no matching synthetic session')
+                await page.locator('#globalSearchResults').get_by_text('没有匹配的会话',exact=True).wait_for()
+                await page.locator('#globalSearch').press('Escape')
                 assert await page.locator(f'#sessionList [data-session="{sid_a}"]').is_visible()
                 # Publishing v2 must not rebind this existing v1 conversation.
                 await page.evaluate('(id)=>post("agents/"+id+"/publish")',agent_id)
                 await page.locator('#messageText').fill('continue fixed version')
-                await page.get_by_role('button',name='发送 ↑',exact=True).click()
+                await page.get_by_role('button',name='发送消息',exact=True).click()
                 await page.locator('.message').filter(has_text='[DETERMINISTIC TEST MODEL] received: continue fixed version').wait_for(timeout=15000)
                 fixed=await page.evaluate('async()=>{const d=await get("runs");return d.runs.filter(r=>r.session_id===state.sid).map(r=>r.agent_version)}')
                 assert fixed and set(fixed)=={1}
@@ -165,9 +167,9 @@ async def smoke(output, expect_docker=None):
                     else:await route.continue_()
                 await page.route('**/api/v1/runs',delay_post)
                 await page.locator('#messageText').fill('background session request')
-                await page.get_by_role('button',name='发送 ↑',exact=True).click()
+                await page.get_by_role('button',name='发送消息',exact=True).click()
                 await asyncio.wait_for(posted.wait(),5)
-                await page.get_by_role('button',name='+ 新建会话',exact=True).click()
+                await page.locator('.sidebar [data-action="new-chat"]').click()
                 await page.wait_for_function('(sid)=>state.sid!==sid && !document.querySelector(".skeleton")',arg=sid_a)
                 sid_b=await page.evaluate('state.sid')
                 await page.locator('#messageText').fill('B draft must stay')
@@ -177,7 +179,8 @@ async def smoke(output, expect_docker=None):
                 assert await page.locator('#messageText').input_value()=='B draft must stay'
                 await page.unroute('**/api/v1/runs')
                 # Removing attachments must preserve the current unsubmitted text.
-                await page.get_by_role('button',name='清除附件',exact=True).click()
+                await page.locator('summary[aria-label="输入选项"]').click()
+                await page.get_by_role('button',name='清除待发送附件',exact=True).click()
                 assert await page.locator('#messageText').input_value()=='B draft must stay'
                 await page.locator(f'[data-session="{sid_a}"]').first.click()
                 await page.locator('#messageText').wait_for()
@@ -185,12 +188,17 @@ async def smoke(output, expect_docker=None):
                 await page.locator('#messageText').fill('draft must survive async refresh')
                 upload_started=asyncio.Event();upload_release=asyncio.Event()
                 async def delay_upload(route):
+                    if route.request.method != 'POST':
+                        await route.continue_()
+                        return
+                    assert route.request.post_data_json['session_id'] == sid_a
                     response=await route.fetch();upload_started.set()
+                    assert response.status == 200
                     await asyncio.wait_for(upload_release.wait(),8)
                     await route.fulfill(response=response)
                 await page.route('**/api/v1/artifacts',delay_upload)
                 async with page.expect_file_chooser() as choice:
-                    await page.get_by_role('button',name='附件',exact=True).click()
+                    await page.get_by_role('button',name='添加附件',exact=True).click()
                 await (await choice.value).set_files({'name':'synthetic.txt','mimeType':'text/plain','buffer':b'input'})
                 await asyncio.wait_for(upload_started.wait(),5)
                 await page.evaluate('newSession()')
@@ -252,7 +260,7 @@ async def smoke(output, expect_docker=None):
                 async def hold_runs(route):
                     runs_started.set();await asyncio.wait_for(runs_release.wait(),5)
                     await route.continue_()
-                await page.route('**/api/v1/runs',hold_runs)
+                await page.route('**/api/v1/runs?*',hold_runs)
                 await navigate(page, 'runs')
                 await asyncio.wait_for(runs_started.wait(),5)
                 assert await page.evaluate('state.page==="runs" && !!document.querySelector(".skeleton")')
@@ -260,7 +268,7 @@ async def smoke(output, expect_docker=None):
                 await page.wait_for_function('state.page==="runs" && !document.querySelector(".skeleton")')
                 await page.locator('[data-run-error]').first.wait_for()
                 assert 'LLM-303' in await page.locator('main').inner_text()
-                await page.unroute('**/api/v1/runs')
+                await page.unroute('**/api/v1/runs?*')
                 await page.screenshot(path=str(output/'failed-runs.png'),full_page=True)
                 await navigate(page, 'dashboard')
                 await page.wait_for_function('state.page==="dashboard" && !document.querySelector(".skeleton")')

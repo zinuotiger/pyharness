@@ -26,7 +26,7 @@ TEMPLATES = [
         permission_policy='standard', allowed_tools=['fs.read_file','fs.list_dir','fs.write_file','exec.python_run','exec.shell_run'],
         sandbox_profile={'mode':'isolated'}).model_dump(),
     AgentDefinition(name='知识问答 Agent', description='关键词检索、明确引用，无证据时拒答',
-        require_evidence=True,
+        require_evidence=True, strict_knowledge=True,
         system_prompt='只依据提供的检索证据回答，给出来源和行号。无可靠证据时明确拒绝回答。').model_dump(),
 ]
 
@@ -37,10 +37,20 @@ class PlatformService:
         self.root = service.tenant_root() / 'platform'
         self.store = PlatformStore(self.root)
         self.sandboxes = SandboxManager(self.root / 'sandboxes')
+        from pyharness.application.chat_setup import ChatSetup
+        from pyharness.core.remote_sandbox import RemoteSandboxBackend
+        self.chat_setup = ChatSetup(self)
+        self.sandboxes.backends['remote'] = RemoteSandboxBackend(self.chat_setup.remote_settings)
         self.knowledge = ExactKeywordKnowledgeProvider()
         self.locks = {}
         self.actions = {}
         self.connection_clients = {}
+        self.history_index = None
+        from pyharness.application.projection_cache import ProjectionCache
+        self.projection_cache = ProjectionCache()
+        self.artifact_cache = ProjectionCache()
+        from pyharness.application.list_index import ListIndex
+        self.list_index = ListIndex(self.root / 'lists-v1.db')
         from pyharness.application.platform_workflow import PlatformWorkflows
         self.workflows = PlatformWorkflows(self)
 
@@ -141,9 +151,10 @@ class PlatformService:
             fail('agent_version_deprecated')
         return self.version(ident,number)
 
-    async def all_views(self):
+    async def all_views(self, *, trace_run_id=None, trace_limit=500):
         result = {'runs':[], 'trace':[], 'steps':[], 'approvals':[]}
         sessions = (await self.service.list_sessions())['sessions']
+        self.projection_cache.retain(r['sid'] for r in sessions)
         for row in sessions:
             sid = row['sid']
             log = await self.service.require_session(sid)
@@ -152,22 +163,38 @@ class PlatformService:
             if queue is not None:
                 status = queue.status()
                 live = [status.running, *status.waiting]
-            view = project(sid, log.events_after(0), live)
+            stamp = (log.stats()['seq'], repr(live), trace_run_id, trace_limit)
+            view = self.projection_cache.read(sid, stamp, lambda: project(
+                sid, log.events_after(0), live, trace_run_id=trace_run_id, trace_limit=trace_limit))
             for key in result:
                 result[key].extend(view[key])
         return {**result, 'sessions':sessions}
 
-    async def runs(self):
-        view = await self.all_views()
-        return {'runs':sorted(view['runs'],key=lambda r:r['queued_at'] or r['started_at'] or '',reverse=True), 'steps':view['steps']}
+    async def runs(self, *, cursor=None, limit=None):
+        authorized = await self.list_index.refresh(self.service)
+        selected,meta = self.list_index.page('runs',authorized,cursor=cursor,limit=limit)
+        steps = [step for row in selected for step in row.pop('_steps',[])]
+        return {'runs':selected, 'steps':steps, **meta}
 
-    async def run(self, ident):
-        view = await self.all_views()
+    async def run(self, ident, *, cursor=None, limit=500):
+        if type(limit) is not int or not 1 <= limit <= 500:
+            fail('invalid_trace_limit')
+        view = await self.all_views(trace_run_id=ident, trace_limit=None)
         item = next((r for r in view['runs'] if r['run_id'] == ident), None)
         if item is None:
             fail('run_not_found')
+        trace = [s for s in view['trace'] if s['run_id'] == ident]
+        start = 0
+        if cursor is not None:
+            index = next((i for i, span in enumerate(trace) if span['span_id'] == cursor), None)
+            if index is None:
+                fail('invalid_trace_cursor')
+            start = index + 1
+        page = trace[start:start+limit]
+        more = start + len(page) < len(trace)
         return {**item, 'steps':[s for s in view['steps'] if s['run_id'] == ident],
-                'trace':[s for s in view['trace'] if s['run_id'] == ident]}
+                'trace':page, 'trace_total':len(trace), 'trace_truncated':more,
+                'trace_cursor':page[-1]['span_id'] if more else None}
 
     @staticmethod
     def binding(log):
@@ -189,18 +216,27 @@ class PlatformService:
         from pyharness.core.session_query import SessionQueryIndex
         if not isinstance(query,str) or not 2 <= len(query.strip()) <= 200:
             fail('invalid_search_query')
-        sessions = [{'sid':sid}] if sid else (await self.service.list_sessions())['sessions']
+        # Authorization defines lifetime; the global window defines visibility.
+        # A targeted query may update an authorized source outside that window.
+        if sid:
+            await self.service.require_session(sid)
+        sessions = (await self.service.list_sessions())['sessions']
+        authorized_ids = {row['sid'] for row in sessions}
+        visible_ids = {sid} if sid else {row['sid'] for row in sessions[:100]}
         sources = {row['sid']: await self.service.require_session(row['sid']) for row in sessions[:100]}
-        index = SessionQueryIndex(':memory:',sources=sources,result_limit=50,query_timeout_s=3)
-        try:
-            await index.enter()
-            await index.rebuild()
-            result = await index.query(query,limit=50,session_id=sid)
+        if sid and sid not in sources:
+            sources[sid] = await self.service.require_session(sid)
+        async with self.locks.setdefault('history-index',asyncio.Lock()):
+            if self.history_index is None:
+                index = SessionQueryIndex(self.root/'history-search.db',sources={},result_limit=50,query_timeout_s=3)
+                await index.enter()
+                self.history_index = index
+            index = self.history_index
+            scanned = await index.reconcile_sources(sources, authorized_ids=authorized_ids)
+            result = await index.query(query,limit=50,session_ids=visible_ids)
             from pyharness.config import redact
             safe=json.loads(redact(json.dumps(asdict(result),ensure_ascii=False)))
-            return {**safe,'session_limit':100,'truncated':len(sessions)>100}
-        finally:
-            await index.detach()
+            return {**safe,'session_limit':100,'truncated':not sid and len(sessions)>100,'indexed_events':scanned}
 
     async def edit_message(self, sid, seq, body):
         text=body.get('text')
@@ -228,9 +264,9 @@ class PlatformService:
 
     async def session_metadata(self, sid, body):
         await self.service.require_session(sid)
-        if set(body) - {'archived','tags','title'}:
+        if set(body) - {'archived','pinned','tags','title'}:
             fail('invalid_session_metadata')
-        if 'archived' in body and type(body['archived']) is not bool:
+        if any(key in body and type(body[key]) is not bool for key in ('archived', 'pinned')):
             fail('invalid_session_metadata')
         if 'tags' in body and (not isinstance(body['tags'],list) or len(body['tags'])>10 or any(not isinstance(t,str) or len(t)>40 for t in body['tags'])):
             fail('invalid_session_metadata')
@@ -319,14 +355,14 @@ class PlatformService:
                 definition = AgentDefinition(name='通用助手')
             self.validate_execution_policy(definition)
             evidence = None
-            if definition.knowledge_sources or definition.require_evidence:
-                if definition.require_evidence and not definition.knowledge_sources:
+            if definition.knowledge_sources or definition.require_evidence or definition.strict_knowledge:
+                if (definition.require_evidence or definition.strict_knowledge) and not definition.knowledge_sources:
                     fail('knowledge_source_missing')
                 known = self.store.read()['knowledge']
-                if definition.require_evidence and any(s not in known for s in definition.knowledge_sources):
+                if (definition.require_evidence or definition.strict_knowledge) and any(s not in known for s in definition.knowledge_sources):
                     fail('knowledge_source_missing')
                 evidence = await self.query_knowledge(text, definition.knowledge_sources)
-                if definition.require_evidence and (not evidence.get('answer_allowed') or not evidence.get('citations')):
+                if (definition.require_evidence or definition.strict_knowledge) and (not evidence.get('answer_allowed') or not evidence.get('citations')):
                     fail('knowledge_no_evidence')
             readiness = await self.chat_readiness(body)
             if not readiness['ready']:
@@ -418,9 +454,11 @@ class PlatformService:
                 row['status'] = 'expired'
         return {'approvals':list(reversed(view['approvals']))}
 
-    async def decide(self, ident, action):
+    async def decide(self, ident, action, expected=None):
         approvals = (await self.approvals())['approvals']
         row = next((a for a in approvals if a['id'] == ident), None)
+        if expected and (not row or any(row.get(k) != expected.get(k) for k in ('session_id','call_id','run_id'))):
+            fail('approval_owner_mismatch')
         desired = 'approved' if action == 'approve' else 'rejected'
         if row and row['status'] == desired:
             return {'ok':True,'status':desired}
@@ -428,18 +466,10 @@ class PlatformService:
             fail('approval_not_pending')
         return await self.service.decide_approval(row['approval_id'], 'approve' if action == 'approve' else 'deny', sid=row['session_id'])
 
-    async def artifacts(self):
-        records = {}
-        for row in (await self.service.list_sessions())['sessions']:
-            log = await self.service.require_session(row['sid'])
-            for e in log.events_after(0):
-                if e.type == 'platform.artifact':
-                    record = ArtifactRecord.model_validate(e.payload['record'])
-                    if e.payload['action'] == 'deleted':
-                        records.pop(record.artifact_id, None)
-                    else:
-                        records[record.artifact_id] = record.model_dump()
-        return {'artifacts':list(records.values())}
+    async def artifacts(self, *, cursor=None, limit=None):
+        authorized = await self.list_index.refresh(self.service)
+        selected,meta = self.list_index.page('artifacts',authorized,cursor=cursor,limit=limit)
+        return {'artifacts':selected, **meta}
 
     async def artifact(self, ident):
         item = next((r for r in (await self.artifacts())['artifacts'] if r['artifact_id'] == ident), None)
@@ -498,7 +528,7 @@ class PlatformService:
 
     async def record_generated(self, ctx, name, raw, *, manifest=None, validation_status='not_run'):
         from pyharness.config import redact
-        text=raw.decode('utf-8')
+        text=raw.decode('utf-8', errors='ignore')
         if redact(text)!=text:
             fail('artifact_contains_secret')
         ident='f-'+uuid.uuid4().hex
@@ -507,8 +537,8 @@ class PlatformService:
         record=ArtifactRecord(artifact_id=ident,session_id=ctx.session.sid,
             run_id=f'{ctx.session.sid}~{ctx.task_id}',filename=name,size=len(raw),
             sha256=hashlib.sha256(raw).hexdigest(),storage_path=ident,
-            media_type='text/x-diff' if manifest else 'application/json',
-            preview_type='patch' if manifest else 'json',validation_status=validation_status)
+            media_type='text/x-diff' if manifest else mimetypes.guess_type(name)[0] or 'application/octet-stream',
+            preview_type='patch' if manifest else 'image' if name.lower().endswith(('.png','.jpg','.jpeg','.webp','.gif')) else 'text',validation_status=validation_status)
         path=safe_path(root,ident)
         from pyharness.core.tenant_settings import TenantSettingsStore
         TenantSettingsStore._atomic_write(path,raw)
@@ -542,9 +572,9 @@ class PlatformService:
         log,spine=await self.service.public_spine_for(sid)
         if not getattr(spine,'platform_runtime',None):
             fail('artifact_requires_platform_session')
-        from pyharness.engine import _agent_ctx_of
+        from pyharness.engine import agent_context
         from pyharness.core.tools_guard import ToolCall
-        ctx=copy.copy(await _agent_ctx_of(spine,log))
+        ctx=copy.copy(await agent_context(spine,log))
         ctx.task_id=(item['run_id'] or '').split('~',1)[-1]
         ctx._platform_action=('workspace.'+('apply_patch' if action=='apply' else 'export_artifact'),ident)
         async def execute():
@@ -614,13 +644,19 @@ class PlatformService:
             sha256=hashlib.sha256(text.encode()).hexdigest())
         with self.store.transaction() as data:
             data['knowledge'][ident] = {**record.model_dump(), 'text':text}
+        await self.sync_knowledge()
         return record.model_dump()
 
     def knowledge_list(self):
         data=self.store.read()
         provider=data['preferences'].get('knowledge_provider','exact_keyword')
+        sync=data['preferences'].get('knowledge_sync',{}).get(provider,{})
         return {'sources':[{k:v for k,v in row.items() if k != 'text'} for row in data['knowledge'].values()],
-                'provider':provider, 'status':'available' if provider=='exact_keyword' else data['connections'].get(provider,{}).get('status','unavailable')}
+                'provider':provider, 'sync_error':sync.get('last_error'),
+                'sync_pending':sum(sync.get('documents',{}).get(k,{}).get('sha256') != v['sha256']
+                    for k,v in data['knowledge'].items()) + len(set(sync.get('documents',{}))-set(data['knowledge']))
+                    if sync else 0,
+                'status':'available' if provider=='exact_keyword' else data['connections'].get(provider,{}).get('status','unavailable')}
 
     def knowledge_action(self, ident, action, body):
         with self.store.transaction() as data:
@@ -655,13 +691,21 @@ class PlatformService:
         return {'ok':True}
 
     async def query_knowledge(self, query, sources=None):
-        if not isinstance(query, str) or not query.strip() or len(query) > 4000:
-            fail('invalid_query')
-        docs = list(self.store.read()['knowledge'].values())
-        if sources is not None:
-            docs = [d for d in docs if d['source_id'] in sources]
+        from pyharness.core.knowledge import (KnowledgeError, validate_query,
+            ExactKeywordKnowledgeProvider, RemoteRagKnowledgeProvider)
         data=self.store.read()
         provider=data['preferences'].get('knowledge_provider','exact_keyword')
+        capabilities = (ExactKeywordKnowledgeProvider if provider == 'exact_keyword'
+                        else RemoteRagKnowledgeProvider).capabilities
+        try:
+            validate_query(query, capabilities)
+        except KnowledgeError as error:
+            fail(error.code)
+        if provider != 'exact_keyword':
+            await self.sync_knowledge(provider)
+        docs = list(data['knowledge'].values())
+        if sources is not None:
+            docs = [d for d in docs if d['source_id'] in sources]
         if provider=='exact_keyword':
             result=await self.knowledge.query(query,docs)
         else:
@@ -670,7 +714,12 @@ class PlatformService:
             if not row or not row['config'].get('enabled'):
                 fail('knowledge_unavailable')
             try:
-                result=await asyncio.wait_for(RemoteRagKnowledgeProvider(row['config']['endpoint']).query(query,docs),6)
+                result=await asyncio.wait_for(self.rag_provider(row).query(query,docs),6)
+            except KnowledgeError as error:
+                if error.code not in ('invalid_query', 'invalid_query_length'):
+                    with self.store.transaction() as current:
+                        current['connections'][provider]['status']='unavailable'
+                fail(error.code)
             except (TimeoutError, httpx.TimeoutException):
                 with self.store.transaction() as current:
                     current['connections'][provider]['status']='unavailable'
@@ -725,6 +774,77 @@ class PlatformService:
     def connection_definitions(self):
         return self.store.read()['connections']
 
+    def rag_provider(self, row):
+        from pyharness.core.knowledge import RemoteRagKnowledgeProvider
+        sync = self.store.read()['preferences'].get('knowledge_sync', {}).get(row['connection_id'], {}) if row['config'].get('sync_mode') == 'sync-enabled' else {}
+        return RemoteRagKnowledgeProvider(row['config']['endpoint'],
+            source_owner=sync.get('owner'),
+            secret_ref=row['config'].get('secret_ref'),
+            secret_resolver=lambda ref, endpoint: self.service._settings_store.resolve_service_secret(
+                ref, self.service.tenant_id, endpoint))
+
+    async def sync_knowledge(self, connection_id=None):
+        """Reconcile explicit sync-enabled connections. State survives restart.
+
+        No startup network dependency, hidden retries or manual-mode uploads.
+        Local mutation remains authoritative after a remote failure; the next
+        explicit sync/query retries the pending desired version idempotently.
+        """
+        data = self.store.read()
+        ident = connection_id or data['preferences'].get('knowledge_provider')
+        row = data['connections'].get(ident)
+        if not row or row['type'] != 'remote_rag' or row['config'].get('sync_mode','manual') != 'sync-enabled':
+            return {'status':'manual','operations':0}
+        if not row['config'].get('enabled'):
+            return {'status':'disabled','operations':0}
+        lock = self.locks.setdefault('knowledge-sync:'+ident, asyncio.Lock())
+        async with lock:
+            with self.store.transaction() as current:
+                sync = current['preferences'].setdefault('knowledge_sync', {}).setdefault(ident,
+                    {'owner':uuid.uuid4().hex,'documents':{},'endpoint':row['config']['endpoint']})
+                if sync['endpoint'] != row['config']['endpoint']:
+                    fail('knowledge_sync_endpoint_conflict')
+            desired = self.store.read()['knowledge']
+            provider = self.rag_provider(row)
+            completed = 0
+            try:
+                for source in sorted(set(desired) | set(sync['documents'])):
+                    saved = sync['documents'].get(source)
+                    document = desired.get(source)
+                    if document and saved and saved['sha256'] == document['sha256'] and saved['version'] == document['version']:
+                        continue
+                    if completed >= 100:
+                        fail('knowledge_sync_batch_pending')
+                    path = '/platform-sources/'+sync['owner']+'/'+source
+                    if document:
+                        result = await provider.request('PUT',path,{k:document[k] for k in ('text','version','sha256')})
+                        answer = result.get('data',{})
+                        if (result.get('status') != 'ok' or answer.get('source_id') != source
+                                or answer.get('version') != document['version'] or answer.get('sha256') != document['sha256']):
+                            fail('knowledge_sync_invalid_response')
+                        entry = {k:document[k] for k in ('version','sha256')}
+                    else:
+                        result = await provider.request('DELETE',path+'?version='+str(saved['version']))
+                        if result.get('status') != 'ok' or result.get('data',{}).get('deleted') is not True:
+                            fail('knowledge_sync_invalid_response')
+                        entry = None
+                    with self.store.transaction() as current:
+                        records = current['preferences']['knowledge_sync'][ident]['documents']
+                        if entry is None: records.pop(source, None)
+                        else: records[source] = entry
+                        current['preferences']['knowledge_sync'][ident]['last_error'] = None
+                    completed += 1
+            except Exception as error:
+                from pyharness.core.knowledge import KnowledgeError
+                from pyharness.errors import PyHError
+                code = error.code if isinstance(error, KnowledgeError) else (
+                    error.code if isinstance(error, PyHError) and error.code in (
+                        'knowledge_sync_batch_pending','knowledge_sync_invalid_response') else 'knowledge_sync_failed')
+                with self.store.transaction() as current:
+                    current['preferences']['knowledge_sync'][ident]['last_error'] = code
+                fail(code)
+            return {'status':'synced','operations':completed}
+
     def save_connection(self, body):
         import re
         from pyharness.config import McpServerCfg
@@ -746,7 +866,15 @@ class PlatformService:
             url=urlsplit(provider.endpoint)
             if url.username or url.password or url.query or url.fragment:
                 fail('secret_in_url_not_supported')
-            config={'endpoint':provider.endpoint,'enabled':False}
+            previous = self.connection_definitions().get('remote_rag:'+name, {}).get('config', {})
+            mode = body.get('sync_mode', previous.get('sync_mode', 'manual'))
+            if mode not in ('manual', 'sync-enabled'):
+                fail('invalid_sync_mode')
+            config={'endpoint':provider.endpoint,'enabled':previous.get('enabled', False),
+                    'sync_mode':mode, 'secret_ref':previous.get('secret_ref', '')}
+            if 'bearer_token' in body:
+                config['secret_ref'] = self.service._settings_store.set_service_secret(
+                    self.service.tenant_id, 'remote_rag:'+name, provider.endpoint, body['bearer_token'])
         else:
             fail('invalid_connection_type')
         ident=kind+':'+name
@@ -762,6 +890,9 @@ class PlatformService:
             client=self.connection_clients.get(ident)
             rows.append({k:v for k,v in row.items() if k!='config'}|{
                 'enabled':row['config'].get('enabled',False),
+                'has_secret':bool(row['config'].get('secret_ref')),
+                'sync_mode':row['config'].get('sync_mode','manual'),
+                'endpoint':row['config'].get('endpoint') if row['type']=='remote_rag' else None,
                 'status':'connected' if client and client.connected else ('disabled' if not row['config'].get('enabled') else 'not_probed'),
                 'tool_count':len(client._tools) if client and client.connected else None,
                 'scopes':row['config'].get('allowed_tools') or [],
@@ -783,6 +914,8 @@ class PlatformService:
         row=self.connection_definitions().get(ident)
         if row is None:
             fail('connection_not_found')
+        if action == 'sync' and row['type'] == 'remote_rag':
+            return await self.sync_knowledge(ident)
         if action in {'test','start'}:
             if ident in self.connection_clients:
                 await self.connection_clients.pop(ident).close()
@@ -799,7 +932,7 @@ class PlatformService:
             else:
                 from pyharness.core.knowledge import RemoteRagKnowledgeProvider
                 try:
-                    await RemoteRagKnowledgeProvider(row['config']['endpoint']).probe()
+                    await self.rag_provider(row).probe()
                     status='available'
                 except Exception:
                     status='unavailable'
@@ -810,6 +943,10 @@ class PlatformService:
             return {'status':status}
         if action not in {'stop','enable','disable','delete'}:
             fail('invalid_action')
+        if action=='delete' and row['type']=='remote_rag':
+            synced=self.store.read()['preferences'].get('knowledge_sync',{}).get(ident,{})
+            if synced.get('documents'):
+                fail('knowledge_sync_documents_remaining')
         if action in {'stop','disable','delete'}:
             if ident in self.connection_clients:
                 await self.connection_clients.pop(ident).close()
@@ -819,6 +956,9 @@ class PlatformService:
                         await client.close()
         with self.store.transaction() as data:
             if action=='delete':
+                if row['type'] == 'remote_rag' and row['config'].get('secret_ref'):
+                    self.service._settings_store.set_service_secret(self.service.tenant_id,
+                        ident, row['config']['endpoint'], '')
                 del data['connections'][ident]
             else:
                 if action!='stop':
@@ -837,7 +977,8 @@ class PlatformService:
         from pyharness import __version__
         return {'operator':self.service.tenant_id,'version':__version__,'current_model':current['model'] if current else None,
             'month_usage':month_usage,'recent_artifacts':artifacts[-5:],
-            'sessions':view['sessions'][:5], 'runs':sorted(view['runs'],key=lambda r:r['queued_at'] or r['started_at'] or '',reverse=True)[:5],
+            'sessions':[s for s in (await self.sessions())['sessions'] if not s.get('archived')][:5],
+            'runs':sorted(view['runs'],key=lambda r:r['queued_at'] or r['started_at'] or '',reverse=True)[:5],
             'pending_approvals':sum(a['status'] == 'pending' for a in (await self.approvals())['approvals']),
             'failed':sum(r['status'] == 'failed' for r in view['runs']),
             'completed':sum(r['status'] == 'completed' for r in view['runs']),
@@ -853,6 +994,9 @@ class PlatformService:
 
     async def close(self):
         await self.stop_actions()
+        if self.history_index is not None:
+            await self.history_index.detach()
+            self.history_index = None
         errors=[]
         for client in list(self.connection_clients.values()):
             try:

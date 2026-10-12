@@ -302,7 +302,7 @@ uv run pyharness chat --stream
 ### 4.3.3 主模型 401 自动降级 qwen-max(演示:临时把 key 改错)
 
 ```bash
-export DEEPSEEK_API_KEY="sk-wrong-key-for-demo"
+export DEEPSEEK_API_KEY="<your-api-key>"
 uv run pyharness chat --once "你好"
 ```
 

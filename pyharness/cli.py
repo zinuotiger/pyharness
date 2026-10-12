@@ -323,7 +323,7 @@ def _add_global_flags(p: argparse.ArgumentParser, *, suppress: bool = False) -> 
 
 
 def parse_args(argv: list[str]) -> ParseResult:
-    """子命令分发解析:全局旗标 + 14 叶子子命令各带参数;未知子命令/缺参 → 用法
+    """子命令分发解析:全局旗标 + 16 叶子子命令各带参数;未知子命令/缺参 → 用法
     错误退出 2(argparse 惯例,不造码);--help 列全命令(DEP §5.1 以 --help 为准)。"""
     p = argparse.ArgumentParser(prog="pyharness",
                                 description="PyHarness Agent 框架(66 功能/6 阶段)")

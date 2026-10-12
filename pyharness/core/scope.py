@@ -351,6 +351,11 @@ class Scope:
                                        "reason": reason})
 
     # ============================================================ 预算硬闸
+    def bind_task_usage(self, counters) -> None:
+        """Bind a task ledger without clearing any session accounting."""
+        self._counters = counters
+        self._budget_state = 'ok'
+
     def budget_state(self) -> BudgetState:
         """预算硬闸(F032/DIS §6.3.2):读计数器判 ok/warn/exhausted。
 
@@ -363,7 +368,14 @@ class Scope:
         self._ensure_bound()
         used = self._usage()
         lim = self.limits
-        if (used.out_tokens >= lim.max_out_tokens
+        ancestors = getattr(self._counters, 'ancestors', lambda: ())()
+        parent_exhausted = any(
+            account._limits is not None and (
+                account.task_total().out_tokens >= account._limits.max_out_tokens or
+                account.task_total().in_tokens >= account._limits.max_in_tokens or
+                account.task_total().cost_est >= account._limits.max_cost_yuan)
+            for account in ancestors)
+        if (parent_exhausted or used.out_tokens >= lim.max_out_tokens
                 or used.in_tokens >= lim.max_in_tokens
                 or used.cost_est >= lim.max_cost_yuan):
             if self._budget_state != "exhausted":   # 首达才落事件(防刷)

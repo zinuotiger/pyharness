@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from fastapi import Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pyharness.application.accounts import Accounts, AccountError
+from .auth_cookies import cookie_name, read_cookie
 
 COOKIE = 'pyharness_account'
 SESSION_QUOTA = 100
@@ -55,10 +57,10 @@ async def serve_with_quota(app, request, call_next):
                 return denied('account_host_execution_forbidden')
             if body.get('mcp_connections') or body.get('plugins'):
                 return denied('account_host_execution_forbidden')
-        if path in ('/api/v1/sessions','/api/v1/runs','/api/v1/schedules','/api/v1/workflows'):
+        if path in ('/api/v1/sessions','/api/v1/runs','/api/v1/schedules','/api/v1/workflows','/api/v1/chat/switch'):
             sessions = (await app.service.list_sessions())['sessions']
             if len(sessions) >= SESSION_QUOTA:
-                if path == '/api/v1/sessions': return denied('session_quota',429)
+                if path in ('/api/v1/sessions','/api/v1/chat/switch'): return denied('session_quota',429)
                 body = await request.json()
                 if not body.get('session_id'): return denied('session_quota',429)
         if path == '/api/v1/runs' or (path.startswith('/api/v1/runs/') and path.endswith('/retry')):
@@ -73,12 +75,28 @@ async def serve_with_quota(app, request, call_next):
             estimate = len(encoded) * 3 // 4
             if sum(a['size'] for a in artifacts) + estimate > ARTIFACT_BYTES_QUOTA:
                 return denied('artifact_quota',429)
+        if path == '/api/v1/chat/switch':
+            body = await request.json()
+            artifacts = (await platform.artifacts())['artifacts']
+            requested = set(body.get('artifact_ids', []))
+            if sum(a['size'] for a in artifacts) + sum(a['size'] for a in artifacts if a['artifact_id'] in requested) > ARTIFACT_BYTES_QUOTA:
+                return denied('artifact_quota',429)
         return await call_next(request)
 
 
 def inspect_request(app, request):
     """Resolve the server-owned identity before legacy tenant routing."""
-    token = (getattr(request, 'cookies', None) or {}).get(COOKIE)
+    # The local launcher explicitly presents the current operator credential.
+    # Older account/cookie state must not turn that sign-in into a team session.
+    bootstrap_token = request.query_params.get('token', '')
+    if (getattr(request, 'method', 'GET') == 'GET' and request.url.path == '/'
+            and not request.headers.get('x-pyharness-tenant')
+            and not request.query_params.get('tenant')
+            and app._api_token and bootstrap_token
+            and secrets.compare_digest(bootstrap_token.encode('utf-8'), app._api_token.encode('utf-8'))):
+        request.state.operator_bootstrap = True
+        return None
+    token = read_cookie(request, COOKIE)
     if token:
         account = store(app).authenticate(token)
         if account is None:
@@ -143,16 +161,18 @@ def mount_accounts(app):
         async with app._account_login_slots:
             token = await asyncio.to_thread(store(app).login, body.get('username'), body.get('password'), body.get('tenant'))
         response = JSONResponse({'account':store(app).authenticate(token)})
-        response.set_cookie(COOKIE,token,httponly=True,samesite='strict',secure=request.url.scheme=='https',
+        response.set_cookie(cookie_name(request, COOKIE),token,httponly=True,samesite='strict',secure=request.url.scheme=='https',
                             max_age=Accounts.session_seconds,path='/')
         return response
 
     @app.api.post('/api/account/logout')
     async def logout(request: Request):
-        token = request.cookies.get(COOKIE)
+        token = read_cookie(request, COOKIE)
         if token: store(app).logout(token)
         response = JSONResponse({'ok':True})
-        response.delete_cookie(COOKIE,path='/')
+        response.delete_cookie(cookie_name(request, COOKIE),path='/')
+        if cookie_name(request, COOKIE) != COOKIE:
+            response.delete_cookie(COOKIE,path='/')
         return response
 
     @app.api.get('/api/account/me')

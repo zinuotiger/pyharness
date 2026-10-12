@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import base64
 import zlib
+import io
+import warnings
+from PIL import Image, UnidentifiedImageError
 from pyharness.core.attachment import validate_image, reject_attachment
 from pyharness.core.sandbox import fail
 
@@ -20,8 +23,7 @@ def preview_image(raw: bytes, filename: str) -> dict:
         reject_attachment('extension-mismatch')
     if info['w'] * info['h'] > 40_000_000:
         reject_attachment('pixel-limit')
-    # Check bounded container integrity in addition to the legacy header contract.
-    # This is not a complete pixel decoder or a claim of image sanitization.
+    # Reject malformed containers before invoking the bounded pixel decoder.
     if info['mime'] == 'image/png':
         offset, kinds = 8, []
         while offset + 12 <= len(raw):
@@ -43,6 +45,23 @@ def preview_image(raw: bytes, filename: str) -> dict:
         reject_attachment('truncated-image')
     elif info['mime'] == 'image/webp' and int.from_bytes(raw[4:8], 'little') + 8 != len(raw):
         reject_attachment('truncated-image')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as decoded:
+                if decoded.size != (info['w'], info['h']):
+                    reject_attachment('image-dimension-mismatch')
+                # Bound total decoded work across animation frames, not only
+                # the first frame or the compressed upload size.
+                frames = getattr(decoded, 'n_frames', 1)
+                if frames > 100 or frames * info['w'] * info['h'] > 40_000_000:
+                    reject_attachment('decoded-pixel-limit')
+                for frame in range(frames):
+                    decoded.seek(frame)
+                    decoded.load()
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError,
+            Image.DecompressionBombWarning, Image.DecompressionBombError):
+        reject_attachment('image-decode-failed')
     return info
 
 

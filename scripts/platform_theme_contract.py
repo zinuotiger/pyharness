@@ -44,6 +44,7 @@ async def verify_theme_and_attachments(browser, app, url, output):
         await page.route('**/api/v1/artifacts',delayed_upload)
         await page.evaluate("()=>{window.pendingAcceptanceUpload=uploadAttachment(new File(['synthetic'],'delayed.txt',{type:'text/plain'}));}")
         await asyncio.wait_for(upload_started.wait(),10)
+        await page.locator('summary[aria-label="输入选项"]').click()
         await page.locator('[data-action="attachments-clear"]').click()
         await page.locator('#messageText').fill('New draft after clear')
         release_upload.set();await page.evaluate('pendingAcceptanceUpload')

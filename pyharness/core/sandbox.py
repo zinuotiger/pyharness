@@ -17,7 +17,7 @@ import stat
 from typing import Protocol, Any
 from contextlib import asynccontextmanager
 
-from pyharness.application.platform_models import SandboxProfile, SandboxRecord
+from pyharness.core.sandbox_models import SandboxProfile, SandboxRecord
 from pyharness.errors import PyHError
 
 
@@ -80,9 +80,17 @@ def private_copy(source: Path, destination: Path) -> None:
 
 
 async def private_git_clone(source: Path, destination: Path) -> None:
-    """Bounded local bare clone and verified archive; no hooks, filters or network."""
+    """Copy a bounded committed snapshot; retain the historical function name.
+
+    Read Git objects without cloning into the destination. Git's bare
+    clone/index-pack still fails on long Windows paths with core.longpaths set.
+    A temporary bare metadata view has only our configuration and references
+    the source object directory read-only. Built-in archive retains committed
+    export-ignore/export-subst rules, without repository filter commands.
+    """
     import io
     import tarfile
+    import tempfile
     git = shutil.which('git')
     metadata=source/'.git'
     if not git or not metadata.is_dir() or metadata.is_symlink():
@@ -94,14 +102,14 @@ async def private_git_clone(source: Path, destination: Path) -> None:
         if item.is_file(): total+=item.stat().st_size
         if total>20*1048576 or count>5000:
             fail('workspace_limit')
-    clone=destination/'.private-clone'
     env={k:v for k,v in os.environ.items() if k.upper() in {'PATH','SYSTEMROOT','WINDIR','COMSPEC','PATHEXT'}}
     env.update(HOME=str(destination),USERPROFILE=str(destination),GIT_CONFIG_NOSYSTEM='1',
-               GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GIT_ALLOW_PROTOCOL='file')
-    async def command(args,limit):
+               GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GIT_ALLOW_PROTOCOL='file',GIT_NO_LAZY_FETCH='1')
+    async def command(args,limit,*,cwd=source,extra_env=None):
         kw={'creationflags':0x08000000} if os.name=='nt' else {}
-        proc=await asyncio.create_subprocess_exec(git,'-c','core.hooksPath='+os.devnull,*args,
-            stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,env=env,**kw)
+        proc=await asyncio.create_subprocess_exec(git,'-c','core.hooksPath='+os.devnull,'-c','core.longpaths=true',*args,
+            cwd=cwd,stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,env={**env,**(extra_env or {})},**kw)
         raw=bytearray()
         async def collect():
             while chunk:=await proc.stdout.read(8192):
@@ -115,26 +123,36 @@ async def private_git_clone(source: Path, destination: Path) -> None:
             await proc.wait()
             raise
         return bytes(raw)
-    try:
-        await command(['clone','--bare','--no-local','--no-hardlinks','--',str(source.resolve()),str(clone.resolve())],65536)
-        raw=await command(['--git-dir='+str(clone.resolve()),'archive','--format=tar','HEAD'],12*1048576)
+    commit=(await command(['rev-parse','--verify','HEAD^{commit}'],256)).strip()
+    if not re.fullmatch(rb'[0-9a-f]{40}|[0-9a-f]{64}',commit):fail('workspace_clone_failed')
+    object_format=(await command(['rev-parse','--show-object-format'],256)).strip()
+    if object_format not in (b'sha1',b'sha256'):fail('workspace_clone_unavailable')
+    temporary_root=Path(tempfile.gettempdir()).resolve()
+    with tempfile.TemporaryDirectory(prefix='ph-git-',dir=temporary_root) as temporary:
+        view=Path(temporary)
+        # TemporaryDirectory cleanup is confined to this verified owned subtree.
+        view.resolve().relative_to(temporary_root)
+        (view/'objects').mkdir();(view/'refs').mkdir()
+        (view/'HEAD').write_bytes(commit+b'\n')
+        config='[core]\n bare = true\n repositoryformatversion = '+('1' if object_format==b'sha256' else '0')+'\n'
+        if object_format==b'sha256':config+='[extensions]\n objectformat = sha256\n'
+        (view/'config').write_text(config,encoding='utf-8')
+        raw=await command(['archive','--format=tar',commit.decode('ascii')],12*1048576,
+            extra_env={'GIT_DIR':str(view.resolve()),'GIT_OBJECT_DIRECTORY':str((metadata/'objects').resolve()),'GIT_ATTR_NOSYSTEM':'1'})
         with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
             members=archive.getmembers()
-            if len(members)>500 or sum(m.size for m in members)>10*1048576: fail('workspace_limit')
+            if len(members)>500 or sum(m.size for m in members)>10*1048576:fail('workspace_limit')
+            files=[];directories=[]
             for member in members:
-                if not member.isfile() and not member.isdir(): fail('path_rejected')
-                if any(p.startswith('.') or p.lower() in {'credentials.yaml','credentials.yml','node_modules','venv'} for p in Path(member.name).parts): continue
+                if not member.isfile() and not member.isdir():fail('path_rejected')
                 target=safe_path(destination,member.name.rstrip('/'))
-                if member.isdir(): target.mkdir(parents=True,exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True,exist_ok=True)
-                    target.write_bytes(archive.extractfile(member).read())
-    finally:
-        if clone.exists():
-            # Git marks objects read-only on Windows. Only this verified private clone is touched.
-            for item in clone.rglob('*'):
-                if item.is_file(): item.chmod(0o600)
-            shutil.rmtree(clone)
+                if any(p.startswith('.') or p.lower() in {'credentials.yaml','credentials.yml','node_modules','venv'} for p in Path(member.name).parts):continue
+                if member.isfile():files.append((target,archive.extractfile(member).read()))
+                else:directories.append(target)
+            for target in directories:target.mkdir(parents=True,exist_ok=True)
+            for target,content in files:
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(content)
 
 
 class SandboxBackend(Protocol):
@@ -369,7 +387,7 @@ class SandboxManager:
             record = SandboxRecord(sandbox_id=ident, run_id=run_id, backend=profile.mode,
                 status='creating', workspace_mode=profile.workspace_mode, cpus=profile.cpus,
                 memory_mb=profile.memory_mb, pids_limit=profile.pids_limit,
-                network='none' if profile.mode=='isolated' else 'host_unrestricted')
+                network='none' if profile.mode in ('isolated','remote') else 'host_unrestricted')
             root = safe_path(self.root, ident)
             root.mkdir(parents=True)
             try:
@@ -412,17 +430,21 @@ class SandboxManager:
         backend=self.backends[record.backend]
         if record.backend=='isolated':
             await backend.freeze(record)
+        elif record.backend=='remote':
+            await backend.download(record)
         try:
             yield self.workspace(ident)
         finally:
             if record.backend=='isolated':
                 await backend.thaw(record)
+            elif record.backend=='remote':
+                await backend.upload(record)
 
     async def file_operation(self, ident, name, args):
         self.workspace(ident)
         record=self.records[ident]
-        if record.backend!='isolated': fail('sandbox_operation_unsupported')
-        return await self.backends['isolated'].file_operation(record,name,args)
+        if record.backend not in ('isolated','remote'): fail('sandbox_operation_unsupported')
+        return await self.backends[record.backend].file_operation(record,name,args)
 
     async def execute(self, ident, command, *, python=False):
         self.workspace(ident)
@@ -460,7 +482,7 @@ class SandboxManager:
             task.cancel()
             await asyncio.gather(task,return_exceptions=True)
         # Docker cancellation terminates the whole run-owned container.
-        if self.records[ident].backend=='isolated':
+        if self.records[ident].backend in ('isolated','remote'):
             await self.destroy(ident)
         return self.process_status(ident,token)
 

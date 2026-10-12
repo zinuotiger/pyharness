@@ -36,8 +36,8 @@ async def verify_lifecycle(page,app,output):
     await navigate(page,'schedules')
     await page.get_by_text('schedule.trigger',exact=True).wait_for()
     await page.screenshot(path=str(output/'schedule-executed.png'),full_page=True)
-    page.once('dialog',lambda d:d.accept())
     await page.get_by_role('button',name='删除',exact=True).click()
+    await page.locator('#confirmProceed').click()
     await page.get_by_text('暂无计划任务',exact=True).wait_for()
     assert not (await (await page.request.get(base+'/api/v1/schedules')).json())['schedules']
 
@@ -61,14 +61,16 @@ async def verify_lifecycle(page,app,output):
     assert p.new_binding_version(ident,2)['snapshot']['description']=='second version'
     await card.get_by_role('button',name='版本',exact=True).click()
     await page.get_by_role('button',name='与上一版本比较',exact=True).click()
-    await page.locator('#dialog pre').filter(has_text='second version').wait_for()
+    await page.locator('.settings-content pre').filter(has_text='second version').wait_for()
     await page.screenshot(path=str(output/'agent-immutable-version-diff.png'),full_page=True)
-    await page.locator('#dialogClose').click()
+    await page.locator('[data-action="panel-back"]').click()
+    await page.locator('[data-action="panel-back"]').click()
     await card.get_by_role('button',name='测试运行',exact=True).click()
     await page.locator('#messageText').fill('synthetic patch ownership task')
     await page.locator('#messageText').press('Enter')
-    await page.locator('.run-notice .badge.green').wait_for()
-    run=await p.run(await page.locator('.run-notice').get_attribute('data-run-id'))
+    await page.locator('.chat-top .badge').filter(has_text='已完成').wait_for()
+    active_sid=await page.evaluate('state.sid')
+    run=await p.run(next(r['run_id'] for r in (await p.runs())['runs'] if r['session_id']==active_sid))
     sid=run['session_id'];log=await app.service.require_session(sid)
     workspace=Path(app.service._session_workspace(sid));workspace.mkdir(parents=True,exist_ok=True)
     before=b'def add(a, b):\n    return a - b\n';after='def add(a, b):\n    return a + b\n'
@@ -80,15 +82,15 @@ async def verify_lifecycle(page,app,output):
     await navigate(page,'artifacts')
     patch_row=page.locator('tr').filter(has_text='lifecycle.patch')
     await patch_row.get_by_role('button',name='预览',exact=True).click()
-    await page.locator('#dialog pre').filter(has_text='return a + b').wait_for()
-    await page.locator('#dialogClose').click()
-    page.once('dialog',lambda d:d.accept())
+    await page.locator('.settings-content pre').filter(has_text='return a + b').wait_for()
+    await page.locator('[data-action="panel-back"]').click()
     await patch_row.get_by_role('button',name='应用 Patch',exact=True).click()
+    await page.locator('#confirmProceed').click()
     await page.get_by_role('button',name='批准一次',exact=True).wait_for()
     assert target.read_bytes()==before
     await page.screenshot(path=str(output/'patch-awaiting-separate-approval.png'),full_page=True)
-    page.once('dialog',lambda d:d.accept())
     await page.get_by_role('button',name='批准一次',exact=True).click()
+    await page.locator('#confirmProceed').click()
     result=await asyncio.wait_for(p.actions[artifact['artifact_id']+':apply'],15)
     assert result['ok'] and target.read_text()==after
     assert (await p.artifact(artifact['artifact_id']))['sha256']==hashlib.sha256(raw).hexdigest()
@@ -96,13 +98,13 @@ async def verify_lifecycle(page,app,output):
     # Reapplication must reject the stale baseline and leave the target intact.
     await p.request_artifact_action(artifact['artifact_id'],'apply')
     await navigate(page,'approvals');await page.get_by_role('button',name='批准一次',exact=True).wait_for()
-    page.once('dialog',lambda d:d.accept())
     await page.get_by_role('button',name='批准一次',exact=True).click()
+    await page.locator('#confirmProceed').click()
     repeated=await asyncio.wait_for(p.actions[artifact['artifact_id']+':apply'],15)
     assert not repeated['ok'] and target.read_text()==after
     await navigate(page,'agents')
-    page.once('dialog',lambda d:d.accept())
     await card.get_by_role('button',name='废弃',exact=True).click()
+    await page.locator('#confirmProceed').click()
     await card.get_by_text('已废弃',exact=True).wait_for()
     assert (await p.run(run['run_id']))['status']=='completed'
     return {'area':'schedule/Agent/Patch UI lifecycle','result':'passed',

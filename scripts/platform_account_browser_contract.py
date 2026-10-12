@@ -14,7 +14,6 @@ async def verify_accounts(browser,operator,app,base,output):
         await form.locator('[name=tenant]').fill(team)
         await form.get_by_role('button',name='创建账户',exact=True).click()
         await operator.get_by_text('账户已创建',exact=True).wait_for()
-        await operator.locator('#dialogClose').click()
     contexts=[]
     async def login(username,team):
         context=await browser.new_context(viewport={'width':1440,'height':900});contexts.append(context)
@@ -35,12 +34,12 @@ async def verify_accounts(browser,operator,app,base,output):
             await team_page.get_by_role('button',name='保存',exact=True).click()
             await team_page.get_by_text('synthetic team model',exact=True).wait_for()
             await navigate(team_page,'chat')
-        await pa.get_by_role('button',name='+ 新建会话',exact=True).click()
+        await pa.locator('.sidebar [data-action="new-chat"]').click()
         await pa.wait_for_function('state.sid!==null && !document.querySelector(".skeleton")')
         sid=await pa.evaluate('state.sid')
         await pa.locator('#messageText').fill('audit team a synthetic task');await pa.locator('#messageText').press('Enter')
         try:
-            await pa.locator('.run-notice .badge.green').wait_for(timeout=15000)
+            await pa.locator('.chat-top .badge').filter(has_text='已完成').wait_for(timeout=15000)
         except Exception:
             await pa.screenshot(path=str(output/'team-send-failure.png'),full_page=True)
             print('SYNTHETIC TEAM DIAGNOSTIC', await pa.locator('#sendFeedback').inner_text(),
@@ -55,12 +54,12 @@ async def verify_accounts(browser,operator,app,base,output):
         assert (await (await b.request.get(base+'/api/v1/sessions')).json())['sessions']==[]
         await navigate(pa,'settings');await pa.get_by_role('button',name='团队记忆',exact=True).click()
         await pa.locator('#memoryForm [name=key]').fill('audit_note');await pa.locator('#memoryForm [name=op]').select_option('set');await pa.locator('#memoryForm [name=value]').fill('team A evidence')
-        await pa.locator('#memoryForm button').click();await pa.locator('#memoryForm [role=status]').filter(has_text='已写入').wait_for();await pa.locator('#dialogClose').click()
+        await pa.locator('#memoryForm button').click();await pa.locator('#memoryForm [role=status]').filter(has_text='已写入').wait_for()
         other=(await (await b.request.get(base+'/api/v1/memory?key=audit_note')).json())
         assert 'team A evidence' not in str(other)
         await pa.get_by_role('button',name='账户与团队',exact=True).click()
         await pa.locator('#memberForm [name=username]').fill('audit-second');await pa.locator('#memberForm [name=role]').select_option('viewer')
-        await pa.locator('#memberForm button').click();await pa.locator('#toast').filter(has_text='成员权限已更新').wait_for()
+        await pa.locator('#memberForm button').click();await pa.locator('#memberForm [role=status]').filter(has_text='成员权限已更新').wait_for()
         viewer,pv=await login('audit-second','audit-a')
         await pv.locator('#messageText').fill('viewer must not submit');await pv.locator('#messageText').press('Enter')
         await pv.locator('#sendFeedback [role=alert]').filter(has_text='权限').wait_for()
@@ -73,7 +72,7 @@ async def verify_accounts(browser,operator,app,base,output):
             await pa.locator('#memberForm button').click()
         assert (await membership.value).status==200
         await pv.locator('#messageText').fill('member synthetic success');await pv.locator('#messageText').press('Enter')
-        await pv.locator('.run-notice .badge.green').wait_for(timeout=15000)
+        await pv.locator('.chat-top .badge').filter(has_text='已完成').wait_for(timeout=15000)
         await pv.screenshot(path=str(output/'team-member-allowed.png'),full_page=True)
         await navigate(pv,'settings');await pv.get_by_role('button',name='账户与团队',exact=True).click()
         await pv.get_by_role('button',name='退出登录',exact=True).click();await pv.locator('#login').wait_for()

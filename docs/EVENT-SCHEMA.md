@@ -18,7 +18,7 @@
 ## 1.2 强同步事件(`SYNC_TYPES`)(崩溃一致性锚点)
 
 以下**原始三类族**事件**立即写盘 + flush,成功才返回**(`sync=True` / `SYNC_TYPES`,[DIS-§3.3.1][DIS-§8.2]);
-**此后为崩溃一致性追加了治理/编排型强同步事件** ⇒ 现共 **14 型**,唯一真源＝`events.vocab.SYNC_TYPES`（`approval.denied/granted/requested/timeout`·`context.compacted`·`decision.issued`·`fork.created`·`guard.rejected`·`policy.updated`·`receipt.emitted`·`segment.start`·`session.finished`·`session.recovered`·`user.message`）。
+**此后为崩溃一致性追加了治理/编排型强同步事件** ⇒ 现共 **15 型**,唯一真源＝`events.vocab.SYNC_TYPES`（`approval.denied/granted/requested/timeout/reviewed`·`context.compacted`·`decision.issued`·`fork.created`·`guard.rejected`·`policy.updated`·`receipt.emitted`·`segment.start`·`session.finished`·`session.recovered`·`user.message`）。
 
 原始三类族:
 
@@ -245,6 +245,8 @@
 | `in_tokens` / `out_tokens` | int | ✓ | 输入/输出 token |
 | `cache_hit` | int | — | 缓存命中 token |
 | `cost_est` | float | — | 估算成本(单价表来自 config;仅报表,预算硬闸用 token) |
+| `estimated` | bool | — | token 来自已收到输出的启发式估算，默认 false，不是供应商账单 |
+| `input_unknown` | bool | — | 供应商未返回输入总量，默认 false；此时 in_tokens=0 只是未知值占位 |
 
 - 校验:in/out ≥0。触发者:`llm` 模块(每请求 report_usage);计数器只由本事件累加。
 - 消费:预算控制器(F032)、会话/任务/模型三级聚合。落盘:普通。
@@ -619,7 +621,7 @@ repair 幂等:同日志重复修复结果一致;修复前强制备份 `.jsonl.ba
 
 | 类别 | 事件 | 落盘 | 理由 |
 |---|---|---|---|
-| 强同步(立即 write+flush) | **全 14 型,唯一真源＝`events.vocab.SYNC_TYPES`**：`user.message`、`guard.rejected`、`approval.denied/granted/requested/timeout`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted`、`decision.issued`、`receipt.emitted`、`policy.updated` | ✓ 持久 | §1.2 原始三类族 + 终态/锚点/空洞声明/**治理证据**(声明或裁决不持久则重放与审计语义崩坏) |
+| 强同步(立即 write+flush) | **全 15 型,唯一真源＝`events.vocab.SYNC_TYPES`**：`user.message`、`guard.rejected`、`approval.denied/granted/requested/timeout/reviewed`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted`、`decision.issued`、`receipt.emitted`、`policy.updated` | ✓ 持久 | §1.2 原始三类族 + 终态/锚点/空洞声明/**治理证据**(声明或裁决不持久则重放与审计语义崩坏) |
 | 普通(攒批 ≤0.5s/64 条) | §3 其余持久事件(created/renamed/llm.*/tool.*/task.*/plan.*/goal.*/job.*/subagent.*/queue.*/plugin.*/system.*/todo.*/bus.backpressure 等) | ✓ 持久 | 事实留痕;崩溃丢 ≤0.5s 窗由 recovered 声明 |
 | 仅内存(仅总线) | `llm.chunk`(明示)、`registry.updated`(F003 广播) | ✗ 不落 | 高频可重算/碎片无审计价值(§1.3 准则) |
 

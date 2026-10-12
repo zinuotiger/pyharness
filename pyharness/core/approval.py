@@ -235,6 +235,7 @@ class ApprovalProvider:
         self._detached: bool = False            # detach 幂等标记
         self._subscription_owner = f'approval:{id(self)}'
         self._tasks: set = set()                # fire-and-forget 任务登记(防 GC)
+        self._reviewer = None  # trusted assembly only; never provided by tool arguments
         self._grant_slots: dict[str, str] = {}  # call_id → granted 绑定指纹(executor
         # 重入校验用;call_id 每次调用唯一,单 slot 无生命周期问题)
         self._ref_slots: dict[str, int] = {}    # call_id → approval identity(S4-P1-2:
@@ -296,7 +297,18 @@ class ApprovalProvider:
                 if self._detached:
                     raise_code("APR-503", why="审批服务已关闭")
                 req = await self._register(
-                    call, args_summary, ch, ttl, sid, sess, fp, binding, registered)
+                    call, args_summary, ch, ttl, sid, sess, fp, binding, registered,
+                    getattr(ctx, 'task_id', None))
+            runtime = getattr(ctx, 'platform_runtime', None)
+            if self._reviewer is not None and runtime is not None and req.approval_id is not None:
+                import copy
+                review = {'tool': call.name, 'args': copy.deepcopy(args), 'call_id': req.call_id,
+                    'context': [e.payload.get('content','') for e in sess.events_after(0) if e.type=='user.message'][-1:],
+                    'scope': {'mode': runtime.definition.sandbox_profile.mode,
+                        'allowed_tools': list(runtime.definition.allowed_tools),
+                        'session_id': sid, 'task_id': str(getattr(ctx,'task_id','') or ''),
+                        'network': runtime.definition.sandbox_profile.network}}
+                self._own(self._review_request(req, review))
             return await self._wait_any(req)
         except BaseException:
             # Registration can fail/cancel while append or pause is suspended.
@@ -310,7 +322,7 @@ class ApprovalProvider:
                     logger.warning("approval cleanup failed; preserving primary error", exc_info=True)
             raise
 
-    async def _register(self, call, args_summary, ch, ttl, sid, sess, fp, binding, registered):
+    async def _register(self, call, args_summary, ch, ttl, sid, sess, fp, binding, registered, task_id=None):
         """Called with the provider transition lock, through pause acknowledgement."""
         # 60s 合并防轰炸(R13):同指纹且批未终态且在窗口内 → 挂批,不新增请求事件。
         # **键含 sid**(F-28):provider 按 spine 共享,子会话与父会话的指纹可相同,
@@ -329,6 +341,22 @@ class ApprovalProvider:
         # 开新批:强同步 approval.requested(approval_id = append 返回 seq)
         payload = {"tool": call.name, "args_summary": args_summary,
                    "ttl_ms": ttl, "risk": "high"}
+        # Exact execution input is presented without the usual summary truncation.
+        # Secret redaction remains mandatory; reviewer receives a separate copy.
+        runtime = getattr(getattr(self, '_platform_runtime', None), 'definition', None)
+        if runtime is not None:
+            from pyharness.config import redact
+            raw = json.dumps(getattr(call,'args',None) or getattr(call,'raw_args',{}) or {}, ensure_ascii=False)
+            shown = redact(raw)
+            payload['details'] = {'arguments': shown, 'redacted': shown != raw,
+                'execution': runtime.sandbox_profile.mode,
+                'reason': '工具操作需要确认；批准后仍检查原有工具、文件与账户权限'}
+            arguments=getattr(call,'args',None) or getattr(call,'raw_args',{}) or {}
+            payload['details']['files']=[redact(str(arguments['path']))] if 'path' in arguments else []
+            if call.name in ('workspace.export_artifact','workspace.apply_patch'):
+                item=await self._platform_runtime.platform.artifact(arguments['artifact_id'])
+                payload['details']['files']=[redact(item['filename'])]
+                payload['details']['execution']='账户产物存储（服务端）'
         trace: dict = {"channel": ch}
         if getattr(call, "call_id", None):
             trace["call_id"] = call.call_id
@@ -338,7 +366,8 @@ class ApprovalProvider:
         self._initializing = (sess, stats()["seq"]) if callable(stats) else None
         try:
             env = await sess.append("approval.requested", payload,
-                                    actor="tool", sync=True, trace=trace)
+                                    actor="tool", sync=True, trace=trace,
+                                    **({'task_id': str(task_id)} if task_id else {}))
         finally:
             self._initializing = None
         req = self._new_waiter(fp, call, args_summary, ch, ttl, sid=sid,
@@ -440,15 +469,20 @@ class ApprovalProvider:
             req.completion = self._own(self._emit_outcome(req, sess, type_, by, actor="user"))
         await asyncio.shield(req.completion)
 
-    def _prepare_outcome(self, verdict: str, approval_id: int, by: str) -> tuple:
+    def _prepare_outcome(self, verdict: str, approval_id: int, by: str, *, reviewed=False) -> tuple:
         """同步完成身份与 pending 校验,保证无效裁决立即抛错而不是后台吞掉。"""
-        self._require_human(by)
+        if not reviewed:
+            self._require_human(by)
+        elif self._reviewer is None or by != self._reviewer.identity:
+            raise_code('APR-503', why='无独立审核器授权')
         if self._detached:
             raise_code("APR-503", why="审批服务已关闭")
         req = self._pending.get(int(approval_id))
         if req is None or req.state != "pending":
             raise_code("APR-503", approval_id=approval_id,
                        why="未知或已裁决的 approval_id;同一审批至多一个结果(防重放)")
+        if req.batch_mono and (time.monotonic()-req.batch_mono)*1000 >= req.ttl_ms:
+            raise_code('APR-503', approval_id=approval_id, why='审批请求已过期')
         if req.decision_inflight is not None:
             raise_code("APR-503", approval_id=approval_id,
                        why=f"审批正在处理({req.decision_inflight}),拒绝重复裁决")
@@ -459,6 +493,28 @@ class ApprovalProvider:
         type_ = _OUTCOME_EVENTS[verdict]
         req.decision_inflight = verdict
         return req, sess, type_
+
+    async def _review_request(self, req, invocation):
+        """Same completion owner as human decisions; guards remain unchanged."""
+        import hashlib
+        try:
+            result = await asyncio.wait_for(self._reviewer.evaluate(invocation), self._reviewer.timeout)
+            if not isinstance(result,dict) or result.get('decision') not in ('approve','deny','manual') or not isinstance(result.get('reason'),str):
+                raise ValueError('invalid review result')
+        except Exception:
+            result = {'decision':'manual','reason':'自动审核失败或超时，转为人工审批'}
+        async with self._transition_lock:
+            if req.state != 'pending' or req.decision_inflight: return
+            await req.log.append('approval.reviewed', {'approval_id':req.approval_id,
+                'call_id':req.call_id,'reviewer':self._reviewer.identity, **result,
+                'invocation_sha256':hashlib.sha256(json.dumps(invocation['args'],sort_keys=True).encode()).hexdigest(),
+                'context_sha256':hashlib.sha256(json.dumps(invocation['context']).encode()).hexdigest(),
+                'scope':invocation['scope']}, actor='system',sync=True)
+            if result['decision'] == 'manual': return
+            lead, sess, type_ = self._prepare_outcome('granted' if result['decision']=='approve' else 'denied',
+                req.approval_id,self._reviewer.identity,reviewed=True)
+            lead.completion = self._own(self._emit_outcome(lead,sess,type_,self._reviewer.identity,actor='system'))
+        await asyncio.shield(lead.completion)
 
     async def _emit_outcome(self, req: ApprovalRequest, sess: Any, type_: str,
                             by: str, *, actor: str, emit: bool = True) -> None:

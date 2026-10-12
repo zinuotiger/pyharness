@@ -1,0 +1,62 @@
+/* Conversation first: one header, a readable transcript, a compact composer. */
+.main>.chat .chat-top{min-height:52px;padding:10px 20px;flex-wrap:nowrap;gap:10px}
+.chat-title{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-header-actions{display:flex;align-items:center;gap:6px;flex:none}
+.main>.chat .chat-top button{background:transparent;border-color:transparent;font-size:12px;padding:6px 8px}
+.main>.chat .chat-top button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.chat-menu{position:relative;flex:none}
+.chat-menu>summary{cursor:pointer;list-style:none;border-radius:7px;padding:6px 9px;color:var(--muted);font-size:13px;user-select:none}
+.chat-menu>summary::-webkit-details-marker{display:none}
+.chat-menu>summary:hover,.chat-menu[open]>summary{background:color-mix(in srgb,var(--ink) 6%,transparent);color:var(--ink)}
+.chat-menu-panel{position:absolute;right:0;top:calc(100% + 8px);z-index:15;width:240px;max-width:calc(100vw - 32px);padding:8px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 28px #0002;white-space:normal}
+.chat-menu-panel button{display:block;width:100%;text-align:left;border:0;background:transparent;padding:10px;font-size:12px}
+.chat-menu-panel p,.chat-menu-panel small{display:block;padding:8px;font-size:11px;line-height:1.7}
+.main>.chat .messages{padding:22px max(24px,calc((100% - 820px)/2)) 16px;scrollbar-gutter:stable;scrollbar-color:color-mix(in srgb,var(--muted) 50%,var(--card)) transparent}
+.header:has(~.main>.chat) .search kbd{background:color-mix(in srgb,var(--ink) 8%,var(--card));color:var(--muted)}
+body:has(.main>.chat) #sessionList button.active{background:color-mix(in srgb,var(--blue) 12%,var(--card));color:var(--blue)}
+.main>.chat .messages:focus-visible{outline:2px solid var(--line);outline-offset:-2px}
+.main>.chat .messages>.message{max-width:820px;margin:0 0 28px;white-space:normal;font-size:15px;line-height:1.85}
+.main>.chat .messages>.message.user{max-width:85%;width:fit-content;margin-left:auto;padding:11px 17px;border-radius:18px;background:color-mix(in srgb,var(--blue) 8%,var(--card))}
+.message.user .message-content{white-space:pre-wrap}.message.user .role{display:none}
+.main>.chat .message.user{position:relative}.message.user .message-actions{position:absolute;right:0;bottom:-27px;white-space:nowrap;flex-wrap:nowrap}
+.message .role{margin-bottom:9px;font-size:11px;font-weight:500;letter-spacing:.3px}
+.message-content p{margin:0 0 14px}.message-content p:last-child{margin-bottom:0}
+.message-content h3{font-size:16px;line-height:1.6;margin:22px 0 10px}.message-content h3:first-child{margin-top:0}
+.message-content ul,.message-content ol{padding-left:24px;margin:8px 0 16px}.message-content li{padding-left:3px;margin:5px 0}
+.message-content code{background:color-mix(in srgb,var(--ink) 6%,transparent);font: .9em Consolas,monospace;padding:2px 5px;border-radius:5px}
+.message-content pre{white-space:pre;overflow:auto;max-width:100%;padding:16px;margin:14px 0;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--bg) 70%,var(--card));line-height:1.6;font-size:13px}
+.message-content pre code{padding:0;background:transparent}
+#streamDraft{white-space:pre-wrap!important}
+.message .message-actions{gap:4px;margin-top:8px;opacity:0;transition:opacity .15s}
+.message:hover .message-actions,.message:focus-within .message-actions{opacity:1}
+.message-actions button{font-size:11px;padding:3px 6px;background:transparent;border-color:transparent;color:var(--muted)}
+.main>.chat .composer{width:calc(100% - 48px);max-width:868px;align-self:center;margin:0 24px 18px;padding:10px 14px 9px;border-radius:20px;box-shadow:0 4px 22px #17283d06}
+.main>.chat .composer textarea{min-height:44px;height:44px;max-height:160px;padding:8px 5px;resize:none;font-size:14px;line-height:24px}
+.main>.chat .composer .composer-actions{margin-top:6px;gap:4px;flex-wrap:nowrap}
+.composer-actions .composer-config{display:contents}
+.composer-actions .composer-config button{min-height:32px;width:auto;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 8px;border:0;background:transparent;font-size:12px;border-radius:8px}
+.composer-actions [data-action=chat-permissions][data-ready=false]::before{content:'●';color:#d18b20;margin-right:5px;font-size:9px}
+.composer-actions button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.composer-actions .attach-button{font-size:24px;padding:0;width:32px;height:32px;border:0;background:transparent;line-height:1}
+.composer-actions #attachmentCount{font-size:11px}.composer-actions #attachmentCount:empty{display:none}
+.composer-actions #modelReadiness{min-width:0;margin-left:auto;flex:0 1 180px;overflow:hidden;font-size:12px}
+.composer-actions #modelReadiness button{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;color:var(--muted);font-size:12px;padding:6px 8px}
+.composer-actions #modelReadiness button.needs-setup{color:var(--blue)}
+.composer-actions button[type=submit]{border-radius:50%;width:34px;min-width:34px;height:34px;padding:0;font-size:21px;margin-left:3px;line-height:1;background:var(--blue);color:white}
+.composer-actions .chat-menu-panel{top:auto;bottom:calc(100% + 12px)}
+.composer-actions .composer-vision{padding:8px;font-size:12px;flex-basis:auto;order:0;color:var(--ink);align-items:flex-start;line-height:1.7}
+.main>.chat #sendFeedback:not(:empty){padding-top:0;margin-bottom:4px}
+.main>.chat #sendFeedback{max-height:100px;font-size:12px}
+.main>.chat #sendFeedback .failure{font-size:12px;line-height:1.6;padding:7px 9px}
+.main>.chat #attachmentList:not(:empty){padding-top:0;max-height:124px;overflow:auto;margin-bottom:5px}
+.main>.chat #attachmentList .attachment-cards:empty{display:none}
+.main>.chat .run-notice{margin:0 20px 4px;padding:8px 12px;font-size:12px;max-height:140px;overflow:auto}
+.main>.chat .run-notice p{font-size:12px;line-height:1.6;margin-top:6px}
+.chat-results>summary,.chat-artifacts>summary{cursor:pointer;font-size:13px;font-weight:500;line-height:1.6;color:var(--muted)}
+.main>.chat .messages>.chat-results,.main>.chat .messages>.chat-artifacts,.main>.chat .messages>details.card{padding:12px 14px;border-radius:10px;background:color-mix(in srgb,var(--card) 65%,transparent);box-shadow:none;margin:12px 0}
+.chat-results[open]>summary,.chat-artifacts[open]>summary{margin-bottom:12px}
+.chat-health{display:grid;gap:18px}.chat-health section{padding:14px;border:1px solid var(--line);border-radius:10px}.chat-health p{font-size:13px;line-height:1.8;margin-top:8px;overflow-wrap:anywhere}
+@media(hover:none){.message .message-actions{opacity:1}}
+@media(max-width:1000px){.composer-actions .composer-config button{max-width:170px}.composer-actions #modelReadiness{flex-basis:140px}}
+@media(max-width:750px){.main>.chat .chat-top{min-height:46px;padding:8px 12px}.main>.chat .chat-top>strong{font-size:13px}.main>.chat .messages{padding:16px 16px 10px}.main>.chat .messages>.message{font-size:14px;margin-bottom:22px}.main>.chat .composer{width:calc(100% - 20px);margin:0 10px 10px;padding:8px 9px;border-radius:17px}.composer-actions .composer-config button{font-size:11px;max-width:148px;padding:6px}.composer-actions #modelReadiness{flex-basis:120px}.chat-header-actions #inspectorToggle{font-size:11px;padding:5px}.main>.chat .messages>.message.user{margin-left:auto}.main>.chat .run-notice{margin:0 12px 4px}}
+@media(max-width:500px){.composer-actions{display:flex!important;flex-wrap:wrap!important}.composer-actions .composer-config button{max-width:calc(100vw - 100px)}.composer-actions #modelReadiness{order:2;margin-left:0;flex:1 0 calc(100% - 82px);max-width:calc(100% - 82px)}.composer-actions .chat-menu{order:3;margin-left:auto}.composer-actions button[type=submit]{order:4}.composer-actions [data-action=stop]{order:3}.composer-actions #attachmentCount{display:none}.main>.chat .composer textarea{max-height:120px}.chat-top>.badge{font-size:10px;padding:3px 6px}.chat-menu-panel{width:220px}}

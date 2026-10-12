@@ -7,6 +7,66 @@ from tests.support import isolated_settings
 from pyharness.application.accounts import Accounts, AccountError
 
 
+@pytest.mark.parametrize('prior_identity', ['none', 'expired', 'team'])
+async def test_local_launcher_signs_in_operator_despite_old_browser_cookies(tmp_path, prior_identity):
+    app = DesktopApp(cli.assemble_ctx(isolated_settings(tmp_path)))
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.api),
+                                     base_url='http://127.0.0.1') as client:
+            if prior_identity == 'team':
+                Accounts(tmp_path).provision('launch-user', 'synthetic-launch-password', 'launch-team')
+                assert (await client.post('/api/account/login', json={
+                    'username': 'launch-user', 'password': 'synthetic-launch-password'})).status_code == 200
+                assert (await client.get('/api/account/me')).json()['account']['tenant'] == 'launch-team'
+            elif prior_identity == 'expired':
+                client.cookies.set('pyharness_account', 'synthetic-expired-session', domain='127.0.0.1')
+            client.cookies.set('pyharness_token', 'synthetic-old-process-token', domain='127.0.0.1')
+            client.cookies.set('pyharness_tenant_token', 'synthetic-old-team-token', domain='127.0.0.1')
+            response = await client.get(app.bootstrap_url('127.0.0.1', 80))
+            assert response.status_code == 303
+            assert response.headers['location'] == '/'
+            assert response.headers['cache-control'] == 'no-store'
+            assert response.headers['referrer-policy'] == 'no-referrer'
+            assert 'pyharness_account' not in client.cookies
+            assert 'pyharness_tenant_token' not in client.cookies
+            assert client.cookies.get('pyharness_token') == app._api_token
+            assert (await client.get('/')).status_code == 200
+            assert (await client.get('/api/account/me')).json() == {'mode': 'local_operator'}
+            assert (await client.post('/api/account/users', json={
+                'username': 'admin-created', 'password': 'synthetic-admin-created-password',
+                'tenant': 'admin-created-team'})).status_code == 201
+    finally:
+        for service in app._service_registry.all():
+            await service.shutdown()
+
+
+async def test_team_signin_is_not_promoted_without_valid_operator_bootstrap(tmp_path):
+    app = DesktopApp(cli.assemble_ctx(isolated_settings(tmp_path)))
+    try:
+        Accounts(tmp_path).provision('member-user', 'synthetic-member-password', 'member-team')
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.api),
+                                     base_url='http://127.0.0.1') as client:
+            assert (await client.post('/api/account/login', json={
+                'username': 'member-user', 'password': 'synthetic-member-password'})).status_code == 200
+            for path in ['/', '/?token=synthetic-wrong-operator-token',
+                         '/?tenant=member-team&token=' + app._api_token]:
+                response = await client.get(path)
+                assert response.status_code == 200
+                assert 'pyharness_token=' not in response.headers.get('set-cookie', '')
+                assert (await client.get('/api/account/me')).json()['account']['tenant'] == 'member-team'
+            assert (await client.post('/api/account/users', json={'username': 'never-created'})).status_code == 403
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.api),
+                                     base_url='http://127.0.0.1') as anonymous:
+            assert (await anonymous.get('/?token=synthetic-wrong-operator-token')).status_code == 401
+            response = await anonymous.get(app.bootstrap_url('127.0.0.1', 80),
+                                           headers={'Host': 'foreign.invalid'})
+            assert response.status_code == 400
+            assert 'pyharness_token' not in anonymous.cookies
+    finally:
+        for service in app._service_registry.all():
+            await service.shutdown()
+
+
 async def test_two_accounts_cannot_cross_session_run_artifact_memory_or_connection(tmp_path,adapter_factory):
     import asyncio
     import hashlib

@@ -1,16 +1,41 @@
 """Evidence-first document retrieval. Keyword search is the default provider."""
 from __future__ import annotations
 from typing import Protocol
+from dataclasses import dataclass
 import re
 import httpx
+from pyharness.core.url_policy import validate_service_url
+
+@dataclass(frozen=True)
+class KnowledgeProviderCapabilities:
+    max_query_length: int
+    supports_sync: bool = False
+
+
+def validate_query(query, capabilities):
+    if not isinstance(query, str) or not query.strip():
+        raise KnowledgeError('invalid_query')
+    if len(query) > capabilities.max_query_length:
+        raise KnowledgeError('invalid_query_length')
+
+
+class KnowledgeError(ValueError):
+    """Safe typed error: never embeds transport headers, response or secrets."""
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 class KnowledgeProvider(Protocol):
+    capabilities: KnowledgeProviderCapabilities
     async def query(self, query: str, documents: list[dict]) -> dict: ...
 
 
 class ExactKeywordKnowledgeProvider:
+    capabilities = KnowledgeProviderCapabilities(max_query_length=4000)
+
     async def query(self, query: str, documents: list[dict]) -> dict:
+        validate_query(query, self.capabilities)
         words = set(re.findall(r'[\w-]+', query.casefold()))
         hits = []
         for document in documents:
@@ -30,14 +55,45 @@ class RemoteRagKnowledgeProvider:
 
     No implicit endpoint, fallback, embedding model, or startup dependency.
     """
-    def __init__(self, endpoint: str):
-        from pyharness.application.service import _validate_registry_url
-        self.endpoint = _validate_registry_url(endpoint).rstrip('/')
+    capabilities = KnowledgeProviderCapabilities(max_query_length=500, supports_sync=True)
+
+    def __init__(self, endpoint: str, *, secret_ref=None, secret_resolver=None, source_owner=None):
+        self.endpoint = validate_service_url(endpoint).rstrip('/')
+        self.secret_ref = secret_ref
+        self.secret_resolver = secret_resolver
+        self.source_owner = source_owner
 
     async def _request(self, query: str, documents: list[dict]) -> dict:
+        validate_query(query, self.capabilities)
+        return await self.request('POST', '/query', {
+            'query':query, 'documents':documents, 'source_ids':[d['source_id'] for d in documents], 'limit':10,
+            **({'source_owner':self.source_owner} if self.source_owner else {})})
+
+    async def request(self, method, path, body=None):
+        headers = {}
+        if self.secret_ref:
+            if self.secret_resolver is None:
+                raise KnowledgeError('authentication_error')
+            try:
+                headers['Authorization'] = 'Bearer ' + self.secret_resolver(self.secret_ref, self.endpoint)
+            except Exception:
+                raise KnowledgeError('authentication_error') from None
+        try:
+            return await self._http(method, path, body, headers)
+        except KnowledgeError:
+            raise
+        except (TimeoutError, httpx.TimeoutException):
+            raise KnowledgeError('knowledge_timeout') from None
+        except httpx.HTTPStatusError as error:
+            code = error.response.status_code
+            raise KnowledgeError('authentication_error' if code in (401,403)
+                else 'invalid_query' if code in (400,422) else 'provider_unavailable') from None
+        except Exception:
+            raise KnowledgeError('provider_unavailable') from None
+
+    async def _http(self, method, path, body, headers):
         async with httpx.AsyncClient(timeout=5, trust_env=False, follow_redirects=False) as client:
-            async with client.stream('POST', self.endpoint + '/query', json={
-                'query': query, 'documents':documents, 'source_ids': [d['source_id'] for d in documents], 'limit': 10}) as response:
+            async with client.stream(method, self.endpoint + path, json=body, headers=headers) as response:
                 response.raise_for_status()
                 raw=bytearray()
                 async for chunk in response.aiter_bytes():
@@ -69,6 +125,7 @@ class RemoteRagKnowledgeProvider:
         return {'provider':'remote_rag','status':'available'}
 
     async def query(self, query: str, documents: list[dict]) -> dict:
+        validate_query(query, self.capabilities)
         if not documents:
             return {'provider':'remote_rag','citations':[],'answer_allowed':False,'reason':'no_reliable_evidence'}
         body,native=self._envelope(await self._request(query,documents))
@@ -104,6 +161,9 @@ class RemoteRagKnowledgeProvider:
             if (not isinstance(number,int) or isinstance(number,bool) or not 1<=number<=len(lines)
                     or citation['quote'] not in lines[number-1]):
                 raise ValueError('knowledge_invalid_citation_line')
+        citations = [{'source_id':c['source_id'], 'name':allowed[c['source_id']]['name'],
+                      'version':allowed[c['source_id']].get('version', 1),
+                      'line':c['line'], 'quote':c['quote']} for c in citations]
         return {'provider': 'remote_rag', 'citations': citations,
                 'answer_allowed': bool(citations) and (body.get('match_status')=='matched' if native else body.get('answer_allowed') is True),
                 'reason': None if citations and (body.get('match_status')=='matched' if native else body.get('answer_allowed') is True) else 'no_reliable_evidence'}

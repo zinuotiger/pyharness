@@ -69,7 +69,8 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
         guard=getattr(spine, "guard", None),
         governance=getattr(spine, "governance", None),
         approval=getattr(spine, "approval", None),
-        counters=getattr(spine, "counters", None),
+        counters=(getattr(scope, '_counters', None) if session is not getattr(spine, 'session', None)
+                  else getattr(spine, "counters", None)),
         storage=getattr(spine, "storage", None),
         goals=goals,
         todos=todos,
@@ -265,6 +266,24 @@ class EngineSubagentRunner:
             try: store.close()
             except BaseException as exc: errors.append(exc)
         if errors: raise BaseExceptionGroup('child cleanup failed', errors)
+
+    def completed_result(self, sub_id):
+        """Read a closed child's terminal facts; caller must establish ownership."""
+        import re
+        from pyharness.persistence import SessionReader
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', sub_id):
+            return None
+        result = None
+        for event in SessionReader(sub_id, dir=self.sessions_dir).replay():
+            payload = event.payload
+            if event.type == 'subagent.joined' and payload.get('sub_id') == sub_id:
+                result = ('done', payload['summary'], None)
+            elif event.type == 'subagent.failed' and payload.get('sub_id') == sub_id:
+                match = re.match(r'\[([A-Z]+-\d+)\]', payload.get('summary',''))
+                result = ('failed', None, match[1] if match else 'CYC-999')
+            elif event.type == 'system.cancelled' and payload.get('what') == 'subagent:'+sub_id:
+                result = ('cancelled', None, None)
+        return result
 
     async def run_child(self, env: Any) -> str:
         from pyharness.core.approval import ApprovalProvider

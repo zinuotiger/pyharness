@@ -695,7 +695,10 @@ def test_s24_adapters_reference_sync_types():
     assert "def session_recorder(" in src_impl
     assert "SYNC_TYPES" in src_impl, "唯一实现必须派生自 events.vocab.SYNC_TYPES"
 
-    for rel in ("pyharness/engine.py", "pyharness/desktop/sessions.py",
+    from pyharness.desktop import sessions
+    from pyharness.application import session_store
+    assert sessions is session_store  # Historical import remains the same owner.
+    for rel in ("pyharness/engine.py", "pyharness/application/session_store.py",
                 "pyharness/cli.py"):           # R9:CLI 侧原为第三份各自实现
         src = (repo / rel).read_text(encoding="utf-8")
         assert "session_recorder" in src, f"{rel} 未委托唯一实现(应为派生)"

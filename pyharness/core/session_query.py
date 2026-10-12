@@ -308,37 +308,10 @@ class QueryResult:
 
 
 # ============================================================ 模块工具(读配置)
-def _cfg_holder(ctx: Any) -> Any:
-    """取配置持有者:spec 伪码经 ctx.cfg;本项目装配(Ctx)为 ctx.config(双形态都收)。"""
-    if ctx is None:
-        return None
-    for name in ("cfg", "config"):
-        holder = getattr(ctx, name, None)
-        if holder is not None:
-            return holder
-    return None
+from pyharness.core.config_access import _cfg_holder
 
 
-def _cfg(holder: Any, dotted: str, default: Any = None) -> Any:
-    """点分键取值,双形态兼容:dict(点分整键或逐层嵌套)与属性链(pydantic Settings)。"""
-    if holder is None:
-        return default
-    parts = dotted.split(".")
-    if isinstance(holder, dict):
-        if dotted in holder:
-            return holder[dotted]
-        cur: Any = holder
-        for p in parts:
-            if not isinstance(cur, dict) or p not in cur:
-                return default
-            cur = cur[p]
-        return cur
-    cur = holder
-    for p in parts:
-        cur = getattr(cur, p, None)
-        if cur is None:
-            return default
-    return cur
+from pyharness.core.config_access import _cfg
 
 
 def _log_warn(msg: str, *args: Any) -> None:
@@ -793,6 +766,7 @@ class SessionQueryIndex:
     # ------------------------------------------------------------ 全文查询
     async def query(self, q: str, *, limit: int = 20,
                     session_id: Optional[str] = None,
+                    session_ids: Optional[set[str]] = None,
                     actor: Optional[str] = None,
                     after_ts: Optional[str] = None) -> QueryResult:
         """全文查询(spec 伪码,F057 验收直译)。
@@ -821,6 +795,12 @@ class SessionQueryIndex:
         if session_id:
             sql += " AND session_id=?"
             args.append(session_id)
+        if session_ids is not None:
+            # An explicit empty scope must never fall back to the whole index.
+            if not session_ids:
+                return QueryResult(hits=[], timed_out=False)
+            sql += " AND session_id IN (" + ",".join("?" for _ in session_ids) + ")"
+            args.extend(sorted(session_ids))
         if actor:
             sql += " AND actor=?"
             args.append(actor)
@@ -985,6 +965,42 @@ class SessionQueryIndex:
                  session_id or "*", len(rows), len(edits))
         return len(rows)
 
+    async def reconcile_sources(self, sources, *, authorized_ids=None):
+        """Incrementally project an explicitly authorized set; prune removed access.
+
+        Watermarks are derived metadata. A crash before watermark commit replays
+        idempotently, and recreation of the database rebuilds from sequence zero.
+        Caller serializes reconcile/query within its tenant's application lock.
+        """
+        db = self._db
+        if db is None:
+            raise_code('PERS-202', op='fts_reconcile')
+        db.execute('CREATE TABLE IF NOT EXISTS source_progress (sid TEXT PRIMARY KEY, seq INTEGER NOT NULL)')
+        previous = dict(db.execute('SELECT sid,seq FROM source_progress'))
+        known = set(previous) | {r[0] for r in db.execute('SELECT DISTINCT session_id FROM fts_rows')}
+        authorized = set(sources) if authorized_ids is None else set(authorized_ids)
+        if not set(sources) <= authorized:
+            raise_code('EVT-100', hint='Index sources exceed authorized scope')
+        for sid in known - authorized:
+            await self.delete_session(sid)
+            db.execute('DELETE FROM source_progress WHERE sid=?',(sid,))
+        scanned = 0
+        self._sources = dict(sources)
+        for sid, source in sources.items():
+            last = previous.get(sid, 0)
+            current = source.stats()['seq']
+            if current < last:
+                await self.delete_session(sid)
+                self._sources[sid] = source
+                last = 0
+            for event in source.events_after(last):
+                await self.on_event(event.type, event)
+                scanned += 1
+            await self.flush()
+            db.execute('INSERT OR REPLACE INTO source_progress VALUES (?,?)',(sid,current))
+            db.commit()
+        return scanned
+
     async def delete_session(self, session_id: str) -> None:
         """会话删除级联删索引(PRD F057 边界;JSONL 归档/删除由存储层负责)。
 
@@ -1003,6 +1019,8 @@ class SessionQueryIndex:
                                      (session_id,))
                     self._db.execute("DELETE FROM fts_rows WHERE session_id=?",
                                      (session_id,))
+                    self._db.execute('CREATE TABLE IF NOT EXISTS source_progress (sid TEXT PRIMARY KEY, seq INTEGER NOT NULL)')
+                    self._db.execute('DELETE FROM source_progress WHERE sid=?', (session_id,))
         except sqlite3.Error as e:
             raise_code("PERS-202", op="fts_delete_session", session=session_id,
                        hint=f"FTS 级联删除失败: {e}",

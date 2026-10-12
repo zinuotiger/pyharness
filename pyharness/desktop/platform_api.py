@@ -83,12 +83,40 @@ def mount_platform(desktop):
         return {'ok':await desktop.service.cancel_job(sid,ident)}
 
     @router.get('/runs')
-    async def runs():
-        return await service().runs()
+    async def runs(cursor:str | None=None, limit:int | None=None):
+        return await service().runs(cursor=cursor,limit=limit)
 
     @router.get('/chat/readiness')
     async def chat_readiness(session_id: str | None = None, agent_id: str | None = None, agent_version: int | None = None):
         return await service().chat_readiness({'session_id':session_id, 'agent_id':agent_id, 'agent_version':agent_version})
+
+    @router.get('/chat/configuration')
+    async def chat_configuration(session_id: str | None=None, agent_id: str | None=None, version: int | None=None):
+        return await service().chat_setup.configuration(session_id, agent_id, version)
+
+    @router.post('/chat/assistants')
+    async def create_use(body: dict=Body(...)):
+        return service().chat_setup.create_use(body)
+
+    @router.get('/chat/assistants')
+    async def chat_assistants():
+        return service().chat_setup.assistants()
+
+    @router.post('/chat/switch')
+    async def switch_chat(body: dict=Body(...)):
+        return await service().chat_setup.switch(body)
+
+    @router.post('/chat/execution-readiness')
+    async def execution_readiness(body: dict=Body(...)):
+        return await service().chat_setup.readiness(body)
+
+    @router.get('/chat/remote-connections')
+    async def remote_connections():
+        return service().chat_setup.remotes()
+
+    @router.post('/chat/remote-connections')
+    async def remote_connection(body: dict=Body(...)):
+        return service().chat_setup.save_remote(body)
 
     @router.post('/runs')
     async def start_run(body: dict = Body(...)):
@@ -99,9 +127,10 @@ def mount_platform(desktop):
         return await service().run(ident)
 
     @router.get('/runs/{ident}/trace')
-    async def trace(ident: str):
-        item = await service().run(ident)
-        return {'trace':item['trace']}
+    async def trace(ident: str, cursor: str | None=None, limit: int=500):
+        item = await service().run(ident, cursor=cursor, limit=limit)
+        return {'trace':item['trace'], 'total':item['trace_total'],
+                'truncated':item['trace_truncated'], 'cursor':item['trace_cursor']}
 
     @router.post('/runs/{ident}/cancel')
     async def cancel(ident: str):
@@ -116,10 +145,10 @@ def mount_platform(desktop):
         return await service().approvals()
 
     @router.post('/approvals/{ident}/{action}')
-    async def decision(ident: str, action: str):
+    async def decision(ident: str, action: str, body: dict=Body(default={})):
         if action not in {'approve','reject'}:
             fail('invalid_action')
-        return await service().decide(ident, action)
+        return await service().decide(ident, action, body or None)
 
     @router.get('/agents')
     async def agents():
@@ -158,8 +187,8 @@ def mount_platform(desktop):
         return service().agent_action(ident, 'delete')
 
     @router.get('/artifacts')
-    async def artifacts():
-        return await service().artifacts()
+    async def artifacts(cursor:str | None=None, limit:int | None=None):
+        return await service().artifacts(cursor=cursor,limit=limit)
 
     @router.post('/artifacts')
     async def upload(body: dict = Body(...)):
@@ -220,11 +249,15 @@ def mount_platform(desktop):
 
     @router.delete('/knowledge/{ident}')
     async def delete_knowledge(ident: str):
-        return service().delete_knowledge(ident)
+        result = service().delete_knowledge(ident)
+        await service().sync_knowledge()
+        return result
 
     @router.post('/knowledge/{ident}/{action}')
     async def knowledge_action(ident:str,action:str,body:dict=Body(default={})):
-        return service().knowledge_action(ident,action,body)
+        result = service().knowledge_action(ident,action,body)
+        await service().sync_knowledge()
+        return result
 
     @router.get('/sandboxes')
     async def sandboxes():

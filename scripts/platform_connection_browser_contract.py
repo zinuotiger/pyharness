@@ -28,13 +28,13 @@ async def verify_connection(page,output):
         await navigate(page,'connections');await page.get_by_role('button',name='添加模型',exact=True).click()
         for field,value in [('label','audit local protocol'),('model','audit-synthetic'),('base_url',f'http://127.0.0.1:{port}/v1'),('api_key','synthetic-local-only-credential')]:
             await page.locator('#model_'+field).fill(value)
-        page.once('dialog',lambda dialog:dialog.accept())
         await page.get_by_role('button',name='保存并测试连接',exact=True).click()
-        await page.locator('#dialog pre').filter(has_text='"status": "available"').wait_for(timeout=20000)
+        await page.locator('#confirmProceed').click()
+        await page.locator('.model-editor-status').filter(has_text='连接测试通过').wait_for(timeout=20000)
         assert len(requests)==1
-        assert 'synthetic-local-only-credential' not in await page.locator('#dialog').inner_text()
+        assert 'synthetic-local-only-credential' not in await page.locator('.settings-content').inner_text()
         await page.screenshot(path=str(output/'model-real-transport-local-fixture.png'),full_page=True)
-        await page.locator('#dialogClose').click()
+        await page.locator('[data-action="panel-back"]').click()
         return {'area':'model save/test','result':'passed','chain':'UI -> saved profile -> model_probe -> LLMClient -> OpenAICompatAdapter -> real HTTP Transport -> loopback fixture -> usage/Trace',
                 'controlled_http_requests':len(requests),'real_external_provider_requests':0,'not_a_provider_acceptance':True}
     finally:

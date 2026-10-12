@@ -112,38 +112,10 @@ _WRITE_FAIL_ADVICE: str = "查 spill 目录权限(700)、文件权限(600)与磁
 
 
 # ------------------------------------------------------------------ 配置/上下文辅助
-def _cfg_holder(ctx: Any) -> Any:
-    """取配置持有者:spec 伪码经 ctx.cfg;本项目装配(Ctx)为 ctx.config(偏离 1)。
-
-    两种命名都收;都没有 → None(调用方按各自错误路径处理)。
-    """
-    for name in ("cfg", "config"):
-        holder = getattr(ctx, name, None)
-        if holder is not None:
-            return holder
-    return None
+from pyharness.core.config_access import _cfg_holder
 
 
-def _cfg(holder: Any, dotted: str, default: Any = None) -> Any:
-    """点分键取值,双形态兼容:dict(点分整键或逐层嵌套)与属性链(pydantic)。"""
-    if holder is None:
-        return default
-    parts = dotted.split(".")
-    if isinstance(holder, dict):
-        if dotted in holder:                    # 平铺点分键形态
-            return holder[dotted]
-        cur: Any = holder
-        for p in parts:                         # 嵌套 dict 形态
-            if not isinstance(cur, dict) or p not in cur:
-                return default
-            cur = cur[p]
-        return cur
-    cur = holder                                # pydantic/属性形态
-    for p in parts:
-        cur = getattr(cur, p, None)
-        if cur is None:
-            return default
-    return cur
+from pyharness.core.config_access import _cfg
 
 
 def _spill_root(ctx: Any) -> Optional[Path]:

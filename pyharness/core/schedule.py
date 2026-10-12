@@ -219,18 +219,9 @@ class Scheduler:
                 return q
         return None
 
-    def _iter_session_events(self) -> list[Any]:
-        """会话事件流只读遍历(session.replay/events_after 语义;计数与重建共用)。"""
-        s = self.session
-        if s is None:
-            return []
-        if hasattr(s, "events_after"):        # SessionLog 增量读(seq 升序)
-            return list(s.events_after(0))
-        if hasattr(s, "replay"):              # 存储层真源回放
-            return list(s.replay())
-        if hasattr(s, "events"):              # 测试替身/轻量落点
-            return list(s.events)
-        return []
+    def _iter_session_events(self):
+        from pyharness.core.event_reader import session_events
+        return session_events(self.session)
 
     def _danger_level(self, tool: str) -> str:
         """单工具危险级解析(F023;未知工具视同 none,显式 override 由调用方把关)。"""

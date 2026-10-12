@@ -505,6 +505,40 @@ class TenantSettingsStore:
         return next((dict(p) for p in doc.get("profiles", [])
                      if str(p.get("id")) == active), None)
 
+    @_transactional
+    def set_service_secret(self, tenant_id: str, service_id: str, endpoint: str, value: str) -> str:
+        """Write-only service credential, using the existing atomic secret store."""
+        tenant = normalize_tenant_id(tenant_id)
+        if not re.fullmatch(r'remote_rag:[a-z][a-z0-9_]{1,40}', service_id):
+            raise_code('CRED-703', reason='invalid_service_id')
+        if not isinstance(value, str) or len(value) > 8192 or any(c in value for c in '\r\n'):
+            raise_code('CRED-703', reason='invalid_service_secret')
+        doc = self._load_doc(tenant)
+        values = self._load_secrets(tenant)
+        key = 'service:'+service_id
+        if value:
+            values[key] = value
+            doc.setdefault('service_credentials', {})[service_id] = {'endpoint':endpoint}
+        else:
+            values.pop(key, None)
+            doc.setdefault('service_credentials', {}).pop(service_id, None)
+        self._commit(tenant, doc, values)
+        return 'service:'+tenant+':'+service_id if value else ''
+
+    def resolve_service_secret(self, ref: str, tenant_id: str, endpoint: str) -> str:
+        prefix = 'service:'+normalize_tenant_id(tenant_id)+':'
+        if not isinstance(ref, str) or not ref.startswith(prefix):
+            raise_code('CRED-703', reason='service_secret_owner_mismatch')
+        service_id = ref[len(prefix):]
+        with self._transaction(tenant_id):
+            record = self._load_doc(tenant_id).get('service_credentials', {}).get(service_id)
+            if not record or record.get('endpoint') != endpoint:
+                raise_code('CRED-703', reason='service_secret_endpoint_mismatch')
+            value = self._load_secrets(tenant_id).get('service:'+service_id)
+            if not value:
+                raise_code('CRED-701', reason='service_secret_missing')
+            return value
+
     def resolve_ref(self, ref: str, *, binding=None) -> str:
         parts = str(ref or "").split(":", 2)
         if len(parts) != 3 or parts[0] != "tenant":

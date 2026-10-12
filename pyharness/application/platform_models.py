@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pyharness.core.sandbox_models import SandboxProfile, SandboxRecord
 
 
 def utcnow() -> str:
@@ -14,16 +15,6 @@ class Model(BaseModel):
     model_config = ConfigDict(extra='forbid', validate_assignment=True)
 
 
-class SandboxProfile(Model):
-    mode: Literal['disabled', 'host_approved', 'isolated'] = 'disabled'
-    workspace_mode: Literal['private_copy', 'private_git_clone', 'empty'] = 'private_copy'
-    network: Literal['none'] = 'none'
-    image: str = Field(default='python:3.13-slim', pattern=r'^[a-zA-Z0-9][a-zA-Z0-9_./:@-]{0,199}$')
-    cpus: float = Field(default=1, ge=0.1, le=4)
-    memory_mb: int = Field(default=256, ge=64, le=2048)
-    pids_limit: int = Field(default=64, ge=8, le=256)
-    timeout: int = Field(default=60, ge=1, le=600)
-    output_limit: int = Field(default=65536, ge=1024, le=1048576)
 
 
 class Budget(Model):
@@ -34,6 +25,7 @@ class Budget(Model):
 
 
 class AgentDefinition(Model):
+    review_mode: Literal['manual', 'automatic'] = 'manual'
     agent_id: str = ''
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default='', max_length=2000)
@@ -45,6 +37,7 @@ class AgentDefinition(Model):
     skills: list[str] = Field(default_factory=list, max_length=30)
     knowledge_sources: list[str] = Field(default_factory=list, max_length=30)
     require_evidence: bool = False
+    strict_knowledge: bool = False
     permission_policy: Literal['strict', 'standard'] = 'strict'
     sandbox_profile: SandboxProfile = Field(default_factory=SandboxProfile)
     budget: Budget = Field(default_factory=Budget)
@@ -125,18 +118,6 @@ class ArtifactRecord(Model):
     validation_status: Literal['not_run', 'passed', 'failed'] = 'not_run'
 
 
-class SandboxRecord(Model):
-    sandbox_id: str
-    run_id: str
-    backend: str
-    status: str
-    workspace_mode: str
-    network: str = 'none'
-    cpus: float
-    memory_mb: int
-    pids_limit: int
-    created_at: str = Field(default_factory=utcnow)
-    error_code: str | None = None
 
 
 class TraceSpan(Model):

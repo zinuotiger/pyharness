@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -134,6 +134,8 @@ class LlmUsagePayload(_PayloadBase):
     out_tokens: int = Field(ge=0)
     cache_hit: Optional[int] = Field(default=0, ge=0)
     cost_est: Optional[float] = Field(default=None, ge=0)
+    estimated: bool = False
+    input_unknown: bool = False
 
 
 class LlmErrorPayload(_PayloadBase):
@@ -196,6 +198,18 @@ class ApprovalRequestedPayload(_PayloadBase):
     args_summary: str = Field(min_length=1)
     ttl_ms: int = Field(default=120_000, gt=0)
     risk: Optional[str] = Field(default=None, pattern=r"^(high|critical)$")
+    details: Optional[dict] = None
+
+
+class ApprovalReviewedPayload(_PayloadBase):
+    approval_id: int
+    call_id: str
+    reviewer: str
+    decision: Literal['approve', 'deny', 'manual']
+    reason: str
+    invocation_sha256: str
+    context_sha256: str
+    scope: dict
 
 
 class ApprovalOutcomePayload(_PayloadBase):

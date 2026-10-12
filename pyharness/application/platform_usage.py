@@ -10,7 +10,9 @@ async def usage(platform, view, filters):
         fail('invalid_usage_filter')
     boundaries = {k:datetime.fromisoformat(filters[k]) for k in ('from','to') if filters.get(k)}
     totals = dict(input_tokens=0, output_tokens=0, cache_hit=0, model_calls=0,
-                  tool_calls=0, model_requests=0, usage_records=0, usage_unknown_requests=0, estimated_cost=None, sandbox_minutes=0, artifact_bytes=0)
+                  tool_calls=0, model_requests=0, usage_records=0, usage_unknown_requests=0,
+                  estimated_usage_records=0, input_unknown_records=0,
+                  estimated_cost=None, sandbox_minutes=0, artifact_bytes=0)
     selected = {r['run_id']:r for r in view['runs'] if all(not filters.get(k) or str(r.get(k))==filters[k]
                 for k in ('session_id','agent_id','run_id'))}
     latencies=[]; sandbox_starts={}; included=set()
@@ -35,6 +37,8 @@ async def usage(platform, view, filters):
             if e.type=='llm.request': totals['model_requests']+=1
             if e.type=='llm.usage':
                 totals['usage_records']+=1
+                totals['estimated_usage_records']+=bool(p.get('estimated'))
+                totals['input_unknown_records']+=bool(p.get('input_unknown'))
                 for output,source in [('input_tokens','in_tokens'),('output_tokens','out_tokens'),('cache_hit','cache_hit')]:
                     totals[output]+=p.get(source) or 0
                 totals['model_calls']+=1
@@ -50,7 +54,8 @@ async def usage(platform, view, filters):
     artifacts=(await platform.artifacts())['artifacts']
     totals['artifact_bytes']=sum(a['size'] for a in artifacts if (not filters or a['run_id'] in included))
     totals['usage_unknown_requests']=max(0, totals['model_requests']-totals['usage_records'])
-    totals['usage_status']='unknown' if totals['usage_unknown_requests'] else 'known'
+    totals['usage_status']=('unknown' if totals['usage_unknown_requests'] else
+                            'estimated' if totals['estimated_usage_records'] or totals['input_unknown_records'] else 'known')
     latencies.sort()
     n=len(runs)
     totals.update(tokens=totals['input_tokens']+totals['output_tokens'], run_count=n,

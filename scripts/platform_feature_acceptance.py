@@ -79,7 +79,8 @@ async def acceptance(output):
     async def shot(page,name):
         await page.screenshot(path=str(output/(name+'.png')),full_page=True);snapshots.append(name+'.png')
     async def close_dialog(page):
-        if await page.locator('#dialog').is_visible():await page.locator('#dialogClose').click()
+        if await page.locator('[data-action="panel-back"]').count():await page.locator('[data-action="panel-back"]').click()
+        elif await page.locator('#dialog').is_visible():await page.locator('#dialogClose').click()
     async def until(predicate):
         async with asyncio.timeout(15):
             while not await predicate():await asyncio.sleep(.05)
@@ -91,10 +92,10 @@ async def acceptance(output):
             await anon.locator('#login').wait_for();assert anon.url.endswith('/login');await anonymous.close()
             ctx=await browser.new_context(viewport={'width':1440,'height':900},extra_http_headers={'X-PyHarness-Token':app._api_token})
             page=await ctx.new_page();page.on('pageerror',lambda e:errors.append(type(e).__name__))
-            await page.goto(base+'/');await page.locator('#modelReadiness').get_by_role('button',name='打开模型配置').wait_for()
+            await page.goto(base+'/');await page.locator('#modelReadiness').get_by_role('button',name='配置模型 ▾',exact=True).wait_for()
             await page.locator('#messageText').fill('没有配置模型的合成任务')
             async with page.expect_response(lambda r:r.url.endswith('/api/v1/runs') and r.request.method=='POST') as pending:
-                await page.get_by_role('button',name='发送 ↑',exact=True).click()
+                await page.get_by_role('button',name='发送消息',exact=True).click()
             assert (await pending.value).status==422
             await page.locator('#sendFeedback').get_by_role('button',name='打开模型配置').wait_for()
             assert await page.locator('#messageText').input_value()=='没有配置模型的合成任务'
@@ -122,14 +123,14 @@ async def acceptance(output):
             sid=await page.evaluate('state.sid')
             await page.locator('#messageText').fill('audit-continuous')
             await page.locator('#messageText').press('Enter')
-            await page.locator('.run-notice').wait_for()
+            await page.locator('.chat-top .badge').wait_for()
             async def has_question():return bool((await app.service.pending_asks())['pending'])
             await until(has_question)
             await page.locator('#inspectorToggle').click();await page.get_by_role('button',name='待答问题',exact=True).click()
             await page.get_by_role('button',name='回答',exact=True).click();await page.locator('#answerText').fill('继续合成验收');await shot(page,'continuous-question')
             await page.get_by_role('button',name='提交答复',exact=True).click()
-            await page.locator('.run-notice .badge.green').wait_for(timeout=20000)
-            run_id=await page.locator('.run-notice').get_attribute('data-run-id')
+            await page.locator('.chat-top .badge').filter(has_text='已完成').wait_for(timeout=20000)
+            run_id=next(r['run_id'] for r in (await app.service.platform.runs())['runs'] if r['session_id']==sid)
             await page.get_by_role('button',name='子任务',exact=True).click();await page.get_by_text('已完成',exact=True).last.wait_for()
             history=await app.service.list_subagents(sid);assert len(history['history'])==1 and history['history'][0]['status']=='completed'
             await shot(page,'continuous-child-summary');await close_dialog(page)
@@ -142,12 +143,12 @@ async def acceptance(output):
             raw=json.dumps({'evidence':'synthetic model / real runtime','status':run['status']}).encode()
             artifact=await app.service.platform.record_generated(SimpleNamespace(session=log,task_id=run['task_id']),'audit-report.json',raw)
             await navigate(page,'artifacts');await page.get_by_role('button',name='预览',exact=True).click()
-            await page.locator('#dialog').get_by_text('synthetic model / real runtime',exact=False).wait_for();await shot(page,'continuous-artifact-preview');await close_dialog(page)
+            await page.locator('.settings-content').get_by_text('synthetic model / real runtime',exact=False).wait_for();await shot(page,'continuous-artifact-preview');await close_dialog(page)
             await page.get_by_role('button',name='申请导出',exact=True).click();await navigate(page,'approvals')
             await page.get_by_role('button',name='批准一次',exact=True).wait_for();await shot(page,'continuous-export-approval')
-            page.once('dialog',lambda dialog:dialog.accept())
             async with page.expect_response(lambda r:'/approvals/' in r.url and r.url.endswith('/approve')) as approved:
                 await page.get_by_role('button',name='批准一次',exact=True).click()
+                await page.locator('#confirmProceed').click()
             assert (await approved.value).status==200
             async def exported():return (await app.service.platform.artifact(artifact['artifact_id']))['download_allowed']
             await until(exported)
@@ -159,15 +160,15 @@ async def acceptance(output):
             # Rejection is observed before the disabled execution boundary; never
             # approve a filesystem tool or substitute host execution for Docker.
             await navigate(page,'chat');await page.locator('#messageText').fill('audit-reject');await page.locator('#messageText').press('Enter')
-            await page.locator('.run-notice .badge.amber').filter(has_text='等待审批').wait_for(timeout=15000)
+            await page.locator('.chat-top .badge').filter(has_text='等待审批').wait_for(timeout=15000)
             await shot(page,'waiting-approval-visible');await navigate(page,'approvals')
-            page.once('dialog',lambda dialog:dialog.accept())
             await page.get_by_role('button',name='拒绝',exact=True).click()
-            await navigate(page,'chat');await page.locator('.run-notice .badge.green').wait_for(timeout=15000)
+            await navigate(page,'chat');await page.locator('.chat-top .badge').filter(has_text='已完成').wait_for(timeout=15000)
             assert not (Path(app.service._session_workspace(sid))/'must-not-exist.txt').exists()
             assert any(a['status']=='rejected' for a in (await app.service.platform.approvals())['approvals'])
             rows.append({'area':'approval rejection','result':'passed','waiting_approval_observed':True,'filesystem_tool_executed':False})
             await page.locator('#messageText').fill('audit-cancel');await page.locator('#messageText').press('Enter');await asyncio.wait_for(model.cancel_entered.wait(),10)
+            page.once('dialog',lambda dialog:dialog.accept())
             await page.get_by_role('button',name='停止',exact=True).click();await page.locator('.run-notice .badge').filter(has_text='已取消').wait_for(timeout=15000)
             await shot(page,'cancel-visible')
             await page.locator('#messageText').fill('audit-failure');await page.locator('#messageText').press('Enter')
@@ -179,9 +180,9 @@ async def acceptance(output):
             async with page.expect_file_chooser() as chooser:await page.get_by_role('button',name='上传文档',exact=True).click()
             await (await chooser.value).set_files({'name':'audit-knowledge.txt','mimeType':'text/plain','buffer':b'auditkeyword citation evidence'})
             await page.get_by_text('audit-knowledge.txt',exact=True).wait_for();await page.locator('#queryText').fill('auditkeyword');await page.locator('#knowledgeQuery button').click()
-            await page.locator('#dialog').get_by_text('auditkeyword citation evidence',exact=False).wait_for();await shot(page,'knowledge-citation');await close_dialog(page)
+            await page.locator('.settings-content').get_by_text('auditkeyword citation evidence',exact=False).wait_for();await shot(page,'knowledge-citation');await close_dialog(page)
             await page.locator('#queryText').fill('definitelyabsentword');await page.locator('#knowledgeQuery button').click()
-            await page.locator('#dialog').get_by_text('no_reliable_evidence',exact=False).wait_for();await close_dialog(page)
+            await page.locator('.settings-content').get_by_text('no_reliable_evidence',exact=False).wait_for();await close_dialog(page)
             rows.append({'area':'Knowledge','result':'passed','external_rag':'not_configured'})
             from scripts.platform_account_browser_contract import verify_accounts
             rows.append(await verify_accounts(browser,page,app,base,output))
@@ -189,14 +190,14 @@ async def acceptance(output):
             rows.append(await verify_lifecycle(page,app,output))
             from scripts.platform_connection_browser_contract import verify_connection
             rows.append(await verify_connection(page,output))
-            await navigate(page,'usage');await page.locator('main h1').wait_for();await shot(page,'usage-after-chain')
+            await navigate(page,'usage');await page.locator('.settings-content h1').wait_for();await shot(page,'usage-after-chain')
             await ctx.close()
         finally:await stop(app,server,task)
         # Normal shutdown and re-open same synthetic data, no replay/model call.
         before=sum(model.rounds.values());app,base,server,task=await start(cfg)
         try:
             ctx=await browser.new_context(viewport={'width':1440,'height':900},extra_http_headers={'X-PyHarness-Token':app._api_token});page=await ctx.new_page()
-            await page.goto(base+'/');await page.locator(f'[data-session="{sid}"]').click();await page.locator('.run-notice').wait_for()
+            await page.goto(base+'/');await page.locator(f'[data-session="{sid}"]').click();await page.locator('.chat-top .badge').wait_for()
             assert (await app.service.platform.run(run_id))['status']=='completed'
             restored=await app.service.platform.artifact(artifact['artifact_id']);assert restored['download_allowed'] and restored['sha256']==artifact['sha256']
             assert (await app.service.list_subagents(sid))['history'][0]['status']=='completed'

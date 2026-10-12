@@ -79,8 +79,8 @@ def _with_message_origin(log_: Any, msgs: list[dict]) -> list[dict]:
 
 
 def _session_module():
-    """Lazy import avoids desktop package <-> app shell import cycles."""
-    from pyharness.desktop import sessions
+    """Application-owned session persistence surface."""
+    from pyharness.application import session_store as sessions
     return sessions
 
 
@@ -100,23 +100,7 @@ _METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal",
                              "100.100.100.200"})
 
 
-def _validate_registry_url(url: str) -> str:
-    """Skill Registry URL 校验(SSRF 收紧):仅 http(s);拒云元数据地址。
-
-    客户端可传 registry_url,服务端据此发起 HTTP——无校验则可指向内网/元数据做
-    SSRF,或指向 file:// 类本地读取面(P3:registry_url SSRF)。loopback/私网不强拒
-    (本地自建 registry 是合法用法),仅挡非 http(s) scheme 与云元数据端点。
-    """
-    from urllib.parse import urlsplit
-    parts = urlsplit(str(url or "").strip())
-    if parts.scheme not in ("http", "https"):
-        raise_code("CFG-601", field="skills.registry_url", value=str(url)[:200],
-                   advice="registry_url 须为 http(s) 地址(拒 file:// 等本地读取面)")
-    host = (parts.hostname or "").lower()
-    if host in _METADATA_HOSTS:
-        raise_code("CFG-601", field="skills.registry_url", value=host,
-                   advice="registry_url 指向云元数据地址,拒绝(SSRF)")
-    return str(url).strip()
+from pyharness.core.url_policy import validate_service_url as _validate_registry_url
 
 
 from pyharness.core.lifecycle import admitted, stop_admissions
@@ -372,9 +356,7 @@ class ApplicationService:
                 await spine.close()
                 raise
             self._engines[sid] = spine
-        if not getattr(spine, "_plugins_ready", False):
-            await _eng._preload_plugins(spine)
-            spine._plugins_ready = True
+        await _eng.prepare_plugins(spine)
         if self.tenant_id == "default":
             if getattr(self.ctx, "approval", None) is None:
                 self.ctx.approval = spine.approval
@@ -753,12 +735,17 @@ class ApplicationService:
             log_ = self._logs.get(str(sid))
             if log_ is None:
                 return ""
+            cache = self.__dict__.setdefault('_list_titles', {})
+            seq = log_.stats()['seq']
+            if sid in cache and cache[sid][0] == seq:
+                return cache[sid][1]
             title = ""
             for ev in log_.events_after(0):
                 if ev.type == "session.created":
                     title = ev.payload.get("title") or title
                 elif ev.type == "session.renamed":
                     title = ev.payload.get("new_title") or title
+            cache[sid] = (seq, str(title))
             return str(title)
 
         sessions: list[dict] = []
@@ -769,6 +756,9 @@ class ApplicationService:
             if not row.get("title"):
                 row["title"] = _title_of(sid)
             sessions.append(row)
+        authorized = {row['sid'] for row in sessions}
+        for sid in set(self.__dict__.get('_list_titles', {}))-authorized:
+            self._list_titles.pop(sid, None)
         return {"sessions": sessions, "count": len(sessions)}
 
     @admitted
@@ -793,7 +783,7 @@ class ApplicationService:
         if isinstance(after_seq, bool) or not isinstance(after_seq, int):
             raise_code("EVT-100", field="after_seq", value=after_seq,
                        advice="after_seq 须 int(seq 游标)")
-        from pyharness.desktop.projection import derive_timeline
+        from pyharness.application.event_projection import derive_timeline
         nodes = derive_timeline(
             log_.events_after(after_seq=max(0, int(after_seq))),
             kinds=str(kinds or ""))
@@ -809,8 +799,8 @@ class ApplicationService:
         if env is None:
             raise_code("EVT-100", sid=sid, seq=seq,
                        advice="seq 不存在(空洞/坏行隔离/越界)")
-        from pyharness.desktop.projection import _env_dict
-        return {"event": _env_dict(env)}
+        from pyharness.application.event_projection import envelope_dict
+        return {"event": envelope_dict(env)}
 
     @admitted
     async def telemetry_report(self, sid: str) -> dict:
@@ -1312,7 +1302,7 @@ class ApplicationService:
         if not self._engines:
             return {"ok": False, "error": "无活动会话(先新建/打开会话)"}
         from pyharness.core import plugin_loader as _pl
-        from pyharness.desktop.sessions import _plugin_within
+        from pyharness.application.session_store import _plugin_within
         pdir = ((Path(__file__).resolve().parents[2] / "examples" / "plugins")
                 if self.tenant_id == "default" else (self.tenant_root() / "plugins")) / pid
         results: list[dict] = []
@@ -1368,50 +1358,31 @@ class ApplicationService:
     @staticmethod
     def _reset_preset_state(spine: Any) -> None:
         from pyharness import engine as _eng
-        cfg = spine.settings
-        cfg.security.policy.preset = "strict"
-        p = spine.scope.policy
-        p.deny_tools = set()
-        try:
-            p.sandbox_level = "strict"
-        except Exception:                              # noqa: BLE001
-            pass
-        try:
-            cfg.security.sandbox.level = "strict"
-        except Exception:                              # noqa: BLE001
-            pass
-        _eng._apply_preset(cfg, p, spine.tool_registry)
+        cfg, policy = _eng.compile_preset(spine, 'strict')
+        spine.settings.security = cfg.security
+        spine.scope.policy = policy
 
     @admitted
     async def set_preset(self, body: dict) -> dict:
         self._ensure_open()
-        preset = str((body or {}).get("preset") or "")
-        valid = ("strict", "standard", "readonly", "locked")
+        preset = str((body or {}).get('preset') or '')
+        valid = ('strict', 'standard', 'readonly', 'locked')
         if preset not in valid:
-            return {"ok": False, "error": f"非法档位:{preset}", "valid": list(valid)}
+            return {'ok':False,'error':'invalid_preset','valid':list(valid)}
         if not self._engines:
-            return {"ok": False, "error": "无活动会话(先新建/打开会话)"}
+            return {'ok':False,'error':'no_active_sessions'}
         from pyharness import engine as _eng
-        done = 0
-        for spine in list(self._engines.values()):
-            try:
-                spine.settings.security.policy.preset = preset
-                p = spine.scope.policy
-                p.deny_tools = set()
-                try:
-                    p.sandbox_level = "strict"
-                except Exception:                      # noqa: BLE001
-                    pass
-                try:
-                    spine.settings.security.sandbox.level = "strict"
-                except Exception:                      # noqa: BLE001
-                    pass
-                _eng._apply_preset(spine.settings, p, spine.tool_registry)
-                done += 1
-            except Exception as e:                     # noqa: BLE001
-                return {"ok": False, "error": f"{type(e).__name__}:{e}"[:200]}
-        return {"ok": True, "preset": preset, "sessions": done,
-                "hint": "exec.* 等危险工具:standard 档可见,strict 档隐藏"}
+        # Validate every setter against detached copies first. A failed reset
+        # must never partially clear the live deny set or claim success.
+        try:
+            prepared=[(spine,*_eng.compile_preset(spine,preset)) for spine in self._engines.values()]
+        except Exception:
+            return {'ok':False,'error':'preset_configuration_failed'}
+        for spine,cfg,policy in prepared:
+            spine.settings.security=cfg.security
+            spine.scope.policy=policy
+        return {'ok':True,'preset':preset,'sessions':len(prepared),
+                'hint':'exec.* 等危险工具仍由治理与审批约束'}
 
     def skill_installer(self) -> Any:
         from pyharness.core.skill_registry import SkillInstaller

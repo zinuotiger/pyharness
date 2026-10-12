@@ -417,10 +417,7 @@ def _apply_preset(cfg: Any, policy: Any, tool_reg: Any,
         policy.sandbox_level = "basic"                 # 放宽仅域约束
         # 同步可见性档:tool_exec 等按 security.sandbox.level 判定(两键脱节
         # 会造成审批已放行但工具 TLB-802——2026-09-08 exec 真链实测暴露)
-        try:
-            cfg.security.sandbox.level = "basic"
-        except Exception:                              # noqa: BLE001 只尽力同步
-            pass
+        cfg.security.sandbox.level = "basic"
         return
     # strict:保持默认(无操作)
 
@@ -1494,3 +1491,31 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
     except BaseException as primary:
         await _rollback_spine(spine, primary)
         raise
+
+
+async def prepare_plugins(spine):
+    """Host-facing idempotent plugin lifecycle boundary."""
+    if not getattr(spine, '_plugins_ready', False):
+        await _preload_plugins(spine)
+        spine._plugins_ready = True
+
+async def agent_context(spine, event):
+    """Host-facing agent materialization boundary."""
+    return await _agent_ctx_of(spine, event)
+
+def apply_preset(config, policy, registry, *, scope=None):
+    """Compile a permission preset through the engine's canonical policy logic."""
+    return _apply_preset(config, policy, registry, scope=scope)
+
+
+def compile_preset(spine, preset):
+    """Prepare policy/settings without mutating the running session on failure."""
+    import copy
+    config=copy.deepcopy(spine.settings)
+    policy=copy.deepcopy(spine.scope.policy)
+    config.security.policy.preset=preset
+    policy.deny_tools=set()
+    policy.sandbox_level='strict'
+    config.security.sandbox.level='strict'
+    apply_preset(config,policy,spine.tool_registry)
+    return config,policy

@@ -17,6 +17,15 @@ def test_preference_whitelist_corruption_reset(tmp_path):
     assert store.reset() and not store.path.exists()
 
 
+@pytest.mark.parametrize('scene', ['starfield', 'sakura', 'aurora', 'gold', 'ocean', 'tech-blue-particle'])
+def test_web_scene_roundtrip_and_native_boundary(tmp_path, scene):
+    store = FilePreferences(tmp_path / 'appearance.json')
+    assert store.save({'themeId': scene, 'animationMode': 'low'})
+    assert store.load()['themeId'] == scene
+    assert store.load()['animationMode'] == 'low'
+    assert normalize({'themeId': scene})['themeId'] == 'tech-blue-particle'
+
+
 async def test_packaged_assets_mime_and_traversal(tmp_path):
     app=DesktopApp(cli.assemble_ctx(isolated_settings(tmp_path)))
     try:
@@ -27,6 +36,12 @@ async def test_packaged_assets_mime_and_traversal(tmp_path):
                 assert response.headers['x-content-type-options']=='nosniff'
             for path in ['theme-kit/missing.js','host-adapters/%2e%2e/%2e%2e/config.py','appearance.py']:
                 assert (await client.get('/assets/'+path)).status_code==404
+            for scene in ['starfield', 'sakura', 'aurora', 'gold', 'ocean', 'technology']:
+                response = await client.get('/assets/theme-kit/scenes/' + scene + '.png')
+                assert response.status_code == 200
+                assert response.headers['content-type'] == 'image/png'
+                assert response.headers['x-content-type-options'] == 'nosniff'
+                assert response.content.startswith(b'\x89PNG\r\n\x1a\n')
     finally:await app.service.shutdown()
 
 

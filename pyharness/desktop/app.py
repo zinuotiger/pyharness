@@ -25,6 +25,7 @@ from pyharness.core.tenant_settings import (TenantSettingsStore,
 from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import EVENT_TYPES
+from .auth_cookies import cookie_name, read_cookie
 
 # 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)
 # 字符集必须与 SessionLog 的 sid 合法面一致(sessions.validate_session_id =
@@ -100,10 +101,12 @@ class DesktopApp:
             ctx, channel="desktop")
         self.service = self._service_registry.get("default")
         self.api = FastAPI(title="PyHarness Desktop", docs_url=None, redoc_url=None)
-        self.api.add_middleware(LoopbackHostMiddleware)
         self._api_token = self._resolve_api_token()
         self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)
         self.api.middleware("http")(self._tenant_middleware)
+        # Starlette's last-added middleware is outermost: reject malformed
+        # Host before account/cookie code constructs a URL (also under ASGI).
+        self.api.add_middleware(LoopbackHostMiddleware)
         self.mount_api()
         from .platform_api import mount_platform
         mount_platform(self)
@@ -272,8 +275,7 @@ class DesktopApp:
         if not given and auth.lower().startswith("bearer "):
             given = auth[7:].strip()
         if not given:
-            given = (getattr(request, "cookies", None) or {}).get(
-                "pyharness_token", "") or ""
+            given = read_cookie(request, "pyharness_token")
         if not given:
             given = str((getattr(request, "query_params", None) or {}).get("token") or "")
         return str(given)
@@ -282,10 +284,9 @@ class DesktopApp:
     def _presented_tenant_token(request: Request) -> str:
         """请求出示的**租户**令牌:头 / 同名 cookie / ``?token=``(壳加载 URL)。"""
         hdrs = getattr(request, "headers", None) or {}
-        cookies = getattr(request, "cookies", None) or {}
         qp = getattr(request, "query_params", None) or {}
         return str(hdrs.get("x-pyharness-tenant-token")
-                   or cookies.get("pyharness_tenant_token")
+                   or read_cookie(request, "pyharness_tenant_token")
                    or qp.get("token") or "")
 
     def _operator_ok(self, request: Request) -> bool:
@@ -495,7 +496,7 @@ class DesktopApp:
         if not given and authorization and authorization.lower().startswith("bearer "):
             given = authorization[7:].strip()
         if not given:
-            given = (request.cookies or {}).get("pyharness_token", "") or ""
+            given = read_cookie(request, "pyharness_token")
         ok = bool(given) and secrets.compare_digest(given, expected)
         if not ok:
             # ``R31-2``:非 default 租户可用**该租户令牌**通过本依赖。租户**授权**已在
@@ -745,6 +746,16 @@ class DesktopApp:
         租户令牌的价值仍在**可外发的最小凭证** —— 可单独交给外部客户端,
         而它**换不到**别的租户(见 :meth:`_tenant_authorized`)。
         """
+        if getattr(getattr(request, 'state', None), 'operator_bootstrap', False):
+            from fastapi.responses import RedirectResponse
+            from .accounts_api import COOKIE
+            response = RedirectResponse('/', status_code=303, headers={
+                'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+            response.set_cookie(cookie_name(request, 'pyharness_token'), self._api_token,
+                                httponly=True, samesite='strict', path='/')
+            response.delete_cookie(cookie_name(request, COOKIE), path='/')
+            response.delete_cookie(cookie_name(request, 'pyharness_tenant_token'), path='/')
+            return response
         declared = self._declared_tenant(request)
         tenant_tok = self._presented_tenant_token(request)
         operator = self._operator_ok(request)
@@ -781,12 +792,13 @@ class DesktopApp:
                         "justify-content:center;height:100vh'>"
                         "<div><h2>PyHarness Desktop</h2>"
                         "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
-        resp = HTMLResponse(html)
+        resp = HTMLResponse(html, headers={'Cache-Control': 'no-store',
+                                          'Referrer-Policy': 'no-referrer'})
         if self._api_token and operator:
-            resp.set_cookie("pyharness_token", self._api_token,
+            resp.set_cookie(cookie_name(request, "pyharness_token"), self._api_token,
                             httponly=True, samesite="strict", path="/")
         if tenant_ok and not account:
-            resp.set_cookie("pyharness_tenant_token", tenant_tok,
+            resp.set_cookie(cookie_name(request, "pyharness_tenant_token"), tenant_tok,
                             httponly=True, samesite="strict", path="/")
         return resp
 
@@ -811,7 +823,7 @@ class DesktopApp:
                 or any(not p or p in {'.','..'} or '\\' in p or ':' in p for p in parts)):
             return Response(status_code=404)
         suffix=parts[-1].rsplit('.',1)[-1]
-        mime={'js':'text/javascript','css':'text/css','json':'application/json'}.get(suffix)
+        mime={'js':'text/javascript','css':'text/css','json':'application/json','png':'image/png'}.get(suffix)
         if mime is None:return Response(status_code=404)
         try:
             raw=files('pyharness.ui').joinpath(*parts).read_bytes()

@@ -1,0 +1,18 @@
+.composer-config{flex-wrap:wrap;gap:6px 10px}
+.main>.chat .composer textarea{min-height:64px;padding:8px 6px}
+.main>.chat #sendFeedback:not(:empty){padding-top:6px}
+.main>.chat #sendFeedback .warning{padding:6px 8px;margin:0;font-size:12px;line-height:1.5;border:0;background:transparent;color:var(--muted)}
+.composer-config [data-action^="chat-"]{max-width:100%;white-space:normal;text-align:left;min-height:40px;background:var(--card);color:var(--ink)}
+#executionState{flex-basis:100%;white-space:normal;overflow-wrap:anywhere}
+.assistant-options{display:grid;gap:10px;margin:16px 0}
+.assistant-options button{display:flex;flex-direction:column;gap:8px;text-align:left;background:var(--card);color:var(--ink)}
+.assistant-options span{overflow-wrap:anywhere;line-height:1.6}
+.tool-choice{display:block;margin:10px 0}
+#chatAssistantForm textarea{font-family:inherit;font-size:14px}
+#chatAssistantForm fieldset{border:1px solid var(--line);border-radius:8px;margin:16px 0}
+.chat-approval{margin:12px 0}
+.chat-approval pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;background:var(--bg);color:var(--ink);padding:12px;border-radius:8px}
+.chat-approval p{line-height:1.7;margin:8px 0}
+.chat-approval small{overflow-wrap:anywhere}
+#setupError,#remoteError,#switchError{color:#d14242;line-height:1.7;margin:12px 0}
+@media(max-width:600px){.composer-config [data-action^="chat-"]{width:100%}.chat-approval{padding:12px}#dialog{width:96vw;padding:16px}}

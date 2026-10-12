@@ -175,9 +175,21 @@ class AgentLoop:
                     return last                       # 无输入可处理(空排水)
                 run = RunContext(run_id=uuid.uuid4().hex, input_seq=env.seq)
                 self.current = run
+                # One input is one task budget, while the session ledger is
+                # cumulative. A child arrives with its own preallocated account.
+                from pyharness.core.llm import UsageCounters
+                previous = getattr(ctx, 'counters', None)
+                account = previous
+                if isinstance(previous, UsageCounters):
+                    if previous._parent is None:
+                        account = previous.new_task(ctx.scope.limits)
+                    ctx.counters = account
+                    ctx.scope.bind_task_usage(account)
                 try:
                     last = await self._run_engine(ctx, run)   # 伪码 run() 主体
                 finally:
+                    if isinstance(previous, UsageCounters):
+                        ctx.counters = previous
                     self.current = None               # 单输入收尾(与伪码逐件一致)
                 # 边界终态(取消/预算)后不再自动取队内下一件:用户/资源边界,
                 # 剩余输入保留在队(不静默丢),下次 wake 按 FIFO 继续消费。
@@ -245,11 +257,10 @@ class AgentLoop:
         sysprompt = getattr(ctx, "sysprompt", None)
         if sysprompt is not None:
             hist = sysprompt.assemble(hist, ctx=ctx)
-        runtime = getattr(ctx, 'platform_runtime', None)
+        from pyharness.core.message_materializer import MessageMaterializer
+        runtime: Optional[MessageMaterializer] = getattr(ctx, 'platform_runtime', None)
         if runtime is not None:
-            hist = runtime.evidence_messages(hist,ctx)
-            from pyharness.application.vision import model_messages
-            hist = await model_messages(runtime, hist, ctx)
+            hist = await runtime.materialize_messages(hist, ctx)
         vision_input = any(isinstance(m.get('content'), list) and any(
             part.get('type') == 'image_url' for part in m['content'] if isinstance(part, dict)) for m in hist)
         # F027:ctx.streaming(桌面 SSE)走 chat_stream——chunk 仅上总线不入日志,
@@ -265,6 +276,8 @@ class AgentLoop:
         # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""
+            if runtime is not None:
+                content = runtime.validate_answer(content, ctx)
             if not content:                           # llm 双空响应:模型域未预期
                 raise_code("LLM-399", hint="llm.chat 返回空 content 且无 tool_calls")
             await ctx.session.append(

@@ -180,18 +180,7 @@ class ApprovalRoundResult:
 
 
 # ================================================================ 文本辅助
-def render_result_text(raw: Any) -> str:
-    """Provider 原始返回 → 统一文本(dict/list JSON 序列化;str 原样;None → 空)。"""
-    if isinstance(raw, str):
-        return raw
-    if raw is None:
-        return ""
-    if isinstance(raw, (dict, list)):
-        try:
-            return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return str(raw)
-    return str(raw)
+from pyharness.core.result_text import render_result_text
 
 
 def summarize_text(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:

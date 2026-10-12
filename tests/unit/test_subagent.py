@@ -408,9 +408,8 @@ async def test_join_timeout_returns_none_child_keeps_running():
         await _drain_children(mgr)
 
 
-async def test_join_unknown_and_double_join_evt101():
-    """sub_id 不存在/已回收 → EVT-101;结果只可 join 一次(spawn 返回值才是合法
-    sub_id)——成功 join 后句柄已摘(只登记在途,INV-01),二次 join 报 EVT-101。"""
+async def test_join_unknown_rejected_and_completed_join_repeatable():
+    """Unknown IDs remain rejected; repeat join reads the bounded result/history."""
     sess = await _parent()
     mgr = SubagentManager(session=sess, runner=SuccessRunner())
     with pytest.raises(PyHError) as ei:
@@ -418,9 +417,9 @@ async def test_join_unknown_and_double_join_evt101():
     assert ei.value.code == "EVT-101"
     sub_id = await _spawn_ok(mgr)
     assert (await mgr.join(sub_id)) == "列目录完成:3 层 47 项"
-    with pytest.raises(PyHError) as ei:
-        await mgr.join(sub_id)
-    assert ei.value.code == "EVT-101"         # 已回收(终态即摘)
+    assert await mgr.join(sub_id) == "列目录完成:3 层 47 项"
+    mgr._completed.clear()
+    assert await mgr.join(sub_id) == "列目录完成:3 层 47 项"
 
 
 # ===================================================================== 并发上限

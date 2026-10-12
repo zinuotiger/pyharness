@@ -27,7 +27,7 @@ def finalize(run, status, ts, code=None, diagnostics=None):
         run.error_message = diagnostics["summary"] if diagnostics else "Execution failed (" + run.error_kind + ")"
 
 from pyharness.application.platform_models import Run, TraceSpan, RunStep
-from pyharness.desktop.projection import redact
+from pyharness.application.event_projection import redact
 from pyharness.config import redact as redact_text
 
 
@@ -76,13 +76,14 @@ def subtask_history(session_id, events, active_children=()):
     return list(rows.values())
 
 
-def project(session_id, events, live_tasks=()):
+def project(session_id, events, live_tasks=(), *, trace_run_id=None, trace_limit=500):
     runs, spans, steps, approvals = {}, [], {}, {}
     bindings, active, tool_spans = {}, [], {}
     default_binding = {}
     successful = set()
     events = list(events)
     requests, usage_counts, model_steps, last_request = {}, {}, {}, {}
+    estimated_usage = set()
     for e in events:
         p, kind = e.payload, e.type
         if kind == 'user.message' and isinstance(p.get('meta'), dict):
@@ -99,6 +100,13 @@ def project(session_id, events, live_tasks=()):
                 name=summary(meta.get('name', task), 120), agent_id=meta.get('agent_id'),
                 agent_version=meta.get('agent_version'), retry_count=meta.get('retry_count', 0))
         if kind == 'segment.start' and task not in active:
+            # One session queue runs one task at a time. After a restart, an old
+            # unclosed segment must not make the next task's untagged model
+            # events ambiguous. Preserve its failure, never infer its success.
+            for previous in list(active):
+                if previous in runs and runs[previous].status not in TERMINAL:
+                    finalize(runs[previous], 'failed', e.ts, 'runtime_interrupted')
+            active.clear()
             active.append(task)
         current = task if task in runs else (active[-1] if not task and len(active) == 1 and active[-1] in runs else None)
         run = runs.get(current)
@@ -157,6 +165,8 @@ def project(session_id, events, live_tasks=()):
                 run.status = 'running'
             elif kind == 'llm.usage':
                 usage_counts[current] = usage_counts.get(current, 0) + 1
+                if p.get('estimated') or p.get('input_unknown'):
+                    estimated_usage.add(current)
                 run.token_usage += p['in_tokens'] + p['out_tokens']
                 if p.get('cost_est') is not None:
                     run.estimated_cost = (run.estimated_cost or 0) + p['cost_est']
@@ -175,14 +185,18 @@ def project(session_id, events, live_tasks=()):
         elif kind in ('approval.granted', 'approval.denied', 'approval.timeout'):
             if p['approval_id'] in approvals:
                 approvals[p['approval_id']]['status'] = {'approval.granted':'approved', 'approval.denied':'rejected', 'approval.timeout':'expired'}[kind]
+                approvals[p['approval_id']]['by'] = p.get('by', 'unknown')
                 step=steps.get(approvals[p['approval_id']]['call_id'])
                 if step and step.status not in TERMINAL:
                     step.status='running' if kind=='approval.granted' else 'failed'
-        if kind == 'tool.call' and p['call_id'] not in steps:
-            steps[p['call_id']] = RunStep(step_id=f'{session_id}~{e.seq}',
-                run_id=run.run_id if run else '', name=p['name'], status='running', started_at=e.ts)
-        elif kind in ('tool.result', 'tool.error') and p['call_id'] in steps and steps[p['call_id']].status not in TERMINAL:
-            step = steps[p['call_id']]
+        if kind == 'approval.reviewed' and p['approval_id'] in approvals:
+            approvals[p['approval_id']]['review'] = p
+        cid = call_id_of(e)
+        if kind == 'tool.call' and cid and cid not in steps:
+            steps[cid] = RunStep(step_id=f'{session_id}~{e.seq}',
+                run_id=run.run_id if run else '', name=p.get('name') or p.get('tool') or 'tool', status='running', started_at=e.ts)
+        elif kind in ('tool.result', 'tool.error') and cid in steps and steps[cid].status not in TERMINAL:
+            step = steps[cid]
             step.status = 'completed' if kind == 'tool.result' and p.get('ok') else 'failed'
             step.finished_at = e.ts
         if (kind == 'system.error' or kind.startswith(('tool.', 'llm.', 'approval.', 'decision.', 'platform.', 'agent.'))) and kind not in ('llm.chunk',):
@@ -203,11 +217,11 @@ def project(session_id, events, live_tasks=()):
             if kind=='platform.sandbox' and re.fullmatch(r'ph-[0-9a-f]{32}',str(p.get('record',{}).get('sandbox_id',''))):
                 # Typed opaque identifier, not arbitrary command/output text.
                 span.sandbox_id=p['record']['sandbox_id']
-            if kind=='tool.call':
+            if kind=='tool.call' and cid:
                 span.status='running'
-                tool_spans[p['call_id']]=span
-            elif kind in ('tool.result','tool.error') and p['call_id'] in tool_spans:
-                parent=tool_spans[p['call_id']]
+                tool_spans[cid]=span
+            elif kind in ('tool.result','tool.error') and cid in tool_spans:
+                parent=tool_spans[cid]
                 parent.finished_at=e.ts
                 parent.status='completed' if kind=='tool.result' and p.get('ok') else 'failed'
                 parent.duration_ms=(datetime.fromisoformat(e.ts)-datetime.fromisoformat(parent.started_at)).total_seconds()*1000
@@ -219,7 +233,8 @@ def project(session_id, events, live_tasks=()):
     for run in runs.values():
         own_steps = [s for s in steps.values() if s.run_id == run.run_id]
         run.usage_unknown_requests = max(0, requests.get(run.task_id, 0) - usage_counts.get(run.task_id, 0))
-        run.usage_status = 'unknown' if run.usage_unknown_requests or not usage_counts.get(run.task_id) else 'known'
+        run.usage_status = ('unknown' if run.usage_unknown_requests or not usage_counts.get(run.task_id)
+                            else 'estimated' if run.task_id in estimated_usage else 'known')
         run.total_steps = len(own_steps)
         run.current_step = sum(s.status == 'completed' for s in own_steps)
         if run.status in {'running','queued','waiting_approval','paused','retrying'} and run.task_id not in live_tasks:
@@ -230,6 +245,9 @@ def project(session_id, events, live_tasks=()):
                     step.status='cancelled' if run.status=='cancelled' else 'failed'
                     step.finished_at = run.finished_at
                     step.error_code = run.error_code
+    selected = [s for s in spans if trace_run_id is None or s.run_id == trace_run_id]
+    if trace_limit is not None:
+        selected = selected[-trace_limit:]
     return {'runs': [r.model_dump() for r in runs.values()],
-            'trace': [s.model_dump() for s in spans[-500:]],
+            'trace': [s.model_dump() for s in selected],
             'steps': [s.model_dump() for s in steps.values()], 'approvals': list(approvals.values())}

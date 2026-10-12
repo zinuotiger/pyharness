@@ -7,7 +7,10 @@ async def verify_chat_shell(page, output):
     assert await page.evaluate('state.page') == 'chat'
     assert not await page.locator('.inspector').is_visible()
     assert await page.locator('.chat-left').count() == 0
-    assert await page.locator('.sidebar [data-nav]').count() == 2
+    assert await page.locator('#workbenchEntry').is_visible()
+    assert await page.locator('#pinnedSessions').count() == 0
+    assert await page.locator('#sessionSearch').count() == 0
+    assert await page.locator('.sidebar .workspace').count() == 0
     await page.evaluate('document.fonts.ready')
     assert not await page.locator('#toast').is_visible()
     await page.screenshot(path=str(output/'chat-initial.png'), full_page=True)
@@ -30,9 +33,10 @@ async def verify_chat_shell(page, output):
     await page.locator('#inspectorToggle').click()
     assert not await page.locator('.inspector').is_visible()
     await page.locator('#settingsEntry').click()
-    await page.locator('.settings-links').wait_for()
-    for route in ['dashboard','runs','approvals','artifacts','usage','connections','agents','knowledge','sandboxes','schedules']:
-        assert await page.locator(f'.settings-links [data-nav="{route}"]').is_visible()
+    await page.locator('.settings-nav').wait_for()
+    assert await page.locator('#workbenchEntry').is_visible()
+    for route in ['runs','approvals','artifacts','usage','connections','agents','knowledge','sandboxes','schedules']:
+        assert await page.locator(f'.settings-nav [data-nav="{route}"]').is_visible()
     await page.get_by_role('button', name='模型配置', exact=True).click()
     await page.locator('[data-action="model-new"]').wait_for()
     await page.locator('[data-nav="chat"]').first.click()

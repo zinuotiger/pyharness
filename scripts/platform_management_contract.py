@@ -13,7 +13,6 @@ async def verify_management(browser, page, app, base, output):
     await form.locator('[name=tenant]').fill('browser-team')
     await form.locator('button').click()
     await page.get_by_text('账户已创建',exact=True).wait_for()
-    await page.locator('#dialog').evaluate('(d)=>d.close()')
 
     account_context=await browser.new_context(viewport={'width':1440,'height':900})
     account_page=await account_context.new_page()
@@ -24,14 +23,14 @@ async def verify_management(browser, page, app, base, output):
         await account_page.get_by_role('button',name='登录',exact=True).click()
         await account_page.locator('#compose').wait_for()
         await account_page.locator('#accountName').filter(has_text='browser-user').wait_for()
-        assert await account_page.locator('#workspaceName').inner_text()=='browser-team'
+        assert await account_page.locator('#workspaceName').count()==0
         assert await account_page.locator('#accountRole').inner_text()=='团队管理员'
         assert not any(c['name']=='pyharness_token' for c in await account_context.cookies())
         await account_page.locator('#settingsEntry').click()
         await account_page.get_by_role('button',name='账户与团队',exact=True).click()
-        await account_page.locator('#dialog').get_by_text('browser-user',exact=True).wait_for()
+        await account_page.locator('.settings-content').get_by_text('browser-user',exact=True).wait_for()
+        assert await account_page.locator('.settings-content').get_by_text('团队：browser-team · 角色：owner',exact=True).is_visible()
         await account_page.screenshot(path=str(output/'account-team.png'),full_page=True)
-        await account_page.locator('#dialog').evaluate('(d)=>d.close()')
         await account_page.get_by_role('button',name='团队记忆',exact=True).click()
         await account_page.locator('#memoryForm [name=key]').fill('synthetic')
         await account_page.locator('#memoryForm [name=op]').select_option('set')
@@ -42,7 +41,6 @@ async def verify_management(browser, page, app, base, output):
         await account_page.locator('#memoryForm button').click()
         await account_page.get_by_text('synthetic team memory',exact=True).wait_for()
         await account_page.screenshot(path=str(output/'team-memory.png'),full_page=True)
-        await account_page.locator('#dialog').evaluate('(d)=>d.close()')
         await account_page.get_by_role('button',name='账户与团队',exact=True).click()
         await account_page.get_by_role('button',name='退出登录',exact=True).click()
         await account_page.locator('form#login').wait_for()
@@ -65,31 +63,35 @@ async def verify_management(browser, page, app, base, output):
             await route.continue_()
             return
         saved.append(True)
-        await route.fulfill(status=200,content_type='application/json',body='{"profile":{"id":"synthetic"}}')
+        import json
+        profile={**route.request.post_data_json,'id':'synthetic','has_api_key':True}
+        profile.pop('api_key',None)
+        await route.fulfill(status=200,content_type='application/json',body=json.dumps({'profile':profile}))
     await page.route('**/api/settings/models',fake_save)
-    await page.evaluate('actions["model-new"]()')
+    await page.evaluate('go("connections")')
+    await page.get_by_role('button',name='添加模型',exact=True).click()
     for name,value in {'label':'Synthetic','model':'synthetic-model','base_url':'https://synthetic.invalid/v1','api_key':'synthetic-browser-key'}.items():
         await page.locator('#model_'+name).fill(value)
-    page.once('dialog',lambda dialog:dialog.accept())
     try:
         first=asyncio.create_task(page.get_by_role('button',name='保存并测试连接',exact=True).click())
+        await page.locator('#confirmProceed').click()
         await asyncio.wait_for(entered.wait(),5)
         assert len(saved)==1
-        await page.get_by_text('测试中，请稍候…',exact=True).wait_for()
+        await page.locator('.model-editor-status').filter(has_text='正在测试').wait_for()
         await page.evaluate('actions["model-test"]("synthetic")')
         assert len(calls)==1
         release.set()
         await first
-        await page.get_by_text('synthetic UI response',exact=False).wait_for()
+        await page.locator('.model-editor-status').filter(has_text='连接测试通过').wait_for()
         await page.screenshot(path=str(output/'model-probe-ui-synthetic.png'),full_page=True)
     finally:
         release.set()
         await page.unroute('**/api/v1/connections/model:synthetic/test',fake_probe)
         await page.unroute('**/api/settings/models',fake_save)
-        await page.locator('#dialog').evaluate('(d)=>d.close()')
+        await page.locator('[data-action="panel-back"]').click()
 
     await page.evaluate('go("schedules")')
-    await page.get_by_role('button',name='工作流',exact=True).click()
+    await page.locator('.settings-nav [data-nav="workflows"]').click()
     await page.get_by_role('button',name='创建工作流',exact=True).click()
     await page.locator('#workflowForm [name=name]').fill('synthetic failed workflow')
     await page.locator('#workflowForm [name=steps]').fill('first\nnever after failure')

@@ -159,6 +159,60 @@ class UsageCounters:
     _rate_limit_streak: int = field(default=0, repr=False, compare=False)
     _degrade_total: int = field(default=0, repr=False, compare=False)
     _degrade_last: dict = field(default_factory=dict, repr=False, compare=False)
+    _session_total: Any = field(default=None, repr=False, compare=False)
+    _parent: Any = field(default=None, repr=False, compare=False)
+    _limits: Any = field(default=None, repr=False, compare=False)
+    _descendants: Any = field(default=None, repr=False, compare=False)
+    _reserved_out: int = field(default=0, repr=False, compare=False)
+    _reserved_in: int = field(default=0, repr=False, compare=False)
+    _reserved_cost: float = field(default=0, repr=False, compare=False)
+
+    def new_task(self, limits, *, parent=None):
+        """Fresh task usage, separate from session and ancestor totals."""
+        return UsageCounters(_session_total=self._session_total or self,
+                             _parent=parent, _limits=limits)
+
+    def ancestors(self):
+        account = self
+        while account is not None:
+            yield account
+            account = account._parent
+
+    def reserve_output(self, requested, *, input_tokens=0, input_rate=0.0, output_rate=0.0):
+        """Atomic on the runtime loop: reserve before awaiting any transport."""
+        from pyharness.core.scope import BudgetExhausted
+        accounts = list(self.ancestors())
+        available = int(requested)
+        for account in accounts:
+            limits = account._limits
+            if limits is None:
+                continue
+            used = account.task_total()
+            if (used.in_tokens >= limits.max_in_tokens or used.cost_est >= limits.max_cost_yuan
+                    or used.in_tokens + account._reserved_in + input_tokens > limits.max_in_tokens):
+                raise BudgetExhausted('Task or parent budget exhausted')
+            available = min(available, limits.max_out_tokens-used.out_tokens-account._reserved_out)
+            cost_left = limits.max_cost_yuan-used.cost_est-account._reserved_cost-input_tokens*input_rate
+            if cost_left < 0:
+                raise BudgetExhausted('No unreserved task or parent cost allowance')
+            if output_rate > 0:
+                available = min(available, int(max(0,cost_left)/output_rate))
+        if available <= 0:
+            raise BudgetExhausted('No unreserved task or parent output allowance')
+        for account in accounts:
+            account._reserved_out += available
+            account._reserved_in += input_tokens
+            account._reserved_cost += input_tokens*input_rate+available*output_rate
+        released = False
+        def release():
+            nonlocal released
+            if not released:
+                released = True
+                for account in accounts:
+                    account._reserved_out -= available
+                    account._reserved_in -= input_tokens
+                    account._reserved_cost = max(0, account._reserved_cost-input_tokens*input_rate-available*output_rate)
+        return available, release
 
     def task_add(self, payload: dict) -> None:
         """按 llm.usage 事件 payload 入账(事件即事实;计数器可整体重建)。"""
@@ -175,6 +229,17 @@ class UsageCounters:
         m.out_tokens += int(payload.get("out_tokens") or 0)
         m.cache_hit += int(payload.get("cache_hit") or 0)
         m.cost_est += float(payload.get("cost_est") or 0.0)
+        self._rate_limit_streak = 0
+        if self._session_total is not None:
+            self._session_total.task_add(payload)
+        parent = self._parent
+        while parent is not None:
+            # A legacy session counter already received the charge above.
+            if parent is not self._session_total:
+                if parent._descendants is None:
+                    parent._descendants = UsageCounters()
+                parent._descendants.task_add(payload)
+            parent = parent._parent
 
     def snapshot(self) -> dict:
         """只读快照(审计/报表;禁止由此路径改写计数)。"""
@@ -190,12 +255,13 @@ class UsageCounters:
     def task_total(self) -> Any:
         """llm_fallback.UsageCounters 协议:TaskUsage 型读数(F032 预算闸同源)。
 
-        scope.budget_state/BudgetGuard 每轮现读本方法;in/out/cost 与会话级
-        总量同字段(单任务会话语义,1 会话 = 1 agent = 1 任务)。"""
+        Task fields represent own usage; descendants contribute only here.
+        The session ledger is independently cumulative across task lifetimes."""
         from pyharness.core.llm_fallback import TaskUsage   # 免顶层环依赖
-        return TaskUsage(in_tokens=self.in_tokens,
-                         out_tokens=self.out_tokens,
-                         cost_est=round(self.cost_est, 6))
+        child = self._descendants
+        return TaskUsage(in_tokens=self.in_tokens+(child.in_tokens if child else 0),
+                         out_tokens=self.out_tokens+(child.out_tokens if child else 0),
+                         cost_est=round(self.cost_est+(child.cost_est if child else 0), 6))
 
     def rate_limit_streak(self) -> int:
         """连续 429 计数(协议;事件可重建)。"""
@@ -208,6 +274,8 @@ class UsageCounters:
 
     def degrade_add(self, failed: str, to: str) -> int:
         """会话级降级计数(F013):返回累计次数(超 max_per_session 发告警)。"""
+        if self._session_total is not None:
+            return self._session_total.degrade_add(failed, to)
         self._degrade_total += 1
         self._degrade_last = {"failed": failed, "to": to}
         return self._degrade_total
@@ -380,7 +448,7 @@ def _slot_to_call(index: int, slot: dict) -> ToolCall:
                     raw_json=raw_json)
 
 
-async def accumulate_stream(stream: AsyncIterator[Any], ctx: Any) -> tuple:
+async def accumulate_stream(stream: AsyncIterator[Any], ctx: Any, *, progress=None) -> tuple:
     """SSE 增量聚合(ADI §5.3):content 拼接、tool_calls 按 index 分片合并(追加不覆盖)。
 
     返回 (text, calls, finish_reason, usage);chunk 只经总线给 UI、不进日志;usage 只出现在
@@ -390,12 +458,16 @@ async def accumulate_stream(stream: AsyncIterator[Any], ctx: Any) -> tuple:
     slots: dict[int, dict] = {}
     finish: Optional[str] = None
     usage: Any = None
+    if progress is not None:
+        progress.update(parts=parts, slots=slots, usage=None)
     async for chunk in stream:
         choices = getattr(chunk, "choices", None) or []
         if not choices:                            # choices=[] + usage:仅流末块
             u = getattr(chunk, "usage", None)
             if u is not None:
                 usage = u
+                if progress is not None:
+                    progress['usage'] = u
             continue
         d = choices[0].delta
         content = getattr(d, "content", None)
@@ -564,6 +636,8 @@ async def report_usage(usage: Any, model: str, *, ctx: Any,
         "out_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
         "cache_hit": int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0),
         "cost_est": cost,
+        "estimated": bool(getattr(usage, 'estimated', False)),
+        "input_unknown": bool(getattr(usage, 'input_unknown', False)),
     }
     ev = await ctx.session.append("llm.usage", payload, actor="llm")
     cnt = counters if counters is not None else getattr(ctx, "counters", None)
@@ -693,6 +767,32 @@ class OpenAICompatAdapter(LLMAdapter):
     # ------------------------------------------------------ 非流式唯一出口
     async def chat(self, messages: list[dict], tools: Optional[list] = None, *,
                    ctx: Any) -> LLMResponse:
+        return await self._budgeted_request(messages, tools, ctx=ctx, streaming=False)
+
+    async def _budgeted_request(self, messages, tools, *, ctx, streaming):
+        limit = self._output_limit(ctx, self._llm_cfg(ctx).max_tokens)
+        counters = getattr(ctx, 'counters', None)
+        release = lambda: None
+        if isinstance(counters, UsageCounters):
+            config=self._llm_cfg(ctx)
+            prices=_price_table(getattr(getattr(config,'usage',None),'unit_price',{}))
+            price=prices.get(self.model,{})
+            # Conservative byte reservation, including tool schemas/framing.
+            # Actual provider usage still settles the ledger; unknown prices
+            # cannot provide a monetary guarantee and remain explicitly unpriced.
+            input_bound=len(json.dumps([messages,tools],ensure_ascii=False).encode('utf-8'))
+            limit, release = counters.reserve_output(limit,input_tokens=input_bound,
+                input_rate=price.get('in_per_million',0)/1e6,
+                output_rate=price.get('out_per_million',0)/1e6)
+        try:
+            method = self._chat_stream if streaming else self._chat
+            return await method(messages, tools, ctx=ctx, output_limit=limit)
+        finally:
+            # Includes transport failure, malformed response and cancellation.
+            release()
+
+    async def _chat(self, messages: list[dict], tools: Optional[list] = None, *,
+                    ctx: Any, output_limit: int) -> LLMResponse:
         """唯一出口(F012):组请求 → llm.request → 总闸 → 归一 → 计量 → 落 llm.response。
 
         全系统除本模块外不存在直连模型端点路径(INV-02);工具轮 content=null 归一 "";
@@ -704,7 +804,7 @@ class OpenAICompatAdapter(LLMAdapter):
         req = {"model": self.model, "messages": list(messages),
                "tools": tools_clean or None,    # 无工具整字段省略在传输层(wire 规则)
                "temperature": cfg_llm.temperature,  # 0-1.5(越窗已在配置层 CFG-601 拒)
-               "max_tokens": self._output_limit(ctx, cfg_llm.max_tokens)}
+               "max_tokens": output_limit}
         request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
                                                                  tools), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
@@ -738,23 +838,45 @@ class OpenAICompatAdapter(LLMAdapter):
     # ------------------------------------------------------ 流式入口(F027)
     async def chat_stream(self, messages: list[dict], tools: Optional[list] = None, *,
                           ctx: Any) -> LLMResponse:
+        return await self._budgeted_request(messages, tools, ctx=ctx, streaming=True)
+
+    async def _chat_stream(self, messages: list[dict], tools: Optional[list] = None, *,
+                           ctx: Any, output_limit: int) -> LLMResponse:
         """流式编排:chunk 实时上总线(accumulate 内,不进日志);聚合后同 chat 型返回。"""
         cfg_llm = self._llm_cfg(ctx)
         transport = self._ensure_transport()
         tools_clean, name_map = _sanitize_tools(tools)   # 禁点号工具名清洗(DeepSeek)
         req = {"model": self.model, "messages": list(messages),
                "tools": tools_clean or None,
-               "temperature": cfg_llm.temperature, "max_tokens": self._output_limit(ctx, cfg_llm.max_tokens),
+               "temperature": cfg_llm.temperature, "max_tokens": output_limit,
                "stream": True, "stream_options": {"include_usage": True}}
         request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
                                                                  tools), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
         observation = {}
+        progress = {}
         try:
             stream = transport.stream(req)          # 返回异步迭代器(鸭子;可注入替身)
             text, calls, finish, usage = await observed_wait(
-                accumulate_stream(stream, ctx), timeout=self.timeout.total_s, observation=observation)
-        except Exception as e:                      # noqa: BLE001 断流/总闸统一归一
+                accumulate_stream(stream, ctx, progress=progress), timeout=self.timeout.total_s, observation=observation)
+        except BaseException as e:                 # Include cancellation after emitted tokens.
+            partial = ''.join(progress.get('parts', [])) + ''.join(
+                slot['arguments'] for slot in progress.get('slots', {}).values())
+            observed_usage = progress.get('usage')
+            if observed_usage is not None or partial:
+                # Missing provider totals remain unknown. Charge only an output
+                # estimate from received bytes, through the same task/ancestor
+                # ledger; never invent unobserved input or claim exact billing.
+                observed_usage = observed_usage or SimpleNamespace(
+                    prompt_tokens=0, completion_tokens=_est_tokens(partial),
+                    prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0,
+                    estimated=True, input_unknown=True)
+                try:
+                    await self.report_usage(observed_usage, self.model, ctx=ctx)
+                except Exception:
+                    log.warning('interrupted stream usage persistence failed')
+            if isinstance(e, asyncio.CancelledError):
+                raise
             code = normalize_exc(e)
             if code == "LLM-303":
                 self._note_rate_limit(ctx)          # 归一 303 计入连续限流(降级判定用)
@@ -770,7 +892,8 @@ class OpenAICompatAdapter(LLMAdapter):
             # input 不猜 0,账目保守),杜绝"流式长对话超支无感"。
             fallback_usage = SimpleNamespace(
                 prompt_tokens=0, completion_tokens=_est_tokens(text),
-                prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0)
+                prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=0,
+                estimated=True, input_unknown=True)
             await self.report_usage(fallback_usage, self.model, ctx=ctx)
         env = await ctx.session.append(             # 聚合完成落单条 llm.response(F027)
             "llm.response", _response_payload(self.model, finish or "unknown",

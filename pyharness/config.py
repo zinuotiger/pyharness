@@ -641,7 +641,7 @@ class SandboxCfg(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
     level: Literal["strict", "basic", "off"] = "strict"
     proc_wallclock_s: int = Field(60, ge=1, le=3600)
-    proc_mem_limit_mb: int = Field(0, ge=0)      # 0=不限;≥1=MB(Windows 尽力而为)
+    proc_mem_limit_mb: int = Field(0, ge=0)      # 仅兼容默认0；宿主内存配额不支持，非0拒绝；Docker memory_mb另设
 
     @field_validator('proc_mem_limit_mb')
     @classmethod
@@ -687,7 +687,7 @@ class CredentialsCfg(BaseModel):
     """security.credentials — 凭据文件(F016/SEC §6)。"""
     model_config = ConfigDict(validate_assignment=True)
     file: str = "~/.pyharness/credentials.yaml"
-    cache_ttl_s: int = Field(300, ge=0, le=3600)       # 秘密 TTL≤5min
+    cache_ttl_s: int = Field(300, ge=0, le=3600)       # 仅兼容默认300；凭据不缓存，非默认值拒绝
 
     @field_validator('cache_ttl_s')
     @classmethod

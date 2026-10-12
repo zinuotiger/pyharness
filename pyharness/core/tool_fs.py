@@ -157,16 +157,7 @@ def _extra_read_dirs(ctx: Any) -> list[str]:
     return [str(x) for x in v if str(x).strip()]
 
 
-def _redact(ctx: Any, text: str) -> str:
-    """出口脱敏(ctx.redact 注入面;未接线/失败 → 原样,读路径不因脱敏中断)。"""
-    fn = getattr(ctx, "redact", None)
-    if not callable(fn):
-        return text
-    try:
-        return fn(text)
-    except Exception as exc:                     # noqa: BLE001 脱敏故障不阻断读取
-        log.warning("ctx.redact 执行失败,原样返回: %s", exc)
-        return text
+from pyharness.core.tool_redaction import _redact
 
 
 # ------------------------------------------------------------ 路径几何第二道闸

@@ -1,0 +1,56 @@
+{
+  "generated_on": "2026-10-03",
+  "assets": [
+    {
+      "file": "starfield.png",
+      "sha256": "5937662cf60d1290a9c1fbb7a89a5ada1a943e0ad723bc15edb6e7a8defc0ae0",
+      "bytes": 2382563,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "旋涡银河背景；分层闪烁星光和缓慢轨道运动",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    },
+    {
+      "file": "sakura.png",
+      "sha256": "b460ed764d0333db1aeaa0edeaa3e7ef7b202587ca443910e04a926bda6c2db7",
+      "bytes": 1659007,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "花枝与粉紫暮光；大小、摆动、旋转不同的下落花瓣",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    },
+    {
+      "file": "aurora.png",
+      "sha256": "be3b3ec886e9a18b6cb7c16bf00eb93cf04dbb171d33bbbe9395e1bdc23d3886",
+      "bytes": 1947952,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "山湖背景；三层渐变流动光幕和星点",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    },
+    {
+      "file": "gold.png",
+      "sha256": "ab9c0acff6b923f11d911eab29d2fe039603f3fe7e6f7aa85a7c20557b7b6ab3",
+      "bytes": 2254422,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "黑金背景；三条金砂波浪与流动轨迹",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    },
+    {
+      "file": "ocean.png",
+      "sha256": "ad1ae99d29b3845a5328426b2a248172cd64281824002bdc338031f5623e3d28",
+      "bytes": 2262048,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "水下光束、水母背景；上升气泡和三只脉动水母",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    },
+    {
+      "file": "technology.png",
+      "sha256": "5eb1a3d27d8ffd84c38024a8d24925e3648b327336afd2c1bbdfbc4e308b9e58",
+      "bytes": 1945825,
+      "source": "OpenAI image_gen built-in generation, 2026-10-03",
+      "prompt_summary": "发光网络球背景；旋转投影球面节点与局部连线",
+      "reference_role": "User supplied style guide; pure background, no UI/text/logos. Original generated PNG, no external download."
+    }
+  ],
+  "runtime_network": false,
+  "method": "Six separate generated background PNGs plus six distinct Canvas foreground algorithms. Reference UI and text were not composited into application.",
+  "rights_note": "AI-generated for this task; no purchased stock or scraped third-party assets. No claim of exclusive copyright."
+}

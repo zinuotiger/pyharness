@@ -46,28 +46,41 @@ def _with_message_origin(log_: Any, msgs: list[dict]) -> list[dict]:
 
     普通用户输入同样写 ``origin=None``(键恒在,便于前端统一判断)。
     """
-    origins = [getattr(e, "origin", None) for e in log_.events_after(0)
-               if getattr(e, "type", "") == "user.message"]
+    events = [e for e in log_.events_after(0) if e.type == 'user.message']
+    origins = [getattr(e, 'origin', None) for e in events]
+    answers = [e for e in log_.events_after(0) if e.type == 'agent.message']
+    j = 0
     out: list[dict] = []
     k = 0
     for m in msgs:
         row = dict(m)
         if row.get("role") == "user":
             row["origin"] = origins[k] if k < len(origins) else None
+            if k < len(events):
+                row['seq'] = events[k].seq
+                row['artifact_ids'] = (events[k].payload.get('meta') or {}).get('platform', {}).get('artifact_ids', [])
             k += 1
+        elif row.get('role') == 'assistant' and row.get('content') and not row.get('tool_calls'):
+            if j < len(answers): row['seq'] = answers[j].seq
+            j += 1
         out.append(row)
     if k != len(origins):                  # 不变式破损:宁可少标记也不错标
         log.warning("user.message 与派生 user 消息数不一致(events=%d msgs=%d)",
                     len(origins), k)
         for row in out:
             row.pop("origin", None)
+            row.pop('seq', None)
+            row.pop('artifact_ids', None)
+    if j != len(answers):
+        for row in out:
+            if row.get('role') == 'assistant': row.pop('seq', None)
     return out
 
 
 
 def _session_module():
-    """Lazy import avoids desktop package <-> app shell import cycles."""
-    from pyharness.desktop import sessions
+    """Application-owned session persistence surface."""
+    from pyharness.application import session_store as sessions
     return sessions
 
 
@@ -87,23 +100,7 @@ _METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal",
                              "100.100.100.200"})
 
 
-def _validate_registry_url(url: str) -> str:
-    """Skill Registry URL 校验(SSRF 收紧):仅 http(s);拒云元数据地址。
-
-    客户端可传 registry_url,服务端据此发起 HTTP——无校验则可指向内网/元数据做
-    SSRF,或指向 file:// 类本地读取面(P3:registry_url SSRF)。loopback/私网不强拒
-    (本地自建 registry 是合法用法),仅挡非 http(s) scheme 与云元数据端点。
-    """
-    from urllib.parse import urlsplit
-    parts = urlsplit(str(url or "").strip())
-    if parts.scheme not in ("http", "https"):
-        raise_code("CFG-601", field="skills.registry_url", value=str(url)[:200],
-                   advice="registry_url 须为 http(s) 地址(拒 file:// 等本地读取面)")
-    host = (parts.hostname or "").lower()
-    if host in _METADATA_HOSTS:
-        raise_code("CFG-601", field="skills.registry_url", value=host,
-                   advice="registry_url 指向云元数据地址,拒绝(SSRF)")
-    return str(url).strip()
+from pyharness.core.url_policy import validate_service_url as _validate_registry_url
 
 
 from pyharness.core.lifecycle import admitted, stop_admissions
@@ -144,6 +141,13 @@ class ApplicationService:
         cfg = _session_module()._cfg_of(self.ctx)
         root = getattr(getattr(cfg, "storage", None), "root", None)
         return Path(str(root or "~/.pyharness")).expanduser()
+
+    @property
+    def platform(self):
+        if not hasattr(self, '_platform'):
+            from pyharness.application.platform_service import PlatformService
+            self._platform = PlatformService(self)
+        return self._platform
 
     def tenant_root(self) -> Path:
         return self._storage_root() / "tenants" / self.tenant_id
@@ -201,7 +205,10 @@ class ApplicationService:
         return Settings.model_validate(raw)
 
     def tenant_state(self) -> dict:
-        return self._settings_store.state(self.tenant_id)
+        state = self._settings_store.state(self.tenant_id)
+        if self.tenant_id != 'default':
+            state['tenants'] = [self.tenant_id]
+        return state
 
     def save_model_profile(self, body: dict) -> dict:
         self._ensure_open()
@@ -296,6 +303,36 @@ class ApplicationService:
         from pyharness import engine as _eng
         from pyharness.engine import make_runner as _eng_make_runner
         cfg = self.effective_settings()
+        from pyharness.application.platform_service import PlatformService
+        platform_binding = PlatformService.binding(log_)
+        platform_definition = None
+        if platform_binding:
+            from pyharness.application.platform_models import AgentDefinition
+            platform_definition = AgentDefinition.model_validate(platform_binding['definition'])
+            self.platform.validate_execution_policy(platform_definition)
+            cfg.loop.max_turns = platform_definition.max_rounds
+            cfg.budget.task.max_in_tokens = platform_definition.budget.input_tokens
+            cfg.budget.task.max_out_tokens = platform_definition.budget.output_tokens
+            cfg.budget.task.max_cost_yuan = platform_definition.budget.cost
+            cfg.security.policy.preset = platform_definition.permission_policy
+            cfg.plugins.enabled = []
+            cfg.plugins.mcp_servers = []
+            if platform_definition.mcp_connections:
+                from pyharness.config import McpServerCfg
+                configured=self.platform.connection_definitions()
+                for name in platform_definition.mcp_connections:
+                    connection=configured.get('mcp:'+name)
+                    if connection is None or not connection['config']['enabled']:
+                        raise_code('CFG-601',reason='agent_mcp_connection_disabled')
+                    cfg.plugins.mcp_servers.append(McpServerCfg.model_validate(connection['config']))
+            if platform_definition.model_connection:
+                profiles = self.tenant_state()['profiles']
+                profile = next((p for p in profiles if p['id'] == platform_definition.model_connection), None)
+                if profile is None:
+                    raise_code('CRED-701', reason='agent_model_connection_missing')
+                cfg.llm.model, cfg.llm.base_url = profile['model'], profile['base_url']
+                cfg.llm.api_key = f'tenant:{self.tenant_id}:{profile["id"]}'
+                cfg.llm.fallback_models = []
         if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None:
             # Explicit borrowed test/local adapters do not resolve host credentials.
             models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]
@@ -311,10 +348,15 @@ class ApplicationService:
                 # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
                 # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
                 channel=self.channel, llm_runtime=self.llm_runtime)
+            try:
+                if platform_definition is not None:
+                    from pyharness.application.platform_runtime import PlatformRuntime
+                    PlatformRuntime(self.platform, platform_definition, sid).configure_spine(spine)
+            except BaseException:
+                await spine.close()
+                raise
             self._engines[sid] = spine
-        if not getattr(spine, "_plugins_ready", False):
-            await _eng._preload_plugins(spine)
-            spine._plugins_ready = True
+        await _eng.prepare_plugins(spine)
         if self.tenant_id == "default":
             if getattr(self.ctx, "approval", None) is None:
                 self.ctx.approval = spine.approval
@@ -371,7 +413,11 @@ class ApplicationService:
         seen, out = set(), []
         ctx_approval = (getattr(self.ctx, "approval", None)
                         if self.tenant_id == "default" else None)
-        for p in list(self._approvals.values()) + ([ctx_approval] if ctx_approval else []):
+        engine_providers = [getattr(s, 'approval', None) for s in self._engines.values()]
+        for spine in self._engines.values():
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            engine_providers.extend(getattr(runner, 'approval_providers', {}).values())
+        for p in list(self._approvals.values()) + engine_providers + ([ctx_approval] if ctx_approval else []):
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
                 out.append(p)
@@ -572,6 +618,10 @@ class ApplicationService:
             await spine.schedule.register(
                 name, str(kind or "cron").strip().lower(), expr,
                 {"intent": intent}, is_risky=is_risky, ctx=ctx)
+        elif action == 'edit':
+            await spine.schedule.edit(name,kind,expr,intent,ctx=ctx)
+        elif action == 'run_now':
+            await spine.schedule.run_now(name,ctx=ctx)
         elif action in {"pause", "resume", "remove"}:
             if not name:
                 raise_code("EVT-100", field="name", advice=f"schedule {action} 需要 name")
@@ -583,8 +633,26 @@ class ApplicationService:
 
     @admitted
     async def list_subagents(self, sid: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        return {"status": _json_safe(_as_dict(spine.subagent.status()))}
+        from pyharness.application.platform_projection import subtask_history
+        log_ = await self.require_session(sid)
+        spine = self._engines.get(sid)
+        status = (_json_safe(_as_dict(spine.subagent.status())) if spine is not None else
+                  {'running': 0, 'limit': 8, 'active_children': []})
+        history = subtask_history(sid, log_.events_after(0), status['active_children'])
+        waiting = {item['session_id'] for item in (await self.pending_approvals())['pending']}
+        for row in history:
+            if row['status'] == 'running' and row['session_id'] in waiting:
+                row['status'] = 'waiting_approval'
+            if row['error_code'] == 'runtime_interrupted':
+                # A silent child still owns durable terminal facts in its log.
+                # Do not construct an engine or replay work to recover history.
+                from pyharness.application.platform_projection import summary
+                child_log = await self.require_session(row['session_id'])
+                for event in child_log.events_after(0):
+                    if event.type in {'subagent.joined','subagent.failed'} and event.payload.get('sub_id') == row['session_id']:
+                        row.update(status='completed' if event.type=='subagent.joined' else 'failed',
+                            finished_at=event.ts,summary=summary(event.payload.get('summary','')),error_code=None)
+        return {"status": status, 'history': history}
 
     @admitted
     async def spawn_subagent(self, sid: str, task: str, *,
@@ -635,6 +703,8 @@ class ApplicationService:
                 await fn(*args, **kw)
             except BaseException as exc:
                 errors.append(exc)
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.stop_actions)
         spines = list(self._engines.values())
         if self.tenant_id == 'default':
             spines.append(getattr(self.ctx, 'engine_spine', None))
@@ -646,6 +716,8 @@ class ApplicationService:
         for queue in self._queues.values():
             if callable(getattr(queue, 'shutdown', None)):
                 await attempt(queue.shutdown, reason='service-shutdown')
+        if hasattr(self, '_platform'):
+            await attempt(self._platform.close)
         if isinstance(self._surface, _session_module().DesktopSessionManager):
             await attempt(self._surface.shutdown_all)
         await attempt(self.llm_runtime.aclose)
@@ -663,12 +735,17 @@ class ApplicationService:
             log_ = self._logs.get(str(sid))
             if log_ is None:
                 return ""
+            cache = self.__dict__.setdefault('_list_titles', {})
+            seq = log_.stats()['seq']
+            if sid in cache and cache[sid][0] == seq:
+                return cache[sid][1]
             title = ""
             for ev in log_.events_after(0):
                 if ev.type == "session.created":
                     title = ev.payload.get("title") or title
                 elif ev.type == "session.renamed":
                     title = ev.payload.get("new_title") or title
+            cache[sid] = (seq, str(title))
             return str(title)
 
         sessions: list[dict] = []
@@ -679,6 +756,9 @@ class ApplicationService:
             if not row.get("title"):
                 row["title"] = _title_of(sid)
             sessions.append(row)
+        authorized = {row['sid'] for row in sessions}
+        for sid in set(self.__dict__.get('_list_titles', {}))-authorized:
+            self._list_titles.pop(sid, None)
         return {"sessions": sessions, "count": len(sessions)}
 
     @admitted
@@ -687,8 +767,14 @@ class ApplicationService:
         msgs = log_.derive_messages()
         stats_fn = getattr(log_, "stats", None)
         to_seq = int((stats_fn().get("seq") or 0)) if callable(stats_fn) else 0
+        projected = _with_message_origin(log_, msgs)
+        records = {r['artifact_id']:r for r in (await self.platform.artifacts())['artifacts']
+                   if r['session_id'] == sid}
+        for row in projected:
+            row['attachments'] = [{k:records[i][k] for k in ('artifact_id','filename','media_type','size','preview_type')}
+                                  for i in row.pop('artifact_ids', []) if i in records]
         return {"sid": sid, "after_seq": int(after_seq), "to_seq": to_seq,
-                "messages": _with_message_origin(log_, msgs)}
+                "messages": projected}
 
     @admitted
     async def session_timeline(self, sid: str, after_seq: int = 0,
@@ -697,7 +783,7 @@ class ApplicationService:
         if isinstance(after_seq, bool) or not isinstance(after_seq, int):
             raise_code("EVT-100", field="after_seq", value=after_seq,
                        advice="after_seq 须 int(seq 游标)")
-        from pyharness.desktop.projection import derive_timeline
+        from pyharness.application.event_projection import derive_timeline
         nodes = derive_timeline(
             log_.events_after(after_seq=max(0, int(after_seq))),
             kinds=str(kinds or ""))
@@ -713,8 +799,8 @@ class ApplicationService:
         if env is None:
             raise_code("EVT-100", sid=sid, seq=seq,
                        advice="seq 不存在(空洞/坏行隔离/越界)")
-        from pyharness.desktop.projection import _env_dict
-        return {"event": _env_dict(env)}
+        from pyharness.application.event_projection import envelope_dict
+        return {"event": envelope_dict(env)}
 
     @admitted
     async def telemetry_report(self, sid: str) -> dict:
@@ -940,15 +1026,16 @@ class ApplicationService:
     @admitted
     async def pending_approvals(self) -> dict:
         out: list[dict] = []
-        seen: set[int] = set()
+        seen: set[tuple] = set()
         for p in self.all_approval_providers():
             pending = getattr(p, "_pending", None)
             if not isinstance(pending, dict):
                 continue
             for aid, req in pending.items():
-                if aid in seen:
+                identity = (getattr(req, 'session_id', ''), aid)
+                if identity in seen:
                     continue
-                seen.add(aid)
+                seen.add(identity)
                 out.append({"approval_id": aid,
                             "tool": getattr(req, "tool", ""),
                             "args_summary": getattr(req, "args_summary", ""),
@@ -972,6 +1059,9 @@ class ApplicationService:
             if isinstance(pending, dict) and int(aid) in pending:
                 psid = self._approval_sid_of(p, aid)
                 if sid is None or psid == sid:
+                    matches.append(p)
+            elif callable(getattr(p, "owns_initializing", None)):
+                if p.owns_initializing(aid, sid=sid):
                     matches.append(p)
         if len(matches) == 1:
             return matches[0]
@@ -1010,6 +1100,11 @@ class ApplicationService:
     def ask_providers(self) -> list:
         seen, out = set(), []
         for spine in list(self._engines.values()):
+            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
+            for child_provider in getattr(runner, 'ask_providers', {}).values():
+                if id(child_provider) not in seen:
+                    seen.add(id(child_provider))
+                    out.append(child_provider)
             p = getattr(spine, "ask", None)
             if p is not None and id(p) not in seen:
                 seen.add(id(p))
@@ -1065,6 +1160,41 @@ class ApplicationService:
                    hint="未知/已答复的 ask_id")
 
     # ------------------------------------------------------------ attachments / workflow / budget
+    @admitted
+    async def memory_action(self, body: dict) -> dict:
+        """Explicit team namespace backed by the existing SessionKV owner."""
+        import re
+        from pyharness.core.kv import SessionKV
+        if not isinstance(body,dict) or set(body)-{'op','key','value'}:
+            raise_code('EVT-100',field='memory')
+        op=body.get('op')
+        key=body.get('key')
+        value=body.get('value')
+        if op not in {'get','set','delete','keys'}:
+            raise_code('EVT-100',field='memory.op')
+        from pyharness.application.accounts import Accounts, current_actor
+        actor = current_actor.get()
+        if actor is not None and actor.get('tenant') != self.tenant_id:
+            raise_code('GRD-403', reason='memory_tenant_mismatch')
+        if Accounts.manages_tenant(self._storage_root(), self.tenant_id):
+            roles = Accounts(self._storage_root()).teams(actor['user_id']) if actor else []
+            role = next((r['role'] for r in roles if r['id']==self.tenant_id),None)
+            if role is None or (op in {'set','delete'} and role!='owner'):
+                raise_code('GRD-403', reason='team_memory_read_only')
+        if op!='keys' and (not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',key)):
+            raise_code('EVT-100',field='memory.key')
+        if op=='set' and (not isinstance(value,str) or len(value)>4096):
+            raise_code('EVT-100',field='memory.value')
+        if not hasattr(self,'_team_memory'):
+            self._team_memory=SessionKV(self.tenant_root()/'memory.kv.json',session_id='team:'+self.tenant_id)
+        kv=self._team_memory
+        if op=='set':
+            keys=kv.apply_op('keys')
+            names=[] if keys=='(空)' else keys.split('、')
+            if key not in names and len(names)>=100:
+                raise_code('EVT-100',field='memory.quota')
+        return {'scope':'team','result':kv.apply_op(op,key=key,value=value)}
+
     @admitted
     async def upload_attachment(self, sid: str, attachment: dict) -> dict:
         self._ensure_open()
@@ -1172,11 +1302,15 @@ class ApplicationService:
         if not self._engines:
             return {"ok": False, "error": "无活动会话(先新建/打开会话)"}
         from pyharness.core import plugin_loader as _pl
-        from pyharness.desktop.sessions import _plugin_within
+        from pyharness.application.session_store import _plugin_within
         pdir = ((Path(__file__).resolve().parents[2] / "examples" / "plugins")
                 if self.tenant_id == "default" else (self.tenant_root() / "plugins")) / pid
         results: list[dict] = []
         for sid, spine in list(self._engines.items()):
+            if getattr(spine, 'platform_runtime', None) is not None:
+                results.append({'session': str(sid), 'ok': False,
+                                'error': 'Platform Agent 禁止宿主插件生命周期操作'})
+                continue
             mgr = spine.plugins
             try:
                 if kind == "load":
@@ -1224,50 +1358,31 @@ class ApplicationService:
     @staticmethod
     def _reset_preset_state(spine: Any) -> None:
         from pyharness import engine as _eng
-        cfg = spine.settings
-        cfg.security.policy.preset = "strict"
-        p = spine.scope.policy
-        p.deny_tools = set()
-        try:
-            p.sandbox_level = "strict"
-        except Exception:                              # noqa: BLE001
-            pass
-        try:
-            cfg.security.sandbox.level = "strict"
-        except Exception:                              # noqa: BLE001
-            pass
-        _eng._apply_preset(cfg, p, spine.tool_registry)
+        cfg, policy = _eng.compile_preset(spine, 'strict')
+        spine.settings.security = cfg.security
+        spine.scope.policy = policy
 
     @admitted
     async def set_preset(self, body: dict) -> dict:
         self._ensure_open()
-        preset = str((body or {}).get("preset") or "")
-        valid = ("strict", "standard", "readonly", "locked")
+        preset = str((body or {}).get('preset') or '')
+        valid = ('strict', 'standard', 'readonly', 'locked')
         if preset not in valid:
-            return {"ok": False, "error": f"非法档位:{preset}", "valid": list(valid)}
+            return {'ok':False,'error':'invalid_preset','valid':list(valid)}
         if not self._engines:
-            return {"ok": False, "error": "无活动会话(先新建/打开会话)"}
+            return {'ok':False,'error':'no_active_sessions'}
         from pyharness import engine as _eng
-        done = 0
-        for spine in list(self._engines.values()):
-            try:
-                spine.settings.security.policy.preset = preset
-                p = spine.scope.policy
-                p.deny_tools = set()
-                try:
-                    p.sandbox_level = "strict"
-                except Exception:                      # noqa: BLE001
-                    pass
-                try:
-                    spine.settings.security.sandbox.level = "strict"
-                except Exception:                      # noqa: BLE001
-                    pass
-                _eng._apply_preset(spine.settings, p, spine.tool_registry)
-                done += 1
-            except Exception as e:                     # noqa: BLE001
-                return {"ok": False, "error": f"{type(e).__name__}:{e}"[:200]}
-        return {"ok": True, "preset": preset, "sessions": done,
-                "hint": "exec.* 等危险工具:standard 档可见,strict 档隐藏"}
+        # Validate every setter against detached copies first. A failed reset
+        # must never partially clear the live deny set or claim success.
+        try:
+            prepared=[(spine,*_eng.compile_preset(spine,preset)) for spine in self._engines.values()]
+        except Exception:
+            return {'ok':False,'error':'preset_configuration_failed'}
+        for spine,cfg,policy in prepared:
+            spine.settings.security=cfg.security
+            spine.scope.policy=policy
+        return {'ok':True,'preset':preset,'sessions':len(prepared),
+                'hint':'exec.* 等危险工具仍由治理与审批约束'}
 
     def skill_installer(self) -> Any:
         from pyharness.core.skill_registry import SkillInstaller

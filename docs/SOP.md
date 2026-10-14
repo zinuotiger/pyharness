@@ -2,7 +2,7 @@
 
 > **类型**: 操作流程 = 六大高频链路的"按序执行 + 判据验收":①开发环境搭建 → ②测试运行 → ③编码流程 → ④部署与演示准备 → ⑤故障恢复 → ⑥文档维护。
 > **版本**: v1.0 | **日期**: 2026-09-06 | **读者**: 作者 / 演示者 / AI 编码 Agent。命令唯一来源 = DEP.md;编码顺序 = specs/README.md;测试 = CONSTRAINTS-06;故障 = CONSTRAINTS-08;阶段门 = PRD-Core §4.6/§8.3。冲突以 PRD-Core 与 CFG.md 为准,错误码以 ERR.md 为准。
-> **命令环境**(与 DEP 一致): Windows 11 + git-bash;`~` = `C:\Users\<你的用户名>`;项目根 = `~/Desktop/mini-harness`;统一 `uv run` 前缀(无需激活 venv),等效裸 `pyharness`;路径写正斜杠 `D:/x`,中文原生 UTF-8。
+> **命令环境**(与 DEP 一致): Windows 11 + git-bash;`~` = `C:\Users\<你的用户名>`;项目根 = `$REPO`;统一 `uv run` 前缀(无需激活 venv),等效裸 `pyharness`;路径写正斜杠 `D:/x`,中文原生 UTF-8。
 
 ## 快速索引
 
@@ -26,7 +26,7 @@
 1. **前置检查**: 终端为 git-bash;`git --version` 有输出;`uv --version` 输出 ≥0.5.x。
 2. **装 uv(缺失时)**: PowerShell `winget install --id=astral-sh.uv -e`;或 git-bash `curl -LsSf https://astral.sh/uv/install.sh | sh` + `export PATH="$HOME/.local/bin:$PATH"` 并写入 `~/.bashrc`,**重开终端**后验证。
 3. **装受管 Python 3.11**(不碰系统 Python): `uv python install 3.11`;`uv python list` 确认含 3.11.x(pyproject 声明 `requires-python = ">=3.11"`,`uv sync` 自动挑选)。
-4. **获取代码**: `git clone <仓库地址> ~/Desktop/mini-harness`(或复制现成目录),`cd` 后确认顶层含 `pyproject.toml / pyharness/ / scripts/ / tests/ / docs/`(结构见 DEP §2.1)。用户数据在 `~/.pyharness`,不在项目内。
+4. **获取代码**: `git clone <仓库地址> $REPO`(或复制现成目录),`cd` 后确认顶层含 `pyproject.toml / pyharness/ / scripts/ / tests/ / docs/`(结构见 DEP §2.1)。用户数据在 `~/.pyharness`,不在项目内。
 5. **装依赖**: `uv sync`(①读 pyproject ②建 .venv ③装依赖写 uv.lock)。幂等,依赖变更后重跑即更新 .venv。
 6. **依赖冒烟**: `uv run python -c "import pydantic, openai, yaml; print('deps ok')"` → 输出 `deps ok`。
 7. **CLI 冒烟**: `uv run pyharness --help` → 列出 14 个子命令(chat/run/plan/schedule/job/search/session/fork/repair/desktop/acp/config/budget/stats,DEP §5.1)与 `--config/--json/--session`。

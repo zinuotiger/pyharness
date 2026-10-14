@@ -21,8 +21,8 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-BASE = ROOT / '.work/integration-evleven'
-R1_PYTHON = BASE / 'evleven-venv/Scripts/python.exe'
+BASE = Path(os.environ.get('PYHARNESS_EVLEVEN_TRIAL_DIR', ROOT / '.work/integration-evleven')).resolve()
+R1_PYTHON = BASE / ('evleven-venv/Scripts/python.exe' if os.name == 'nt' else 'evleven-venv/bin/python')
 TOOLS = ['memory_create', 'memory_read', 'memory_search', 'memory_delete']
 
 import httpx
@@ -35,7 +35,7 @@ from pyharness.desktop import DesktopApp
 
 def server_command(data):
     return [str(R1_PYTHON), '-I', '-B', str(ROOT / 'scripts/evleven_r1_server.py'),
-            '--data-dir', str(Path(data).resolve())]
+            '--base-dir', str(BASE), '--data-dir', str(Path(data).resolve())]
 
 
 def settings(data, remote):
@@ -282,17 +282,21 @@ async def bounded_phase(data, action):
 
 
 def main():
+    global BASE, R1_PYTHON
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--data-dir', type=Path, default=BASE / 'trial')
+    parser.add_argument('--base-dir', type=Path, default=BASE)
+    parser.add_argument('--data-dir', type=Path)
     parser.add_argument('--phase', choices=['write', 'read'])
     args = parser.parse_args()
+    BASE = args.base_dir.resolve()
+    R1_PYTHON = BASE / ('evleven-venv/Scripts/python.exe' if os.name == 'nt' else 'evleven-venv/bin/python')
     if not __debug__:
         raise RuntimeError('Do not use -O')
-    if Path(sys.prefix).resolve() != (ROOT / '.work/verification/venv').resolve():
-        raise RuntimeError('Use .work/verification/venv/Scripts/python.exe')
-    data = args.data_dir.resolve()
+    if Path(sys.prefix).resolve() == Path(sys.base_prefix).resolve():
+        raise RuntimeError('Use an isolated PyHarness test virtual environment')
+    data = (args.data_dir or BASE / 'trial').resolve()
     if not data.is_relative_to(BASE.resolve()):
-        raise RuntimeError('Trial data must stay in .work/integration-evleven')
+        raise RuntimeError('Trial data must stay in the isolated trial root')
     data.mkdir(parents=True, exist_ok=True)
     for key in list(os.environ):
         if key.startswith('PH_') or any(word in key.upper() for word in ('API_KEY', 'TOKEN', 'SECRET', 'PROXY')):
@@ -315,7 +319,7 @@ def main():
     print(f'Data/logs: {run}\nRemote persistence: {run / "remote"}', flush=True)
     subprocess.run(server_command(run/'remote') + ['--verify'], check=True, timeout=20)
     for action in ['write', 'read']:
-        cmd = [sys.executable, str(Path(__file__).resolve()), '--phase', action, '--data-dir', str(run)]
+        cmd = [sys.executable, str(Path(__file__).resolve()), '--base-dir', str(BASE), '--phase', action, '--data-dir', str(run)]
         with (run / f'{action}-console.log').open('w', encoding='utf-8') as output:
             completed = subprocess.run(cmd, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=120)
         print((run / f'{action}-console.log').read_text(encoding='utf-8'), flush=True)

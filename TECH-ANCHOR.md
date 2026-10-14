@@ -1,11 +1,11 @@
-# PyHarness(原 Mini-Harness)— TECH-ANCHOR & Pre-Dispatch Summary
+# PyHarness— TECH-ANCHOR & Pre-Dispatch Summary
 
-> 项目: PyHarness(Mini-Harness 全功能版)
+> 项目: PyHarness
 > 定位: 用 Python 复刻 DeepSeek Harness 全部功能的 Agent 框架——DSH 架构思想(非源码翻译),66 项功能 + 自研轻量插件总线,6 阶段路线
 > 类型: 🔵技术引擎型(Agent 框架/引擎)
 > 日期: 2026-09-06
 > 用户需求原文: 想要 DSH 的架构不要源码;先需求文档→架构→代码;全功能实现(71 项里 5 项 TS 专属不做,其余全做);走完整 full-pipeline 流程(A 档纯核心文档,不要模拟数据附录)
-> 项目别名: mini-harness(目录沿用)/ PyHarness(文档正式名)
+> 项目别名: PyHarness
 
 ---
 

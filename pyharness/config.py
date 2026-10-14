@@ -612,6 +612,7 @@ class ContentCfg(BaseModel):
 
 class LoopCfg(BaseModel):
     """loop.* — 循环域(F007/F010/F017/F022/F026/F043/F058/F063)。"""
+    model_config = ConfigDict(validate_assignment=True)
     max_turns: int = Field(30, ge=1, le=1000)
     step_timeout_s: int = Field(60, ge=1, le=600)
     input_queue_max: int = Field(10, ge=1, le=100)
@@ -626,12 +627,27 @@ class LoopCfg(BaseModel):
     content: ContentCfg = Field(default_factory=ContentCfg)
     message_edit_window_s: int = Field(1800, ge=60, le=86400)
 
+    @field_validator('step_timeout_s','tool_concurrency','thread_pool_size')
+    @classmethod
+    def fixed_legacy_contract(cls, value, info):
+        defaults={'step_timeout_s':60,'tool_concurrency':1,'thread_pool_size':4}
+        if value!=defaults[info.field_name]:
+            raise ValueError(f'{info.field_name}: unsupported override; legacy compatibility value only')
+        return value
+
 
 class SandboxCfg(BaseModel):
     """security.sandbox — 沙箱级别(SEC §7)。"""
+    model_config = ConfigDict(validate_assignment=True)
     level: Literal["strict", "basic", "off"] = "strict"
     proc_wallclock_s: int = Field(60, ge=1, le=3600)
-    proc_mem_limit_mb: int = Field(0, ge=0)      # 0=不限;≥1=MB(Windows 尽力而为)
+    proc_mem_limit_mb: int = Field(0, ge=0)      # 仅兼容默认0；宿主内存配额不支持，非0拒绝；Docker memory_mb另设
+
+    @field_validator('proc_mem_limit_mb')
+    @classmethod
+    def no_host_memory_quota(cls,value):
+        if value!=0: raise ValueError('proc_mem_limit_mb: unsupported; Docker memory_mb is separate')
+        return value
 
 
 class NetworkCfg(BaseModel):
@@ -669,8 +685,15 @@ class TrustlistCfg(BaseModel):
 
 class CredentialsCfg(BaseModel):
     """security.credentials — 凭据文件(F016/SEC §6)。"""
+    model_config = ConfigDict(validate_assignment=True)
     file: str = "~/.pyharness/credentials.yaml"
-    cache_ttl_s: int = Field(300, ge=0, le=3600)       # 秘密 TTL≤5min
+    cache_ttl_s: int = Field(300, ge=0, le=3600)       # 仅兼容默认300；凭据不缓存，非默认值拒绝
+
+    @field_validator('cache_ttl_s')
+    @classmethod
+    def no_credential_cache(cls,value):
+        if value!=300: raise ValueError('cache_ttl_s: deprecated compatibility value; credentials are not cached')
+        return value
 
 
 class AttachmentCfg(BaseModel):
@@ -782,6 +805,7 @@ class SkillsCfg(BaseModel):
 
 class PluginsCfg(BaseModel):
     """plugins.* — 插件域(F001-F006;装载序 DIS-SEAM §4.6)。"""
+    model_config = ConfigDict(validate_assignment=True)
     enabled: list[str] = Field(default_factory=list)     # 空 = 只装内置
     dir: str = "~/.pyharness/plugins"
     ctx_lazy: bool = True
@@ -791,6 +815,19 @@ class PluginsCfg(BaseModel):
     priority: dict[str, int] = Field(default_factory=dict)
     backpressure_limit: int = Field(1000, ge=1, le=100000)   # 总线背压(F005)
     deadletter_samples: int = Field(100, ge=0, le=10000)
+
+    @field_validator('ctx_lazy')
+    @classmethod
+    def lazy_only(cls,value):
+        if not value: raise ValueError('ctx_lazy: only lazy initialization is supported')
+        return value
+
+    @field_validator('pre_activate')
+    @classmethod
+    def legacy_activation_only(cls,value):
+        if value!=['storage.spill','credentials','storage.kv']:
+            raise ValueError('pre_activate: deprecated compatibility list; overrides unsupported')
+        return value
 
 
 class ShellWebCfg(BaseModel):

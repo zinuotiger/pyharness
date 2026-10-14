@@ -1,6 +1,6 @@
 # ADD — PyHarness 架构决策记录(Architecture Decision Records)
 
-> **项目**:PyHarness——用 Python 3.11 从零复刻 DeepSeek Harness(DSH)全部功能的单进程 Agent 框架(目录沿用 mini-harness)
+> **项目**:PyHarness——用 Python 3.11 从零复刻 DeepSeek Harness(DSH)全部功能的单进程 Agent 框架
 > **文档类型**:ADD(架构决策记录,ADR 编号 001 起,不可变递增;记录"为什么这么设计"及"为什么不那么设计")
 > **版本**:v1.0 定稿 | **日期**:2026-09-06 | **状态**:22 条 ADR 全部「已接受」(ADR-001~012 定稿 2026-09-06;ADR-013~020 治理期追加 2026-09-14;ADR-021 审计会话归属 · ADR-022 拒绝反馈契约 2026-09-17)
 > **读者**:①作者(作者/开发者/面试者——本文件是面试讲深"取舍过程"的底稿)②AI 编码 Agent(实现前先读对应 ADR,避免踩已否决策略的坑)

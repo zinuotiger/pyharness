@@ -72,12 +72,13 @@ class BudgetGate:
     # ------------------------------------------------------------ 只读读数
     def _usage(self) -> tuple[int, int, float, int]:
         """(in, out, cost, requests) 现读;counters 缺失 → 全零(不猜)。"""
-        c = self.counters
+        c = getattr(self.scope, '_counters', None) or self.counters
         if c is None:
             return 0, 0, 0.0, 0
-        return (int(getattr(c, "in_tokens", 0) or 0),
-                int(getattr(c, "out_tokens", 0) or 0),
-                float(getattr(c, "cost_est", 0.0) or 0.0),
+        used = c.task_total() if callable(getattr(c, 'task_total', None)) else c
+        return (int(getattr(used, "in_tokens", 0) or 0),
+                int(getattr(used, "out_tokens", 0) or 0),
+                float(getattr(used, "cost_est", 0.0) or 0.0),
                 int(getattr(c, "requests", 0) or 0))
 
     def state(self) -> str:

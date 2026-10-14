@@ -417,10 +417,7 @@ def _apply_preset(cfg: Any, policy: Any, tool_reg: Any,
         policy.sandbox_level = "basic"                 # 放宽仅域约束
         # 同步可见性档:tool_exec 等按 security.sandbox.level 判定(两键脱节
         # 会造成审批已放行但工具 TLB-802——2026-09-08 exec 真链实测暴露)
-        try:
-            cfg.security.sandbox.level = "basic"
-        except Exception:                              # noqa: BLE001 只尽力同步
-            pass
+        cfg.security.sandbox.level = "basic"
         return
     # strict:保持默认(无操作)
 
@@ -442,12 +439,43 @@ async def build_spine(cfg: Any, *, sid: str, sessions_dir: Path,
     bus = bus or EventBus(**bus_kwargs_of(cfg))  # F005 背压阈值由装配层注入(N1)
     # N1:攒批/定时落盘标量由**装配层**从 Settings 解析后注入(工厂不读 config)。
     store = open_store(sid, dir=sessions_dir, **flush_kwargs_of(cfg))
-    log_ = await open_session(sid, store, tenant_id=tenant_id)  # async 工厂
-    spine = build_runner_components(cfg, log_=log_, bus=bus,
-                                    sessions_dir=sessions_dir,
-                                    store=store, channel=channel)
-    spine.persistence = store
-    return spine
+    try:
+        log_ = await open_session(sid, store, tenant_id=tenant_id)  # async 工厂
+        spine = build_runner_components(cfg, log_=log_, bus=bus,
+                                        sessions_dir=sessions_dir,
+                                        store=store, channel=channel)
+        spine.persistence = store
+        return spine
+    except BaseException as primary:
+        # Ownership transfers only when the complete spine is returned.
+        try:
+            store.close()
+        except BaseException as cleanup_error:
+            primary.add_note(f'store cleanup failed: {type(cleanup_error).__name__}')
+        raise
+
+
+async def _rollback_spine(spine: EngineSpine, primary: BaseException) -> None:
+    """Finish unreturned assembly cleanup without replacing its original failure."""
+    cleanup = asyncio.create_task(spine.close())
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError:
+            if cleanup.done():
+                if cleanup.cancelled():
+                    primary.add_note('engine cleanup task was cancelled')
+                    break
+                # Retrieve any failure from the completed task on the next pass.
+            primary.add_note('cancellation received while awaiting engine cleanup')
+        except BaseException as cleanup_error:
+            primary.add_note(f'engine cleanup failed: {type(cleanup_error).__name__}')
+            break
+    try:
+        spine.scope.release()
+    except BaseException as cleanup_error:
+        primary.add_note(f'scope cleanup failed: {type(cleanup_error).__name__}')
 
 
 async def _preload_plugins(spine: EngineSpine) -> None:
@@ -615,6 +643,13 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     """
     # Connection registry keys and policy compilation are runtime-local state.
     cfg = copy.deepcopy(cfg)
+    # Resolve the required workspace before subscribing capability owners.
+    # A bad path must not leave approval listeners attached to a borrowed bus.
+    ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
+                   ).expanduser()
+    ws_root.mkdir(parents=True, exist_ok=True)
+    workspace_root = session_workspace(str(ws_root), str(getattr(log_, "sid", "")))
+    Path(workspace_root).mkdir(parents=True, exist_ok=True)
     # AgentLoop(真 cfg:max_turns=30 权威默认)
     loop = AgentLoop(cfg)
 
@@ -690,12 +725,7 @@ def build_runner_components(cfg: Any, *, log_: Any, bus: EventBus,
     # 共用同一 fs 根,跨会话文件互相可见/可写(会话隔离失效);②子会话工厂按规格
     # 形态 base.parent/{sub_id} 推导时越出 workspaces 树且目录从未创建(子代理
     # 文件类工具全废)。派生一律走 scope.session_workspace 单点,不再就地拼接。
-    ws_root = Path(getattr(cfg.storage, "workspaces_dir", "~/.pyharness/workspaces")
-                   ).expanduser()
-    ws_root.mkdir(parents=True, exist_ok=True)
-    policy.workspace_root = session_workspace(
-        str(ws_root), str(getattr(log_, "sid", "")))
-    Path(policy.workspace_root).mkdir(parents=True, exist_ok=True)
+    policy.workspace_root = workspace_root
     # storage.spill 定位器:首个 agent 就绪时 SpillProvider.enter 挂载(见
     # _activate_storage_caps)——executor 关4 超长输出(>2KB)→ spill 私有区 +
     # ref 回喂(F039);激活失败时报 PERS-221 不崩(截断兜底)
@@ -1043,6 +1073,8 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
         # 不跨会话串。异常/取消路径经 finally 还原。
         prev_task_id = getattr(ag_ctx, "task_id", None)
         ag_ctx.task_id = getattr(task, "id", None)
+        from pyharness.application.accounts import current_actor
+        actor_token = current_actor.set((env.payload.get('meta') or {}).get('platform', {}).get('actor'))
         # KF-C(A4/R24):把**框架侧**"本轮来源"提到 ctx —— 到点触发那一轮此前**无任何
         # 通道**告知模型"这是定时触发" ⇒ 模型只会复述任务状态("提醒已设好"),而不是
         # 产出提醒本身。取值只取 `task.meta.source`(**受控**:由 schedule._fire 写入),
@@ -1050,8 +1082,32 @@ def make_runner(spine: EngineSpine) -> EngineRunner:
         prev_src = getattr(ag_ctx, "turn_source", None)
         ag_ctx.turn_source = _turn_source_of(task)
         try:
-            res = await loop.wake(env, ctx=ag_ctx)
+            platform_runtime = getattr(ag_ctx, 'platform_runtime', None)
+            if platform_runtime is None:
+                res = await loop.wake(env, ctx=ag_ctx)
+            else:
+                res = None
+                execution_raised = False
+                try:
+                    async def governed_turn():
+                        await platform_runtime.prepare_evidence(env,ag_ctx)
+                        return await loop.wake(env,ctx=ag_ctx)
+                    res = await asyncio.wait_for(governed_turn(),
+                        timeout=platform_runtime.definition.timeout)
+                    if res is not None and res.reason == "complete":
+                        await platform_runtime.finish(ag_ctx)
+                except BaseException:
+                    execution_raised = True
+                    raise
+                finally:
+                    try:
+                        await platform_runtime.release(ag_ctx)
+                    except Exception as cleanup_error:
+                        if not execution_raised and (res is None or res.reason == "complete"):
+                            raise
+                        log.warning("cleanup after failed execution: %s", type(cleanup_error).__name__)
         finally:
+            current_actor.reset(actor_token)
             ag_ctx.task_id = prev_task_id
             ag_ctx.turn_source = prev_src
         # F042/#7 自动标题:run 正常完成后命名一次(幂等;LLM 失败静默留空)
@@ -1357,23 +1413,28 @@ async def assemble_real_engine(cfg: Any, *, sid: str,
 
     spine = await build_spine(cfg, sid=sid, sessions_dir=sessions_dir,
                               channel=channel, tenant_id=tenant_id)
-    runner = make_runner(spine)
-    queue = TaskQueue(session=spine.session, runner=runner,
-                      **queue_kwargs_of(cfg))      # F043 队深由装配层注入(N1)
-    ctx = EngineContext(
-        settings=spine.settings, bus=spine.bus, session=spine.session,
-        llm=spine.llm, scope=spine.scope, loop=spine.loop,
-        tools=spine.tools, registry=spine.registry,
-        guard=spine.guard, approval=spine.approval,
-        counters=spine.counters,
-        agent=None, task_runner=runner,
-        make_runner=lambda: make_runner(spine),
-        storage=spine.storage,     # 与 spine 同对象:spill 激活后立即可见
-        engine_spine=spine, task_queue=queue, budget=spine.budget,
-        governance=spine.governance)
-    ctx.search_backend = spine.search_backend
-    await activate_orchestration(spine, task_queue=queue)
-    return ctx
+    try:
+        runner = make_runner(spine)
+        queue = TaskQueue(session=spine.session, runner=runner,
+                          **queue_kwargs_of(cfg))      # F043 队深由装配层注入(N1)
+        spine.task_queue = queue
+        ctx = EngineContext(
+            settings=spine.settings, bus=spine.bus, session=spine.session,
+            llm=spine.llm, scope=spine.scope, loop=spine.loop,
+            tools=spine.tools, registry=spine.registry,
+            guard=spine.guard, approval=spine.approval,
+            counters=spine.counters,
+            agent=None, task_runner=runner,
+            make_runner=lambda: make_runner(spine),
+            storage=spine.storage,     # 与 spine 同对象:spill 激活后立即可见
+            engine_spine=spine, task_queue=queue, budget=spine.budget,
+            governance=spine.governance)
+        ctx.search_backend = spine.search_backend
+        await activate_orchestration(spine, task_queue=queue)
+        return ctx
+    except BaseException as primary:
+        await _rollback_spine(spine, primary)
+        raise
 
 
 async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
@@ -1397,30 +1458,64 @@ async def attach_engine_to_ctx(ctx: Any, cfg: Any, *, log_: Any,
         sessions_dir=sessions_dir,
         store=store if store is not None else getattr(log_, "_persistence", None),
         attach_persistence=False, channel=channel, llm_runtime=runtime)
-    ctx.engine_spine = spine  # ownership precedes the first await
-    if preload:
-        try:
-            await _preload_plugins(spine)
-            spine._plugins_ready = True
-        except Exception:                       # noqa: BLE001 预载失败不阻断
-            log.warning("cli/acp plugin preload skipped", exc_info=True)
-    runner = make_runner(spine)
-    ctx.engine_spine = spine
-    ctx.llm = spine.llm
-    ctx.scope = spine.scope
-    ctx.tools = spine.tools
-    ctx.guard = spine.guard
-    ctx.governance = getattr(spine, "governance", None)   # 治理层单实例(S2-3)
-    ctx.budget = spine.budget                      # F032 只读预算门面(仪表盘)
-    ctx.search_backend = getattr(spine, "search_backend", None)
-    ctx.approval = spine.approval
     try:
-        spine.approval.set_default_channel(channel)   # N5:归一化覆写,不直写 _channel
-    except Exception:                              # noqa: BLE001 只读门面:尽力
-        pass
-    ctx.task_runner = runner
-    ctx.make_runner = lambda: runner
-    ctx.task_queue = TaskQueue(session=log_, runner=runner,
-                               **queue_kwargs_of(cfg))   # F043 队深同源注入
-    await activate_orchestration(spine, task_queue=ctx.task_queue)
-    return spine
+        ctx.engine_spine = spine  # ownership precedes the first await
+        if preload:
+            try:
+                await _preload_plugins(spine)
+                spine._plugins_ready = True
+            except Exception:                       # noqa: BLE001 预载失败不阻断
+                log.warning("cli/acp plugin preload skipped", exc_info=True)
+        runner = make_runner(spine)
+        ctx.engine_spine = spine
+        ctx.llm = spine.llm
+        ctx.scope = spine.scope
+        ctx.tools = spine.tools
+        ctx.guard = spine.guard
+        ctx.governance = getattr(spine, "governance", None)   # 治理层单实例(S2-3)
+        ctx.budget = spine.budget                      # F032 只读预算门面(仪表盘)
+        ctx.search_backend = getattr(spine, "search_backend", None)
+        ctx.approval = spine.approval
+        try:
+            spine.approval.set_default_channel(channel)   # N5:归一化覆写,不直写 _channel
+        except Exception:                              # noqa: BLE001 只读门面:尽力
+            pass
+        ctx.task_runner = runner
+        ctx.make_runner = lambda: runner
+        ctx.task_queue = TaskQueue(session=log_, runner=runner,
+                                   **queue_kwargs_of(cfg))   # F043 队深同源注入
+        spine.task_queue = ctx.task_queue
+        await activate_orchestration(spine, task_queue=ctx.task_queue)
+        return spine
+
+    except BaseException as primary:
+        await _rollback_spine(spine, primary)
+        raise
+
+
+async def prepare_plugins(spine):
+    """Host-facing idempotent plugin lifecycle boundary."""
+    if not getattr(spine, '_plugins_ready', False):
+        await _preload_plugins(spine)
+        spine._plugins_ready = True
+
+async def agent_context(spine, event):
+    """Host-facing agent materialization boundary."""
+    return await _agent_ctx_of(spine, event)
+
+def apply_preset(config, policy, registry, *, scope=None):
+    """Compile a permission preset through the engine's canonical policy logic."""
+    return _apply_preset(config, policy, registry, scope=scope)
+
+
+def compile_preset(spine, preset):
+    """Prepare policy/settings without mutating the running session on failure."""
+    import copy
+    config=copy.deepcopy(spine.settings)
+    policy=copy.deepcopy(spine.scope.policy)
+    config.security.policy.preset=preset
+    policy.deny_tools=set()
+    policy.sandbox_level='strict'
+    config.security.sandbox.level='strict'
+    apply_preset(config,policy,spine.tool_registry)
+    return config,policy

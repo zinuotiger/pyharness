@@ -43,14 +43,15 @@ class SessionKV:
     def _load(self) -> None:
         if self._loaded:
             return
-        self._loaded = True
         if not self._path.exists():
+            self._loaded = True
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("KV 顶层必须是 JSON object")
             self._data = {k: str(v) for k, v in raw.items()}
+            self._loaded = True
         except (OSError, ValueError) as e:
             raise_code("PERS-221", module="kv", sid=self._sid,
                        hint=f"KV 文件损坏/不可读:{type(e).__name__};"

@@ -169,18 +169,9 @@ class GoalManager:
         """目标活动打点:最近含 goal 活动轮号 = 当前轮(漂移静默计数清零)。"""
         self._last_goal_round = self._round_no
 
-    def _iter_session_events(self) -> list[Any]:
-        """会话事件只读遍历(session.replay/events_after 语义;供关联任务判定)。"""
-        s = self.session
-        if s is None:
-            return []
-        if hasattr(s, "events_after"):          # SessionLog 增量读(seq 升序)
-            return list(s.events_after(0))
-        if hasattr(s, "replay"):                # 存储层真源回放
-            return list(s.replay())
-        if hasattr(s, "events"):                # 测试替身/轻量落点
-            return list(s.events)
-        return []
+    def _iter_session_events(self):
+        from pyharness.core.event_reader import session_events
+        return session_events(self.session)
 
     def _task_failed(self, task_id: str) -> bool:
         """关联任务是否已 failed(终态事件单调:task.failed 后不可再 completed)。

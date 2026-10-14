@@ -1,6 +1,6 @@
 # PyHarness PRD-Core — 产品需求文档(技术引擎型)
 
-> **项目**:PyHarness(目录沿用 mini-harness)——用 Python 3.11 全功能复刻 DeepSeek Harness(DSH)的 Agent 框架
+> **项目**:PyHarness——用 Python 3.11 全功能复刻 DeepSeek Harness(DSH)的 Agent 框架
 > **文档类型**:PRD-Core(核心需求规格,66 项功能唯一权威规格;下游 ADD/MAP/DIS-*/EVENT-SCHEMA/ERR/CFG/specs/* 以本文件 F 编号为准)
 > **版本**:v1.0 定稿 | **日期**:2026-09-06 | **状态**:待代码阶段实现
 > **读者**:①作者(作者/开发者/面试者)②AI 编码 Agent(照本文件可直接写代码,每功能含验收伪代码)
@@ -150,7 +150,7 @@
 ## 2.6 代码目录草案(最终以 specs/ 为准)
 
 ```text
-mini-harness/
+pyharness/
 ├── pyharness/
 │   ├── bus/              # 阶段0:总线/分发/注册表/热插拔
 │   ├── core/             # 阶段1:脊柱 8 模块(agent_loop/agent/session/llm/

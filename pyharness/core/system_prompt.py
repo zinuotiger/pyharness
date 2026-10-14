@@ -424,6 +424,10 @@ class SystemPromptAssembler:
         deny_raw = getattr(policy, "deny_tools", None) or []
         domains_raw = getattr(policy, "allowed_domains", None) or []
         ws = getattr(policy, "workspace_root", None) or getattr(scope, "workspace_root", "")
+        runtime = getattr(ctx, 'platform_runtime', None)
+        if runtime is not None and runtime.definition.sandbox_profile.mode == 'isolated':
+            # Model-facing paths describe the container, never its host backing directory.
+            ws = 'Controlled private workspace. File tools accept relative paths only: calculator.py; use . to list the root. Never supply absolute paths, .., drive letters, UNC or URI.'
         level = getattr(policy, "sandbox_level", None) or ""
         session = getattr(ctx, "session", None)
         title = ""

@@ -26,6 +26,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
     controller = None
+    window = None
     failure = None
     exit_code = 0
     try:
@@ -41,6 +42,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         # Keep the loop alive until all service owners have completed cleanup,
         # including partially initialized windows and interrupted GUI execution.
+        try:
+            if window is not None:
+                window.dispose()
+        except BaseException as exc:
+            if failure is None:
+                failure, exit_code = exc, 1
+            else:
+                failure.add_note(f"window cleanup failed: {type(exc).__name__}: {exc}")
         try:
             if controller is not None:
                 loop.run_until_complete(controller.close())

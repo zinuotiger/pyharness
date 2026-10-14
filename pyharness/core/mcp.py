@@ -59,7 +59,7 @@ class StdioTransport(Transport):
         self._seq = 0
         self._stderr_task: Optional[asyncio.Task] = None
         self._request_lock = asyncio.Lock()
-        self._close_lock = asyncio.Lock()
+        self._close_task: Optional[asyncio.Task] = None
         self._closed = False
 
     async def _ensure(self) -> None:
@@ -132,12 +132,32 @@ class StdioTransport(Transport):
         return data.get("result")
 
     async def close(self) -> None:
-        async with self._close_lock:
-            self._closed = True
+        self._closed = True
+        task = self._close_task
+        if task is None or (task.done() and (task.cancelled() or task.exception())):
+            task = self._close_task = asyncio.create_task(self._close_owned())
+        cancelled = None
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancelled = exc
+            except BaseException as exc:
+                if cancelled is not None:
+                    cancelled.add_note(f'MCP cleanup failed: {type(exc).__name__}')
+                    raise cancelled from exc
+                raise
+        if cancelled is not None:
+            raise cancelled
+
+    async def _close_owned(self) -> None:
+        # The cleanup task, rather than any individual waiter, owns these handles.
+        # Keep them available for a subsequent close if cleanup itself fails.
+        if self._proc is not None:
             proc = self._proc
-            self._proc = None
-            if proc is None:
-                return
             if proc.stdin is not None and not proc.stdin.is_closing():
                 proc.stdin.close()
                 try:
@@ -170,6 +190,7 @@ class StdioTransport(Transport):
                 except Exception:                # noqa: BLE001 stderr 排空失败不阻断
                     pass
                 self._stderr_task = None
+            self._proc = None
 
 
 class InlineTransport(Transport):

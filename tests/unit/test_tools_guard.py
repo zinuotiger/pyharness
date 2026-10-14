@@ -301,13 +301,13 @@ async def test_waterfall_shortcircuit_tail_guard_not_checked():
     assert a.checked == 1 and b.checked == 1 and c.checked == 0  # c 未求值
 
 
-async def test_register_after_reject_cannot_rescue():
+async def test_register_after_reject_cannot_rescue(tmp_path):
     """INV-03 核心:reject 后追加任何 allow 型 guard 到链尾,同 call 再求值
     仍 reject(只增拒绝面,历史拒绝不被新装配覆盖)。"""
     pol = make_policy(workspace_root=str(Path.home()))
     sc = FakeScope(pol)
     gc = chain()
-    bad = call("fs.read_file", {"path": "C:/Windows/win.ini"})
+    bad = call("fs.read_file", {"path": str(tmp_path / "outside" / "win.ini")})
     assert await gc.evaluate(bad, sc) is Decision.REJECT
     # 追加一个对一切放行的插件 guard(若 waterfall 可被救回,此处会翻绿)
     gc.register_plugin_guard(SpyGuard("g-plg-lenient", decision=("allow", None)))
@@ -350,13 +350,13 @@ async def test_evaluate_allow_single_evaluated_event(tmp_path):
     assert sess.of("guard.rejected") == []
 
 
-async def test_reject_event_pair_order_and_sync():
+async def test_reject_event_pair_order_and_sync(tmp_path):
     """INV-05:reject 先 evaluated(deny)后 rejected 强同步(sync=True);payload
     含 guard_id/policy_ref,不含参数原文(脱敏,SECURITY §6.4)。"""
     sess = FakeSession()
     pol = make_policy(workspace_root=str(Path.home()))
     gc = chain(session=sess)
-    raw = "C:/Windows/win.ini"
+    raw = str(tmp_path / "outside" / "win.ini")
     d = await gc.evaluate(call("fs.read_file", {"path": raw}, call_id="cid-7"),
                           FakeScope(pol))
     assert d is Decision.REJECT
@@ -381,13 +381,13 @@ async def test_reject_event_pair_order_and_sync():
     assert "win.ini" not in blob and "POL-FS-1" in blob
 
 
-async def test_rejected_sync_awaited_with_async_session():
+async def test_rejected_sync_awaited_with_async_session(tmp_path):
     """真实 SessionLog 同型异步落点:reject 返回前 rejected 已落盘(await 语义
     而非 fire-and-forget),sync=True 标志透传。"""
     sess = AsyncSession()
     gc = chain(session=sess)
     d = await gc.evaluate(
-        call("fs.read_file", {"path": "C:/x/y"}), FakeScope(make_policy()))
+        call("fs.read_file", {"path": str(tmp_path / "outside" / "y")}), FakeScope(make_policy()))
     assert d is Decision.REJECT                    # 未触发 fake-scope 直拒
     rj = sess.of("guard.rejected")
     assert len(rj) == 1 and rj[0]["sync"] is True  # evaluate 返回时已落盘
@@ -417,14 +417,14 @@ async def test_scope_hidden_reject_events_grd401():
         == ["scope-hidden"]
 
 
-async def test_append_failure_fail_closed():
+async def test_append_failure_fail_closed(tmp_path):
     """强同步落盘失败 → evaluate 上抛(fail-closed:缺 rejected/evaluated 不进入
     Provider),绝不带着未落盘的拒绝继续(审计不能撒谎)。"""
     sess = FailSession("guard.rejected")
     gc = chain(session=sess)
     sc = FakeScope(make_policy())
     with pytest.raises(RuntimeError):
-        await gc.evaluate(call("fs.read_file", {"path": "C:/x"}), sc)
+        await gc.evaluate(call("fs.read_file", {"path": str(tmp_path / "outside")}), sc)
     assert sess.of("guard.evaluated")              # evaluated 已先落
     # evaluated 落盘失败同样上抛(allow 也 fail-closed)
     sess2 = FailSession("guard.evaluated")
@@ -434,13 +434,13 @@ async def test_append_failure_fail_closed():
                            FakeScope(make_policy(workspace_root=".")))
 
 
-async def test_no_session_degrades_decision_enforced():
+async def test_no_session_degrades_decision_enforced(tmp_path):
     """未接线事件出口(session=None):决策语义不变(拒绝仍拒绝),仅日志降级。"""
     gc = GuardChain()
     sc = FakeScope(make_policy())
     assert await gc.evaluate(call("fs.read_file", {"path": "a.txt"}),
                              sc) is Decision.ALLOW
-    assert await gc.evaluate(call("fs.read_file", {"path": "C:/x"}),
+    assert await gc.evaluate(call("fs.read_file", {"path": str(tmp_path / "outside")}),
                              sc) is Decision.REJECT
 
 
@@ -609,17 +609,20 @@ async def test_g3_dotdot_escape_polfs2(tmp_path):
 @pytest.mark.controlled_process
 async def test_g3_junction_escape_polfs3(tmp_path):
     """POL-FS-3:junction 终解析越界(词法在界内,真实在界外)→ reject。
-    Windows junction 免管理员权限;创建失败则跳过(环境无该能力)。"""
+    Windows uses a junction; POSIX uses an actual directory symlink."""
     ws = tmp_path / "ws"
     outside = tmp_path / "outside"
     ws.mkdir()
     outside.mkdir()
     link = ws / "escape"
-    rc = subprocess.run(
-        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(outside)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-    if rc != 0:
-        pytest.skip("环境不支持创建 junction(无 mklink 权限)")
+    if os.name == 'nt':
+        rc = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", str(link), str(outside)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if rc != 0:
+            pytest.skip("环境不支持创建 junction(无 mklink 权限)")
+    else:
+        link.symlink_to(outside, target_is_directory=True)
     try:
         sc = FakeScope(make_policy(workspace_root=str(ws)))
         sess = FakeSession()
@@ -629,8 +632,8 @@ async def test_g3_junction_escape_polfs3(tmp_path):
         rj = sess.of("guard.rejected")[0]["payload"]
         assert rj["guard_id"] == "g-fs-path" and rj["policy_ref"] == "POL-FS-3"
     finally:
-        if os.path.exists(link):                   # 只删联接本身,不追目标
-            os.rmdir(link)
+        if os.path.lexists(link):                  # 只删联接本身,不追目标
+            os.rmdir(link) if os.name == 'nt' else link.unlink()
 
 
 @pytest.mark.parametrize("key", ["src", "dst", "target", "dir", "path"])
@@ -722,11 +725,11 @@ async def test_g4_write_of_cred_name_not_read_blocked(tmp_path):
     assert [e["type"] for e in sess.events] == ["guard.evaluated"]
 
 
-async def test_g4_outside_ws_g3_semantics_priority():
+async def test_g4_outside_ws_g3_semantics_priority(tmp_path):
     """越界读:g3 几何语义优先(g4 不越权,直接调用亦返回 POL-FS-1)。"""
     sc = FakeScope(make_policy(workspace_root=str(Path.cwd())))
     d, policy = await g_credential_read_check(
-        call("fs.read_file", {"path": "C:/Windows/win.ini"}), sc)
+        call("fs.read_file", {"path": str(tmp_path / "outside" / "win.ini")}), sc)
     assert (d, policy) == ("reject", "POL-FS-1")
 
 
@@ -1276,7 +1279,7 @@ async def test_adr021_reject_path_follows_the_given_session(tmp_path):
     primary, other = FakeSession(), FakeSession()
     pol = make_policy(workspace_root=str(Path.home()))
     gc = chain(session=primary)
-    c = call("fs.read_file", {"path": "C:/Windows/win.ini"}, call_id="cid-adr021r")
+    c = call("fs.read_file", {"path": str(tmp_path / "outside" / "win.ini")}, call_id="cid-adr021r")
 
     d = await gc.evaluate(c, FakeScope(pol), session=other)
 

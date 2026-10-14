@@ -184,7 +184,10 @@ def test_resolve_dotdot_inside_normalizes_ok(tmp_path: Path):
 
 
 def _make_junction(link: Path, target: Path) -> bool:
-    """Windows junction 免管理员;创建失败 → False(调用方跳过)。"""
+    """Windows uses a junction; POSIX exercises a real directory symlink."""
+    if os.name != 'nt':
+        link.symlink_to(target, target_is_directory=True)
+        return True
     rc = subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL).returncode
@@ -212,8 +215,8 @@ def test_resolve_polfs3_junction_escape(tmp_path: Path):
             assert ei.value.code == "GRD-401"
             assert ei.value.ctx["reason"] == "POL-FS-3"
     finally:
-        if os.path.exists(link):               # 只删联接本身,不追目标
-            os.rmdir(link)
+        if os.path.lexists(link):              # 只删联接本身,不追目标
+            os.rmdir(link) if os.name == 'nt' else link.unlink()
 
 
 @pytest.mark.controlled_process
@@ -239,8 +242,8 @@ def test_resolve_extra_read_dir_exception(tmp_path: Path):
             fs.resolve_in_workspace("data/data.txt", ctx, writable=True)
         assert ei.value.ctx["reason"] == "POL-FS-3"
     finally:
-        if os.path.exists(link):
-            os.rmdir(link)
+        if os.path.lexists(link):
+            os.rmdir(link) if os.name == 'nt' else link.unlink()
 
 
 def test_resolve_scope_unwired_fail_closed(tmp_path: Path):

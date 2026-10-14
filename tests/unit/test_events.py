@@ -34,7 +34,7 @@ EXPECTED_ALL = (
     "llm.chunk", "llm.retry",
     # D 工具侧:guard 与审批链(9)
     "tool.call", "guard.evaluated", "guard.rejected",
-    "approval.requested", "approval.granted", "approval.denied", "approval.timeout",
+    "approval.requested", "approval.granted", "approval.denied", "approval.timeout", "approval.reviewed",
     "tool.result", "tool.error",
     # E 编排与任务段(23)
     "task.enqueued", "task.started", "task.completed", "task.failed",
@@ -67,8 +67,10 @@ EXPECTED_ALL = (
     "receipt.emitted",
     # 治理层证据事件(M6;普通攒批,非强同步)
     "evidence.archived",
+    # Platform V1 resource facts share the existing SessionLog.
+    "platform.artifact", "platform.sandbox", "platform.knowledge",
 )
-assert len(EXPECTED_ALL) == 77, "测试词表清单必须恰为 77 名"
+assert len(EXPECTED_ALL) == 81, "测试词表清单必须恰为 81 名"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -86,7 +88,8 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 def test_vocab_full():
     """词表 77 名(74 核心 + policy.updated/decision.issued/receipt.emitted/
     evidence.archived 治理层事件)。"""
-    assert len(EVENT_TYPES) == 77
+    assert len(EVENT_TYPES) == 81  # independent approval.reviewed audit event
+    assert 'approval.reviewed' in EV.SYNC_TYPES
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
 
@@ -404,7 +407,7 @@ def test_s25_scope_events_are_registered():
 
 def test_s25_channel_counts():
     """通道计数冻结:强同步 14、瞬时 3(总数 77 由 test_vocab_full 覆盖)。"""
-    assert len(EV.SYNC_TYPES) == 14
+    assert len(EV.SYNC_TYPES) == 15
     assert len(EV.TRANSIENT_TYPES) == 3
     assert "policy.updated" in EV.SYNC_TYPES          # 治理事件:强同步(ADR-020 Q3)
     assert "decision.issued" in EV.SYNC_TYPES         # 治理决策:强同步(ADR-015)

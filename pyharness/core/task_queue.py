@@ -143,6 +143,7 @@ class TaskQueue:
         self._q: Deque[Task] = deque()
         self._running: Optional[Task] = None
         self._pause_reasons: Counter[str] = Counter()
+        self._pause_lock = asyncio.Lock()       # pause/resume 的落盘与唤醒不可交错
         self._resume_evt = asyncio.Event()               # 泵挂起唤醒(非忙等)
         self._enqueue_ready = asyncio.Event()            # 入队事件写完后才允许泵消费
         self._pump_task: Optional[asyncio.Task] = None   # 泵单例句柄(防多泵)
@@ -151,8 +152,15 @@ class TaskQueue:
         self._done: dict[str, TaskResult] = {}           # 终态缓存(重复等待幂等)
         self._segments: set[str] = set()                 # 已开段 task_id(配对闸,F044)
         self._cancel_pending: Optional[str] = None       # 取消旗标(见 _run_task)
+        self._terminal_lock = asyncio.Lock()
+        self._terminals: dict[str, str] = {}
         self._closing: bool = False                      # 收尾闸(shutdown 幂等位)
-        self._id_counter = itertools.count(1)            # t-N 单调源
+        history = getattr(session, 'events_after', None)
+        self._used_ids = {e.payload['task_id'] for e in history(0)
+                          if e.type.startswith('task.') and e.payload.get('task_id')} if callable(history) else set()
+        numbers = [int(ident[2:]) for ident in self._used_ids
+                   if ident.startswith('t-') and ident[2:].isdigit() and len(ident) < 22]
+        self._id_counter = itertools.count(max(numbers, default=0) + 1)
 
     # ============================================================ 内部辅助
     def _suspended(self) -> bool:
@@ -161,7 +169,10 @@ class TaskQueue:
 
     def _next_id(self) -> str:
         """自动 task_id:t-N 单调(self._seq.next() 语义,itertools 计数实现)。"""
-        return f"t-{next(self._id_counter)}"
+        while True:
+            ident = f"t-{next(self._id_counter)}"
+            if ident not in self._used_ids:
+                return ident
 
     @staticmethod
     def _ms_since(t0: float) -> int:
@@ -174,6 +185,8 @@ class TaskQueue:
         与终态事件 append 同点调用(每任务至多一个终态);_done 供 wait_for 幂等读取,
         _futures 记录在途等待(settle 后移除,防泄漏;等待者持本地引用不受影响)。
         """
+        if task_id in self._done:
+            return
         self._done[task_id] = result
         fut = self._futures.pop(task_id, None)
         if fut is not None and not fut.done():
@@ -221,6 +234,10 @@ class TaskQueue:
                 f"队列已满(≥{self._max_queue}),请等当前任务结束或取消"})
         t = Task(id=task_id or self._next_id(),   # 显式 task_id 供 plan/schedule 溯源
                  intent=intent, meta=meta)
+        if t.id in self._used_ids:
+            raise_code('EVT-100', hint='Task ID has already been used in this session')
+        # Reserve before the first await, including for concurrent submissions.
+        self._used_ids.add(t.id)
         self._q.append(t)                         # FIFO:尾插
         try:
             env = await self._session.append(
@@ -321,7 +338,18 @@ class TaskQueue:
             if self._cancel_pending == t.id:
                 self._cancel_pending = None
                 child.cancel()
-            await child
+            result = await child
+            reason = getattr(result, "reason", None)
+            explicit_ok = reason == "complete" or (isinstance(result, TaskResult) and result.ok)
+            if not explicit_ok:
+                code = getattr(result, "error_code", None) or getattr(result, "code", None) or {
+                    "cancelled": "cancelled", "budget": "LLM-305", "max_turns": "CYC-999",
+                    "stall": "CYC-999"}.get(reason, "CYC-999")
+                await self._terminal_event("task.failed", {"task_id": t.id,
+                    "reason": "cancelled" if reason == "cancelled" else "error", "error": code})
+                self._settle(t.id, TaskResult(ok=False, code=code, summary=code,
+                    duration_ms=self._ms_since(t0)))
+                return
             await self._terminal_event("task.completed",
                 {"task_id": t.id, "reason": "ok"})
             self._settle(t.id, TaskResult(ok=True, duration_ms=self._ms_since(t0)))
@@ -359,6 +387,14 @@ class TaskQueue:
             await self._close_segment_guarded(t.id, start_seq)  # 配对关闭(F058)
 
     async def _terminal_event(self, type_: str, payload: dict) -> None:
+        async with self._terminal_lock:
+            ident = payload['task_id']
+            if ident in self._terminals:
+                return
+            await self._write_terminal_event(type_, payload)
+            self._terminals[ident] = type_
+
+    async def _write_terminal_event(self, type_: str, payload: dict) -> None:
         """终态事件写入(**会话已终态时不吞结算**)。
 
         会话可在任务在途时收尾(`session.finished` 落盘 + 终态位置位)⇒ 本任务的
@@ -395,7 +431,7 @@ class TaskQueue:
                 return
             raise
 
-    async def _run_runner(self, t: Task) -> None:
+    async def _run_runner(self, t: Task) -> Any:
         """执行器调用(子任务体):runner 须可调用 run_for_task(task)。
 
         未装配 runner 时按 CYC-999 快速失败(防 S-1 伪造已执行);接受对象方法或
@@ -409,10 +445,15 @@ class TaskQueue:
             raise_code("CYC-999", hint=f"执行器不可调用: {type(runner).__name__}")
         res = fn(t)
         if inspect.isawaitable(res):
-            await res
+            return await res
+        return res
 
     # ============================================================ 暂停/恢复
     async def pause(self, reason: str, *, by: str = "system") -> None:
+        async with self._pause_lock:
+            await self._pause_owned(reason, by=by)
+
+    async def _pause_owned(self, reason: str, *, by: str) -> None:
         """队列挂起(F015 联动):审批等待/预算暂停时停消费——只停弹任务,运行中任务
         不受影响,等待不超时饿死。
 
@@ -426,11 +467,15 @@ class TaskQueue:
             self._pause_reasons[reason] += 1
             return
         self._pause_reasons[reason] += 1          # 首挂起(0→1):发事件 + 泵阻塞
+        self._resume_evt.clear()                  # 在落盘 await 前关闭消费闸
         await self._session.append("queue.suspended",
             {"reason": reason, "by": by}, actor="system")
-        self._resume_evt.clear()                  # 泵在 wait() 处阻塞
 
     async def resume(self, reason: str, *, by: str = "system") -> None:
+        async with self._pause_lock:
+            await self._resume_owned(reason, by=by)
+
+    async def _resume_owned(self, reason: str, *, by: str) -> None:
         """解除一个挂起原因:计数减一;仍有其他原因保持挂起;全部解除才写
         queue.resumed 并唤醒泵。未挂起的 reason 幂等无害(无事件)。
 
@@ -441,11 +486,12 @@ class TaskQueue:
         if self._pause_reasons[reason] > 1:            # 该原因多层挂起:仅减计数
             self._pause_reasons[reason] -= 1
             return
-        del self._pause_reasons[reason]                # 减到 0:移除该原因
-        if self._pause_reasons:                        # 仍有其他原因 → 维持挂起
+        if len(self._pause_reasons) > 1:                # 仍有其他原因 → 维持挂起
+            del self._pause_reasons[reason]
             return
         await self._session.append("queue.resumed",
             {"reason": reason}, actor="system")        # 全解除才写 resumed(偏离 4)
+        del self._pause_reasons[reason]                # 落盘失败时保留暂停及重试能力
         self._resume_evt.set()                         # 唤醒泵(先 resumed 后放行)
 
     # ============================================================ 取消(F025)

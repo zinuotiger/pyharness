@@ -16,9 +16,11 @@ from pydantic import BaseModel, ValidationError
 
 from pyharness.errors import raise_code
 from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册引用
+    PlatformResourcePayload,
     AgentMessagePayload,
     ApprovalOutcomePayload,
     ApprovalRequestedPayload,
+    ApprovalReviewedPayload,
     BudgetPausedPayload,
     BusBackpressurePayload,
     ConfigUpdatedPayload,
@@ -99,7 +101,7 @@ ACTORS = ("user", "agent", "llm", "tool", "system", "plugin")
 # 强同步事件族:落盘成功才返回(EVENT-SCHEMA §1.2/§8.1 强同步矩阵)
 SYNC_TYPES = frozenset({
     "user.message", "guard.rejected",
-    "approval.requested", "approval.granted", "approval.denied", "approval.timeout",
+    "approval.requested", "approval.granted", "approval.denied", "approval.timeout", "approval.reviewed",
     "session.finished", "session.recovered", "segment.start",
     "fork.created", "context.compacted",
     "policy.updated",                      # 治理层策略事件(ADR-020:强同步)
@@ -211,6 +213,7 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     ("guard.evaluated", GuardEvaluatedPayload, False),
     ("guard.rejected", GuardRejectedPayload, False),   # 强同步三类之一
     ("approval.requested", ApprovalRequestedPayload, False),  # 强同步三类之一
+    ("approval.reviewed", ApprovalReviewedPayload, False),
     ("approval.granted", ApprovalOutcomePayload, False),      # 强同步
     ("approval.denied", ApprovalOutcomePayload, False),       # 强同步
     ("approval.timeout", ApprovalOutcomePayload, False),      # 强同步
@@ -285,6 +288,9 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     # 治理层证据事件(M6;S5-1:只存引用,不复制事件内容,INV-G4;**普通攒批,
     # 不入 SYNC_TYPES**——证据是索引,丢失可由既有事件再派生,INV-E3)
     ("evidence.archived", EvidenceArchivedPayload, False),
+    ("platform.artifact", PlatformResourcePayload, False),
+    ("platform.sandbox", PlatformResourcePayload, False),
+    ("platform.knowledge", PlatformResourcePayload, False),
 )
 
 

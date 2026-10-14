@@ -25,6 +25,7 @@ from pyharness.core.tenant_settings import (TenantSettingsStore,
 from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
 from pyharness.errors import PyHError, raise_code
 from pyharness.events import EVENT_TYPES
+from .auth_cookies import cookie_name, read_cookie
 
 # 路径中的会话 id(供租户服务端派生:以会话注册租户为准,不信客户端自报头)
 # 字符集必须与 SessionLog 的 sid 合法面一致(sessions.validate_session_id =
@@ -100,11 +101,17 @@ class DesktopApp:
             ctx, channel="desktop")
         self.service = self._service_registry.get("default")
         self.api = FastAPI(title="PyHarness Desktop", docs_url=None, redoc_url=None)
-        self.api.add_middleware(LoopbackHostMiddleware)
         self._api_token = self._resolve_api_token()
         self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)
         self.api.middleware("http")(self._tenant_middleware)
+        # Starlette's last-added middleware is outermost: reject malformed
+        # Host before account/cookie code constructs a URL (also under ASGI).
+        self.api.add_middleware(LoopbackHostMiddleware)
         self.mount_api()
+        from .platform_api import mount_platform
+        mount_platform(self)
+        from .accounts_api import mount_accounts
+        mount_accounts(self)
         bus = getattr(ctx, "bus", None)
         if bus is not None:
             self._sub = self._subscribe_all(bus)
@@ -232,6 +239,10 @@ class DesktopApp:
 
     @staticmethod
     def _declared_tenant(request: Request) -> str:
+        from .accounts_api import principal
+        account = principal(request)
+        if account:
+            return account['tenant']
         """客户端**声明**的租户(头优先,其次 ``?tenant=``,缺省 ``default``)。"""
         return normalize_tenant_id(
             request.headers.get("x-pyharness-tenant")
@@ -264,8 +275,7 @@ class DesktopApp:
         if not given and auth.lower().startswith("bearer "):
             given = auth[7:].strip()
         if not given:
-            given = (getattr(request, "cookies", None) or {}).get(
-                "pyharness_token", "") or ""
+            given = read_cookie(request, "pyharness_token")
         if not given:
             given = str((getattr(request, "query_params", None) or {}).get("token") or "")
         return str(given)
@@ -274,14 +284,16 @@ class DesktopApp:
     def _presented_tenant_token(request: Request) -> str:
         """请求出示的**租户**令牌:头 / 同名 cookie / ``?token=``(壳加载 URL)。"""
         hdrs = getattr(request, "headers", None) or {}
-        cookies = getattr(request, "cookies", None) or {}
         qp = getattr(request, "query_params", None) or {}
         return str(hdrs.get("x-pyharness-tenant-token")
-                   or cookies.get("pyharness_tenant_token")
+                   or read_cookie(request, "pyharness_tenant_token")
                    or qp.get("token") or "")
 
     def _operator_ok(self, request: Request) -> bool:
         """是否持有全局(操作者)令牌;未配置令牌时视为放行(沿用既有语义)。"""
+        from .accounts_api import principal
+        if principal(request):
+            return False
         expected = self._api_token
         if not expected:
             return True
@@ -296,12 +308,22 @@ class DesktopApp:
         若 default 也要租户令牌,引导页与全部既有流程即刻断。收益全在非 default:
         此前任何人只要**报对租户名**即可进入(只有归属校验 R31-1,没有资格校验)。
         """
+        from .accounts_api import principal
+        account = principal(request)
+        if account:
+            return account['tenant'] == tenant
         if tenant == "default":
             return True
         return self._verify_tenant_token(
             tenant, self._presented_tenant_token(request))
 
     async def _tenant_middleware(self, request: Request, call_next: Any) -> Any:
+        from .accounts_api import inspect_request, principal
+        rejected = inspect_request(self, request)
+        if rejected is not None:
+            return rejected
+        if request.url.path.startswith('/api/account/') or request.url.path == '/login':
+            return await call_next(request)
         # ① 鉴权先行:未出示 / 出示错误的本租户令牌 ⇒ 401。**先于**归属判定,故不会向
         #    未授权方泄露"该租户下是否存在某会话"(403 与 404 之差即是信息)。
         declared = self._declared_tenant(request)
@@ -323,9 +345,13 @@ class DesktopApp:
                 "advice": "会话租户归属不可得、存在歧义,或与请求声明的租户不符;"
                           "拒绝服务(既不按客户端自报头判定,也不跨租户改判)"})
         token = self._tenant_var.set(tenant)
+        from pyharness.application.accounts import current_actor, public_actor
+        actor_token = current_actor.set(public_actor(principal(request)))
         try:
-            return await call_next(request)
+            from .accounts_api import serve_with_quota
+            return await serve_with_quota(self, request, call_next)
         finally:
+            current_actor.reset(actor_token)
             self._tenant_var.reset(token)
 
     # ------------------------------------------------ service compatibility
@@ -460,6 +486,9 @@ class DesktopApp:
         (引导/外联);全部数据端点(含读端与 SSE)强制鉴权——此前 39 个读端点
         匿名、SSE 无鉴权,任何本地进程可枚举全部会话。
         """
+        from .accounts_api import principal
+        if principal(request):
+            return
         expected = self._api_token
         if not expected:
             return
@@ -467,7 +496,7 @@ class DesktopApp:
         if not given and authorization and authorization.lower().startswith("bearer "):
             given = authorization[7:].strip()
         if not given:
-            given = (request.cookies or {}).get("pyharness_token", "") or ""
+            given = read_cookie(request, "pyharness_token")
         ok = bool(given) and secrets.compare_digest(given, expected)
         if not ok:
             # ``R31-2``:非 default 租户可用**该租户令牌**通过本依赖。租户**授权**已在
@@ -500,6 +529,8 @@ class DesktopApp:
         """注册全部端点(只读投影 + 引擎门面写 + SSE)+ PyHError 统一错误体(ADR-011)。"""
         a = self.api
         a.add_api_route("/", self._index_page, methods=["GET"])
+        a.add_api_route("/classic", self._index_page, methods=["GET"])
+        a.add_api_route('/assets/{asset_path:path}', self._appearance_asset, methods=['GET'])
         a.add_api_route("/api/sessions", self.create_session, methods=["POST"],
                         dependencies=[Depends(self._require_api_auth)])
         a.add_api_route("/api/sessions", self.list_sessions, methods=["GET"],
@@ -715,9 +746,21 @@ class DesktopApp:
         租户令牌的价值仍在**可外发的最小凭证** —— 可单独交给外部客户端,
         而它**换不到**别的租户(见 :meth:`_tenant_authorized`)。
         """
+        if getattr(getattr(request, 'state', None), 'operator_bootstrap', False):
+            from fastapi.responses import RedirectResponse
+            from .accounts_api import COOKIE
+            response = RedirectResponse('/', status_code=303, headers={
+                'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+            response.set_cookie(cookie_name(request, 'pyharness_token'), self._api_token,
+                                httponly=True, samesite='strict', path='/')
+            response.delete_cookie(cookie_name(request, COOKIE), path='/')
+            response.delete_cookie(cookie_name(request, 'pyharness_tenant_token'), path='/')
+            return response
         declared = self._declared_tenant(request)
         tenant_tok = self._presented_tenant_token(request)
         operator = self._operator_ok(request)
+        from .accounts_api import principal
+        account = principal(request)
         tenant_ok = (declared != "default"
                      and self._verify_tenant_token(declared, tenant_tok))
         if operator and declared != "default":
@@ -725,18 +768,22 @@ class DesktopApp:
             if store is not None:
                 tenant_tok = store.api_token(declared)
                 tenant_ok = True
-        if not (operator or tenant_ok):
+        if not (operator or tenant_ok or account):
+            if 'text/html' in request.headers.get('accept', ''):
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse('/login', status_code=303)
             return JSONResponse(status_code=401, content={
                 "code": "CRED-701",
                 "advice": "引导页需要凭证:全局 API token,或所声明租户的租户令牌"
                           "(?token=/头/cookie);见 docs/CFG.md 租户模型设置"})
+        page = 'index.html' if getattr(getattr(request, 'url', None), 'path', '/') == '/classic' else 'platform.html'
         try:
             import importlib.resources as _ir
-            html = _ir.files("pyharness.ui").joinpath("index.html").read_text(
+            html = _ir.files("pyharness.ui").joinpath(page).read_text(
                 encoding="utf-8")
         except Exception:                       # noqa: BLE001 资源缺失兜底
             from pathlib import Path as _P
-            p = _P(__file__).resolve().parent / "ui" / "index.html"
+            p = _P(__file__).resolve().parent.parent / "ui" / page
             try:
                 html = p.read_text(encoding="utf-8")
             except Exception:                   # noqa: BLE001
@@ -745,12 +792,13 @@ class DesktopApp:
                         "justify-content:center;height:100vh'>"
                         "<div><h2>PyHarness Desktop</h2>"
                         "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
-        resp = HTMLResponse(html)
+        resp = HTMLResponse(html, headers={'Cache-Control': 'no-store',
+                                          'Referrer-Policy': 'no-referrer'})
         if self._api_token and operator:
-            resp.set_cookie("pyharness_token", self._api_token,
+            resp.set_cookie(cookie_name(request, "pyharness_token"), self._api_token,
                             httponly=True, samesite="strict", path="/")
-        if tenant_ok:
-            resp.set_cookie("pyharness_tenant_token", tenant_tok,
+        if tenant_ok and not account:
+            resp.set_cookie(cookie_name(request, "pyharness_tenant_token"), tenant_tok,
                             httponly=True, samesite="strict", path="/")
         return resp
 
@@ -765,6 +813,23 @@ class DesktopApp:
             log_ = await _await(self._surface_mgr().open_session(sid))
             self._logs[sid] = log_
             return log_
+
+    async def _appearance_asset(self, asset_path: str):
+        """Only package-owned appearance resources, never application data."""
+        from importlib.resources import files
+        from fastapi.responses import Response
+        parts = asset_path.split('/')
+        if (not parts or parts[0] not in {'theme-kit','host-adapters'}
+                or any(not p or p in {'.','..'} or '\\' in p or ':' in p for p in parts)):
+            return Response(status_code=404)
+        suffix=parts[-1].rsplit('.',1)[-1]
+        mime={'js':'text/javascript','css':'text/css','json':'application/json','png':'image/png'}.get(suffix)
+        if mime is None:return Response(status_code=404)
+        try:
+            raw=files('pyharness.ui').joinpath(*parts).read_bytes()
+        except (OSError,ValueError):
+            return Response(status_code=404)
+        return Response(raw,media_type=mime,headers={'X-Content-Type-Options':'nosniff','Cache-Control':'no-cache'})
 
     async def _queue_for(self, sid: str, log_: Any) -> TaskQueue:
         """per-session TaskQueue(runner = per-session 真实引擎;真 LLM 已注册)。"""

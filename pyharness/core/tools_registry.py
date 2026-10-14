@@ -490,6 +490,26 @@ class ToolRegistry:
         """能力摘除别名(agent.detach_capability 消费面;= unregister)。"""
         return self.unregister(name)
 
+    def require_approval(self, name: str) -> None:
+        """Tighten a registered contract without exposing or replacing its Provider.
+
+        The original frozen definition remains immutable. Only governance fields
+        of its replacement change; schema, compiled validator and binding stay
+        intact. Critical tools remain critical (and therefore denied).
+        """
+        old = self.lookup(name)
+        if name in self._running:
+            _raise_busy(tool=name, advice="有在途调用,稍后重试")
+        data = old.model_dump()
+        data['schema'] = data.pop('schema_')
+        data.update(danger='critical' if old.danger == 'critical' else 'high',
+                    approval='always')
+        replacement = ToolDefinition.model_validate(data)
+        self._validate_contract(replacement)
+        self._tools[name] = replacement
+        self._emit(REGISTRY_UPDATED, {'op': 'tighten', 'kind': 'tool', 'key': name,
+                                    'danger': replacement.danger, 'approval': 'always'})
+
     # ------------------------------------------------------------ 只读查询
     def lookup(self, name: str) -> Any:
         """查契约(executor 关1);不存在 → TLB-802(不静默,防幻觉工具名)。"""

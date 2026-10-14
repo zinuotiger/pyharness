@@ -1,5 +1,11 @@
 # LIMITATIONS.md — 当前能力与已知限制（Current State）
 
+> **Platform Web V1（2026-09-26）**：最新能力及验证见 [Platform 报告](reports/PYHARNESS-PLATFORM-WEB-V1.md)。Docker daemon 不可用，真实隔离测试未运行；真实模型在本轮隔离环境未配置且未读取用户秘密。isolated 不回退宿主，host_approved 无 OS 隔离。网络白名单、嵌入式 PTY、云 Worker、多租户 SaaS 不在本轮交付范围。其余历史报告的测试数不代表本轮。
+
+
+> **Engineering RC（2026-09-24）说明：** 当前被测范围、安装结果与限制以 [STATUS.md](STATUS.md) 和 [候选报告](reports/PYHARNESS-ENGINEERING-RC-20260924.md) 为准。下文是 2026-09-21 的历史快照；其中“当前”“单一权威”、测试数量、native 安装状态和未提交状态均只指当时版本，不能代替本候选证据。
+
+
 > **本文是「当前状态」的单一权威入口。**
 > 仓库根目录下的 `S1_*`~`S6_*` 是**治理期阶段报告**（历史记录）；`docs/baseline/*` 与
 > `REFACTOR_PLAN.md` 是 **S0 时点快照**。它们**描述的是当时**的形态，**不代表当前状态**。
@@ -325,7 +331,7 @@ F2 之后又做了 **M4 独立验收**（含独立 agent 对抗性复核）与 *
 | **治理层（读侧）** | 决策因果还原 · 被拒清单（含 `executed` 证据位）· 一致性对账 · **凭证逐条重算核验 + prev_hash 链**；全部经 `ApplicationService` → HTTP/原生两壳可达 | `governance/{audit,receipt}.py` · `application/service.py` |
 | **证据面** | 任务段结束按冻结规则归档 `evidence.archived`（仅存引用）；按 `task_id` 聚合查询；索引可由日志完全重建 | `engine.archive_task_evidence` · `governance/evidence.py` |
 | **LLM 出网闸** | 单一汇点 `_chat_any` → `_egress_guard`；会话预算对所有五类出口生效 | `core/llm.py` |
-| **事件真源** | append-only JSONL。`EVENT_TYPES` **77** · `SYNC_TYPES` **14** · `TRANSIENT_TYPES` **3** · payload 模型 **77** · **信封字段 10**（本轮新增 `tenant_id`） | `events/vocab.py` · `events/envelope.py` |
+| **事件真源** | append-only JSONL。`EVENT_TYPES` **81** · `SYNC_TYPES` **15** · `TRANSIENT_TYPES` **3** · payload 模型 **81** · **信封字段 10**（Platform V1 新增三个资源事件；写入时显式强同步） | `events/vocab.py` · `events/envelope.py` |
 | **不变量测试面** | INV-01 ~ INV-05 编号化用例（**运行时事实来源**）+ 上下文传播/租户/唯一拒绝出口契约 + **F055 会话根单点派生/隔离/子会话可达** + **声明配置可达防线（AST 级）** + **资源生命周期（后台进程树随会话终止）** | `tests/invariants/`（**193 用例 / 15 文件**） |
 | **编排** | jobs · schedule · subagent · workflow（顺序步骤，符合 ADR-017）· MCP（配置门控） | `core/{jobs,schedule,subagent,workflow,mcp}.py` |
 | **持久化与恢复** | JSONL 真源 + `repair`（F060）+ FTS 派生索引（可整体重建）；**间隔落盘定时器**（有上界崩溃窗口） | `persistence.py` · `repair.py` · `engine.py` |
@@ -342,7 +348,7 @@ F2 之后又做了 **M4 独立验收**（含独立 agent 对抗性复核）与 *
 
 | # | 限制 | 影响范围 | 计划 |
 |---|---|---|---|
-| **L-1** | 桌面租户隔离：**归属面与鉴权面均已闭合**。归属面（R31-1）：请求声明的租户必须**等于**会话的权威归属（认领集合 ∪ 全部权威目录的落盘 `tenant_id`），服务端**不回落客户端头、也不跨租户改判**；不可得 / 歧义 / 不符 ⇒ 403。鉴权面（**R31-2 / ADR-023**）：`default` 沿用全局 `shell.web.token`（兼容口），**其余租户必须同时出示该租户令牌**（`tenants/<t>/token`）；缺失/错误 ⇒ **401**，且鉴权**先于**归属判定（不泄露"该租户下是否有某会话"）；引导页 `/` 不再向无凭证调用方发放令牌 | **剩余边界（如实声明）**：服务仅绑 `127.0.0.1`，且**同一 Windows 用户能读文件**的进程本就可直接读 `~/.pyharness/tenants/<t>/`（含 `token`）⇒ 本机制**不防**此类进程，只挡"能连回环端口但读不到该用户文件"者。**令牌文件的"0600"在 Windows 上不成立**（`chmod` 对 NTFS 无效，实测 `S_IMODE=0o666`；实际可读面由父目录 ACL 继承决定，本机实测多一条 `CodexSandboxUsers:(RX)` 授权）—— 已按实测更正文档，**未**做 ACL 收紧。另：信封未载 `tenant_id` 的历史会话经 HTTP 一律 403 | **已闭合**（`a51e148` 归属 + 本提交鉴权）。**契约升级已落档**：`CFG.md` §9 原"不是强安全边界"→"经凭证绑定的访问边界，边界止于文件系统"；`SECURITY.md` 原"单进程无网络层身份伪造"已更正；详见 `docs/decisions/ADR-023-per-tenant-authorization.md` |
+| **L-1** | 桌面租户隔离：**归属面与鉴权面均已闭合**。归属面（R31-1）：请求声明的租户必须**等于**会话的权威归属（认领集合 ∪ 全部权威目录的落盘 `tenant_id`），服务端**不回落客户端头、也不跨租户改判**；不可得 / 歧义 / 不符 ⇒ 403。鉴权面（**R31-2 / ADR-023**）：`default` 沿用全局 `shell.web.token`（兼容口），**其余租户必须同时出示该租户令牌**（`tenants/<t>/token`）；缺失/错误 ⇒ **401**，且鉴权**先于**归属判定（不泄露"该租户下是否有某会话"）；引导页 `/` 不再向无凭证调用方发放令牌 | **剩余边界（如实声明）**：服务仅绑 `127.0.0.1`，且**同一 Windows 用户能读文件**的进程本就可直接读 `~/.pyharness/tenants/<t>/`（含 `token`）⇒ 本机制**不防**此类进程，只挡"能连回环端口但读不到该用户文件"者。**令牌文件的"0600"在 Windows 上不成立**（`chmod` 对 NTFS 无效，实测 `S_IMODE=0o666`；实际可读面由父目录 ACL 继承决定，本机实测多一条 `本机额外 ACL 授权组（具体机器信息未分发）:(RX)` 授权）—— 已按实测更正文档，**未**做 ACL 收紧。另：信封未载 `tenant_id` 的历史会话经 HTTP 一律 403 | **已闭合**（`a51e148` 归属 + 本提交鉴权）。**契约升级已落档**：`CFG.md` §9 原"不是强安全边界"→"经凭证绑定的访问边界，边界止于文件系统"；`SECURITY.md` 原"单进程无网络层身份伪造"已更正；详见 `docs/decisions/ADR-023-per-tenant-authorization.md` |
 | **L-2** | `policy.updated` 装配留痕**已修复**（F-01） | 治理策略生命周期留痕已落地 | **已修复**（已发布） |
 | **L-3** | 审批 identity 的**二级复合键**：`_pending` 以裸 `seq` 为键（= `approval_id`） | 碰撞时该次审批**失败**（fail-closed）而非错配 | **R24 复核：已在查找层收敛，无需改键**。① 每个 `ApprovalProvider` **按会话唯一**（`self._approvals[sid]`）⇒ 会话内 `seq` 本就唯一，裸键**按构造即正确**；② 跨会话同 `approval_id` 的歧义由 `ApplicationService.provider_owning` 处理：>1 命中 → `EVT-101` 并**指路** `{sid}/{aid}` 路由（sid 版裁决入口存在且被桌面端点使用）；③ 已有对抗用例 `test_same_approval_id_can_be_disambiguated_by_session`。故「二级复合键」不是缺口——把它搬进字典键反而会让每个读取点都要带 sid |
 | **L-4** | LLM 出口治理**已部分闭合**：本轮引入**单一出网闸**（`LLMClient._egress_guard`），会话预算对 `chat`/`chat_stream`/`mini`/`summarize`/`json_chat` 五出口生效。**仍存**：LLM 出口**不经** `governance.authorize()`——这是**有意设计**（见下方"负空间"），故"LLM 调用有治理决策/凭证"**不成立**  **已裁定（R26，用户授权）**：维持现状——LLM 出网的治理面＝**会话预算硬闸**（`_egress_guard`），**不**把它塞进 `governance.authorize()`。理由（`llm.py` 已明写）：`authorize()` 收 `ToolCall`、g1–g7 按**工具名**前缀匹配，LLM 请求无工具名/无参数集/无 Provider 副作用，只能靠**伪造 ToolCall** 接入 ⇒ 污染工具治理链语义。**范围裁定，非缺陷** |

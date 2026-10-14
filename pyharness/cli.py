@@ -323,7 +323,7 @@ def _add_global_flags(p: argparse.ArgumentParser, *, suppress: bool = False) -> 
 
 
 def parse_args(argv: list[str]) -> ParseResult:
-    """子命令分发解析:全局旗标 + 14 叶子子命令各带参数;未知子命令/缺参 → 用法
+    """子命令分发解析:全局旗标 + 16 叶子子命令各带参数;未知子命令/缺参 → 用法
     错误退出 2(argparse 惯例,不造码);--help 列全命令(DEP §5.1 以 --help 为准)。"""
     p = argparse.ArgumentParser(prog="pyharness",
                                 description="PyHarness Agent 框架(66 功能/6 阶段)")
@@ -588,6 +588,11 @@ async def _attach_engine(sh: ShellCtx) -> None:
     if log_ is None:
         raise_code("CYC-999", hint="引擎装配前无会话(chat/run/plan 应先开/建会话)")
     channel = "cli" if not getattr(sh, "headless", True) else None
+    # The bootstrap provider owns verdict subscriptions on this same bus.
+    # Close it before replacing it so only the runtime receives its verdicts.
+    bootstrap_approval = getattr(ctx, "approval", None)
+    if bootstrap_approval is not None:
+        await bootstrap_approval.aclose()
     await _eng.attach_engine_to_ctx(
         ctx, ctx.settings, log_=log_,
         sessions_dir=Path(getattr(getattr(ctx, "storage", None),

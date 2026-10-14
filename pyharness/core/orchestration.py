@@ -32,9 +32,10 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
 
     Parent-session jobs reuse the parent goal/todo managers.  Child sessions get
     their own managers so their event projections cannot mix with the parent.
-    Guard/approval/governance remain the parent engine instances; approval is
-    deliberately routed through the owning session's UI/bridge, as required by
-    jobs/subagent security rules.  depth = 本会话所处递归层级(主=0,子=spec.depth):经
+    Guard/governance remain the parent engine instances. Child approval and
+    questions use the existing providers bound to the child session, routed
+    through the owning service's UI by full session identity.
+    depth = 本会话所处递归层级(主=0,子=spec.depth):经
     ctx.subagent_depth 供 subagent.spawn 计算 d+1,使递归链硬上限 ≤3 生效。
 
     governance 与 session/scope/guard/approval 同为必接线。
@@ -68,7 +69,8 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
         guard=getattr(spine, "guard", None),
         governance=getattr(spine, "governance", None),
         approval=getattr(spine, "approval", None),
-        counters=getattr(spine, "counters", None),
+        counters=(getattr(scope, '_counters', None) if session is not getattr(spine, 'session', None)
+                  else getattr(spine, "counters", None)),
         storage=getattr(spine, "storage", None),
         goals=goals,
         todos=todos,
@@ -78,6 +80,7 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
         owner=owner,
         task_id=task_id,
         subagent_depth=int(depth),
+        platform_runtime=getattr(spine, 'platform_runtime', None),
         # 通道身份(GAP-11):编排路径(后台 job / 子 Agent)与主链同源——取外壳
         # 装配期声明的 spine.channel;未声明时不写属性,由 principal_of
         # APR-503 fail-closed(与 create_agent 同款三态语义)。
@@ -89,13 +92,22 @@ def _runtime_ctx(spine: Any, session: Any, scope: Any, loop: Any, *,
 
 async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,
                           task_id: Optional[str], origin: str,
-                          owner: Optional[str], depth: int = 0) -> tuple[Any, int]:
+                          owner: Optional[str], depth: int = 0,
+                          approval: Any = None, ask: Any = None) -> tuple[Any, int]:
     loop = AgentLoop(getattr(spine, "settings", None))
     env = await session.append(
         "user.message", {"content": intent}, actor="user",
         origin=origin, task_id=task_id, sync=True)
     ctx = _runtime_ctx(spine, session, scope, loop, task_id=task_id,
                        owner=owner, depth=depth)
+    if approval is not None:
+        ctx.approval = approval
+    if ask is not None:
+        ctx.ask = ask
+    child_runtime = None
+    if session is not getattr(spine,'session',None) and ctx.platform_runtime is not None:
+        child_runtime = ctx.platform_runtime.for_child(session.sid)
+        ctx.platform_runtime = child_runtime
     # N2-b:子会话/编排会话拥有**自己的任务段** —— 证据工件需要段锚才能被
     # ``collect_for_task`` 聚合。修复前本函数不开段 ⇒ 子会话实测 segment.start=0。
     # 段关闭放在 finally:与 ``TaskQueue._run_task`` 同款保证(段一定配对关闭)。
@@ -105,8 +117,18 @@ async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,
                                        actor="system", sync=True)
         seg_start = int(getattr(seg_env, "seq", 0) or 0)
     try:
-        result = await loop.wake(env, ctx=ctx)
+        if ctx.platform_runtime is None:
+            result = await loop.wake(env, ctx=ctx)
+        else:
+            async def governed_turn():
+                await ctx.platform_runtime.prepare_evidence(env,ctx)
+                return await loop.wake(env,ctx=ctx)
+            result = await asyncio.wait_for(governed_turn(),ctx.platform_runtime.definition.timeout)
+            if child_runtime is not None and getattr(result,'reason',None)=='complete':
+                await child_runtime.finish(ctx)
     finally:
+        if child_runtime is not None:
+            await child_runtime.release(ctx)
         if seg_start is not None:
             await session.append(
                 "segment.end", {"task_id": task_id, "start_seq": seg_start},
@@ -181,6 +203,8 @@ class EngineSubagentRunner:
         self.sessions_dir = sessions_dir
         self._stores: dict[str, Any] = {}
         self._child_buses: dict[str, Any] = {}
+        self.approval_providers: dict[str, Any] = {}
+        self.ask_providers: dict[str, Any] = {}
         # N2-b:证据生产者工厂(由装配层注入;避免本模块反向 import engine)。
         # 签名 ``(spine_like) -> async handler(type_, env)``。
         self._evidence_producer = evidence_producer
@@ -243,24 +267,87 @@ class EngineSubagentRunner:
             except BaseException as exc: errors.append(exc)
         if errors: raise BaseExceptionGroup('child cleanup failed', errors)
 
+    def completed_result(self, sub_id):
+        """Read a closed child's terminal facts; caller must establish ownership."""
+        import re
+        from pyharness.persistence import SessionReader
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', sub_id):
+            return None
+        result = None
+        for event in SessionReader(sub_id, dir=self.sessions_dir).replay():
+            payload = event.payload
+            if event.type == 'subagent.joined' and payload.get('sub_id') == sub_id:
+                result = ('done', payload['summary'], None)
+            elif event.type == 'subagent.failed' and payload.get('sub_id') == sub_id:
+                match = re.match(r'\[([A-Z]+-\d+)\]', payload.get('summary',''))
+                result = ('failed', None, match[1] if match else 'CYC-999')
+            elif event.type == 'system.cancelled' and payload.get('what') == 'subagent:'+sub_id:
+                result = ('cancelled', None, None)
+        return result
+
     async def run_child(self, env: Any) -> str:
+        from pyharness.core.approval import ApprovalProvider
+        from pyharness.core.user_ask import AskProvider
+        # Local event sequences are only unique within a session. Sharing a
+        # provider would collide two children with the same approval sequence.
+        # Children await their own loop directly, so they must not pause/resume
+        # another child's or the parent's TaskQueue.
+        approval = ApprovalProvider(session=env.session,
+            bus=self._child_buses.get(env.sub_id), config=self.spine.settings,
+            channel=getattr(self.spine, 'channel', None))
+        ask = AskProvider(session=env.session, bus=self._child_buses.get(env.sub_id))
+        self.approval_providers[env.sub_id] = approval
+        self.ask_providers[env.sub_id] = ask
         try:
+            if env.scope is None:
+                from pyharness.errors import PyHError
+                raise PyHError('GRD-403', ctx={'reason':'child_scope_unavailable'})
             result, start_seq = await _run_on_session(
-                self.spine, env.session, env.scope or getattr(self.spine, "scope", None),
+                self.spine, env.session, env.scope,
                 env.spec.task, task_id=f"subagent:{env.sub_id}",
                 origin=f"subagent:{env.sub_id}", owner="system",
-                depth=int(getattr(env.spec, "depth", 0)))
+                depth=int(getattr(env.spec, "depth", 0)), approval=approval, ask=ask)
+            # Returning from the loop only means it stopped. A public plan or
+            # earlier response cannot turn a failed/budget-limited child into a
+            # successful join. Preserve the same explicit-success contract as
+            # TaskQueue, including cancellation propagation to the work owner.
+            reason = getattr(result, 'reason', None)
+            if reason == 'cancelled':
+                raise asyncio.CancelledError
+            if reason != 'complete':
+                from pyharness.errors import PyHError
+                code = getattr(result, 'error_code', None) or (
+                    'LLM-305' if reason == 'budget' else 'CYC-999')
+                raise PyHError(code)
             text = _last_text(env.session, start_seq)
-            if text:
-                return text
-            return str(getattr(result, "reason", "") or "")
-        except BaseException as primary:
-            try: self.close_child(env.sub_id)
-            except BaseException as secondary: primary.add_note(f'child cleanup failed: {secondary!r}')
+            text = text or str(getattr(result, "reason", "") or "")
+            # notify=False suppresses parent notifications, not durable child
+            # outcome facts. Reopening a completed child must not report a crash.
+            from pyharness.core.subagent import summarize
+            await env.session.append('subagent.joined',
+                {'sub_id':env.sub_id,'summary':summarize(text,2000)},actor='agent',sync=True)
+            return text
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                await env.session.append('system.cancelled',
+                    {'what':'subagent:'+env.sub_id,'reason':'cancelled'},actor='system',sync=True)
+            else:
+                await env.session.append('subagent.failed',
+                    {'sub_id':env.sub_id,'summary':'['+str(getattr(exc,'code','CYC-999'))+']'},
+                    actor='agent',sync=True)
             raise
         finally:
-            if getattr(env, 'sub_id', '') in self._stores:
-                self.close_child(env.sub_id)
+            try:
+                from pyharness.core import proc
+                await asyncio.to_thread(proc.close_session, env.sub_id)
+            finally:
+                try:
+                    await approval.aclose()
+                finally:
+                    self.approval_providers.pop(env.sub_id, None)
+                    self.ask_providers.pop(env.sub_id, None)
+                    if getattr(env, 'sub_id', '') in self._stores:
+                        self.close_child(env.sub_id)
 
 
 

@@ -70,6 +70,16 @@ def mk_msg(seq, n_ascii=60, role="user"):
     return {"seq": seq, "role": role, "content": "a" * n_ascii}
 
 
+def test_isolated_platform_prompt_uses_container_relative_contract():
+    from types import SimpleNamespace
+    ctx=mk_ctx()
+    ctx.platform_runtime=SimpleNamespace(definition=SimpleNamespace(sandbox_profile=SimpleNamespace(mode='isolated')))
+    message=SystemPromptAssembler().assemble([{'role':'user','content':'synthetic'}],ctx=ctx)[0]['content']
+    assert 'relative paths only' in message and 'calculator.py' in message
+    assert '/workspace' not in message
+    assert 'C:/work' not in message
+
+
 # ================================================================= 护栏段(F024)
 class TestGuardSegment:
     def test_guard_end_of_system_content(self):

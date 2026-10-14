@@ -1,0 +1,1903 @@
+{
+  "scope": "B01-B24 and U01-U10 local implementation and bounded acceptance",
+  "baseline_commit": "29b1bb80a69c1af72ea09643cb3d736c453dcbdb",
+  "branch": "feat/pyharness-platform-web-v1",
+  "counts": {
+    "completed": 29,
+    "partial": 5
+  },
+  "cards": [
+    {
+      "id": "B01",
+      "title": "基线与范围冻结",
+      "status": "completed",
+      "initial_behavior": "旧快照不能代表本次代码",
+      "changes": [
+        "建立干净起点、文件校验、独立数据及命令证据"
+      ],
+      "files": [
+        "CURRENT-IMPLEMENTATION-STATUS.md"
+      ],
+      "functional_impact": "建立干净起点、文件校验、独立数据及命令证据",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "工作区基线29b1bb8；本轮不使用历史CI证明当前代码",
+      "summary": "建立干净起点、文件校验、独立数据及命令证据",
+      "final_status": "completed",
+      "evidence": [
+        "START-STATE.json"
+      ]
+    },
+    {
+      "id": "B02",
+      "title": "团队记忆成员委派政策",
+      "status": "completed",
+      "initial_behavior": "Agent可绕过团队记忆只读政策",
+      "changes": [
+        "按每个任务绑定可信actor，执行时重查团队角色；直接API和Agent共用授权"
+      ],
+      "files": [
+        "pyharness/application/accounts.py",
+        "pyharness/application/service.py",
+        "pyharness/engine.py"
+      ],
+      "functional_impact": "按每个任务绑定可信actor，执行时重查团队角色；直接API和Agent共用授权",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p1-green",
+          "exit_code": 0,
+          "log": "logs/p1-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "本地角色隔离；不是生产SaaS认证审计",
+      "summary": "按每个任务绑定可信actor，执行时重查团队角色；直接API和Agent共用授权",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B03",
+      "title": "知识问答无证据边界",
+      "status": "completed",
+      "initial_behavior": "无证据只靠提示词约束",
+      "changes": [
+        "明确require_evidence；普通聊天不受影响，主任务/定时/子任务自身证据检查在模型前执行"
+      ],
+      "files": [
+        "pyharness/application/platform_models.py",
+        "pyharness/application/platform_runtime.py",
+        "pyharness/core/orchestration.py",
+        "pyharness/core/agent_loop.py"
+      ],
+      "functional_impact": "明确require_evidence；普通聊天不受影响，主任务/定时/子任务自身证据检查在模型前执行",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "review-child-evidence-green",
+          "exit_code": 0,
+          "log": "logs/review-child-evidence-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B15/integrated-v2/result.json"
+      ],
+      "limits": "引用验证不能保证模型所有事实的语义正确",
+      "summary": "明确require_evidence；普通聊天不受影响，主任务/定时/子任务自身证据检查在模型前执行",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B15/integrated-v2/result.json"
+      ]
+    },
+    {
+      "id": "B04",
+      "title": "清空备用模型配置",
+      "status": "completed",
+      "initial_behavior": "空列表不能清空fallback",
+      "changes": [
+        "区分字段缺省与显式空数组，持久化清空和回滚回归"
+      ],
+      "files": [
+        "pyharness/core/tenant_settings.py"
+      ],
+      "functional_impact": "区分字段缺省与显式空数组，持久化清空和回滚回归",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p1-green",
+          "exit_code": 0,
+          "log": "logs/p1-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "无真实供应商fallback调用",
+      "summary": "区分字段缺省与显式空数组，持久化清空和回滚回归",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B05",
+      "title": "空请求体发布 Agent",
+      "status": "completed",
+      "initial_behavior": "空请求体发布错误",
+      "changes": [
+        "无body及{}合法，非法JSON受控拒绝，角色与发布快照不可变"
+      ],
+      "files": [
+        "pyharness/desktop/platform_api.py"
+      ],
+      "functional_impact": "无body及{}合法，非法JSON受控拒绝，角色与发布快照不可变",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p1-green",
+          "exit_code": 0,
+          "log": "logs/p1-green.log"
+        },
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/browser-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "只覆盖当前发布API版本",
+      "summary": "无body及{}合法，非法JSON受控拒绝，角色与发布快照不可变",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/browser-summary.json"
+      ]
+    },
+    {
+      "id": "B06",
+      "title": "自定义审批字段的有效契约",
+      "status": "completed",
+      "initial_behavior": "approval_rules可保存但未生效",
+      "changes": [
+        "收紧式approve/deny规则；注册表只变更治理元数据不暴露Provider；缺模型前置拒绝"
+      ],
+      "files": [
+        "pyharness/application/approval_policy.py",
+        "pyharness/core/tools_registry.py",
+        "pyharness/application/platform_service.py"
+      ],
+      "functional_impact": "收紧式approve/deny规则；注册表只变更治理元数据不暴露Provider；缺模型前置拒绝",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "final-regression-targeted",
+          "exit_code": 0,
+          "log": "logs/final-regression-targeted.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "不支持任意规则表达式，不能降低固定高风险审批",
+      "summary": "收紧式approve/deny规则；注册表只变更治理元数据不暴露Provider；缺模型前置拒绝",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/regression-junit.xml"
+      ]
+    },
+    {
+      "id": "B07",
+      "title": "状态文档与七个无效配置",
+      "status": "completed",
+      "initial_behavior": "七项配置存在静默无效值",
+      "changes": [
+        "七字段非默认值明确拒绝；说明工具超时与宿主内存边界；probe文档改为bounded generation"
+      ],
+      "files": [
+        "pyharness/config.py",
+        "docs/CFG.md",
+        "docs/architecture/platform-web-v1.md"
+      ],
+      "functional_impact": "七字段非默认值明确拒绝；说明工具超时与宿主内存边界；probe文档改为bounded generation",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p1-green",
+          "exit_code": 0,
+          "log": "logs/p1-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "保持兼容默认值，不声称已实现统一并发或宿主内存限制",
+      "summary": "七字段非默认值明确拒绝；说明工具超时与宿主内存边界；probe文档改为bounded generation",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B08",
+      "title": "文件和图片四条路径契约",
+      "status": "completed",
+      "initial_behavior": "附件预览/输入路径边界不明确",
+      "changes": [
+        "区分上传、预览、文件输入与视觉发送；会话所有权、SHA、大小和格式校验"
+      ],
+      "files": [
+        "pyharness/application/vision.py",
+        "pyharness/application/platform_service.py"
+      ],
+      "functional_impact": "区分上传、预览、文件输入与视觉发送；会话所有权、SHA、大小和格式校验",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p2-contracts",
+          "exit_code": 0,
+          "log": "logs/p2-contracts.log"
+        },
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "预览容器校验不是完整图像解码或恶意文件安全证明",
+      "summary": "区分上传、预览、文件输入与视觉发送；会话所有权、SHA、大小和格式校验",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ]
+    },
+    {
+      "id": "B09",
+      "title": "聊天图片缩略图与附件操作",
+      "status": "completed",
+      "initial_behavior": "附件摘要与草稿生命周期不完整",
+      "changes": [
+        "缩略图、单项移除、草稿恢复、会话隔离；迟到上传响应不重新添加已清除附件"
+      ],
+      "files": [
+        "pyharness/ui/platform.html",
+        "scripts/platform_theme_contract.py"
+      ],
+      "functional_impact": "缩略图、单项移除、草稿恢复、会话隔离；迟到上传响应不重新添加已清除附件",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "已上传但移除的文件仍可在Artifact库存在；不自动删除用户文件",
+      "summary": "缩略图、单项移除、草稿恢复、会话隔离；迟到上传响应不重新添加已清除附件",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ]
+    },
+    {
+      "id": "B10",
+      "title": "图片进入模型的能力决策",
+      "status": "partial",
+      "initial_behavior": "图片没有正式模型能力闸",
+      "changes": [
+        "显式supports_vision；每轮检查真实runtime连接/模型/endpoint；重试保持附件；不支持能力时零图片出网",
+        "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留"
+      ],
+      "files": [
+        "pyharness/application/vision.py",
+        "pyharness/core/llm.py",
+        "pyharness/application/platform_runtime.py"
+      ],
+      "functional_impact": "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "review-regressions-green",
+          "exit_code": 0,
+          "log": "logs/review-regressions-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "没有经过确认的真实视觉连接，因此未执行真实图像请求。本阶段未读取连接配置或Secret；沿用已记录的能力元数据，不推断当前供应商能力。",
+      "summary": "Provider-neutral视觉协议、文件边界和能力闸已完成；离线fake transport及拒绝边界证据保留",
+      "final_status": "partial",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B11",
+      "title": "已有工具与 API 的 Web 入口选择",
+      "status": "completed",
+      "initial_behavior": "部分已有工具缺Web入口",
+      "changes": [
+        "接入历史搜索、编辑、反馈、任务活动与取消，沿用现有服务及角色权限"
+      ],
+      "files": [
+        "pyharness/desktop/platform_api.py",
+        "pyharness/application/platform_service.py",
+        "pyharness/ui/platform.html"
+      ],
+      "functional_impact": "接入历史搜索、编辑、反馈、任务活动与取消，沿用现有服务及角色权限",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p3-entry-roles",
+          "exit_code": 0,
+          "log": "logs/p3-entry-roles.log"
+        },
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/browser-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "不新增一级页面；插件生命周期在Platform中明确拒绝",
+      "summary": "接入历史搜索、编辑、反馈、任务活动与取消，沿用现有服务及角色权限",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/browser-summary.json"
+      ]
+    },
+    {
+      "id": "B12",
+      "title": "父子任务与异步编排契约",
+      "status": "completed",
+      "initial_behavior": "子任务权限和取消范围需收紧",
+      "changes": [
+        "子工具集合取交集，继承任务身份，独立证据与审批；父取消清理子进程；join超时不误取消子任务"
+      ],
+      "files": [
+        "pyharness/core/subagent.py",
+        "pyharness/core/orchestration.py",
+        "pyharness/core/scope.py"
+      ],
+      "functional_impact": "子工具集合取交集，继承任务身份，独立证据与审批；父取消清理子进程；join超时不误取消子任务",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "review-child-evidence-green",
+          "exit_code": 0,
+          "log": "logs/review-child-evidence-green.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "合成模型编排；不证明任意多Agent复杂任务质量",
+      "summary": "子工具集合取交集，继承任务身份，独立证据与审批；父取消清理子进程；join超时不误取消子任务",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B13",
+      "title": "本机真实 isolated 与文件资源边界",
+      "status": "completed",
+      "initial_behavior": "本机Docker环境证据缺失",
+      "changes": [
+        "实际DockerSandboxManager容器、non-root、只读root、网络/文件/资源边界与进程清理"
+      ],
+      "files": [
+        "tests/unit/test_platform_path_contract.py"
+      ],
+      "functional_impact": "实际DockerSandboxManager容器、non-root、只读root、网络/文件/资源边界与进程清理",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "docker-local",
+          "exit_code": 0,
+          "log": "logs/docker-local.log"
+        },
+        {
+          "label": "docker-extended",
+          "exit_code": 0,
+          "log": "logs/docker-extended.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B13/docker-local.json",
+        "evidence/B13/docker-extended.json"
+      ],
+      "limits": "Docker Desktop Linux Engine 29.6.2；14+10项受控断言，不是跨平台形式化安全证明",
+      "summary": "实际DockerSandboxManager容器、non-root、只读root、网络/文件/资源边界与进程清理",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B13/docker-local.json",
+        "evidence/B13/docker-extended.json"
+      ]
+    },
+    {
+      "id": "B14",
+      "title": "真实模型受治理代码变更闭环",
+      "status": "completed",
+      "initial_behavior": "首次模型把容器绝对路径作为工具路径，运行取消",
+      "changes": [
+        "相对路径契约与执行前拒绝；新真实Run完成审批、Docker修复/pytest、最小Patch应用与重启恢复"
+      ],
+      "files": [
+        "pyharness/application/platform_runtime.py",
+        "pyharness/core/tools_executor.py",
+        "pyharness/core/system_prompt.py"
+      ],
+      "functional_impact": "相对路径契约与执行前拒绝；新真实Run完成审批、Docker修复/pytest、最小Patch应用与重启恢复",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "b14-relative-real",
+          "exit_code": 0,
+          "log": "logs/b14-relative-real.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B14/relative-contract-run/real-model-result.json"
+      ],
+      "limits": "累计5请求，其中成功Run4请求；后续通用审批/证据修复只做确定性回归，未对最终安装包重复付费模型验收；旧tasks路由的完成/恢复截图排除，由零新请求的只读恢复截图补证。",
+      "summary": "相对路径契约与执行前拒绝；新真实Run完成审批、Docker修复/pytest、最小Patch应用与重启恢复",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B14/relative-contract-run/real-model-result.json",
+        "evidence/B14/relative-contract-run/recovery-screenshots/summary.json"
+      ]
+    },
+    {
+      "id": "B15",
+      "title": "外部 RAG 的真实兼容与无证据处理",
+      "status": "completed",
+      "initial_behavior": "固定RAG服务返回嵌套协议，与现有query不兼容",
+      "changes": [
+        "严格兼容固定协议，只接受授权原文引用并推导行号；错误/超时分型；独立probe"
+      ],
+      "files": [
+        "pyharness/core/knowledge.py",
+        "pyharness/application/platform_service.py"
+      ],
+      "functional_impact": "严格兼容固定协议，只接受授权原文引用并推导行号；错误/超时分型；独立probe",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "b15-real-integrated-v2",
+          "exit_code": 0,
+          "log": "logs/b15-real-integrated-v2.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B15/integrated-v2/result.json"
+      ],
+      "limits": "真实rag-engine 0.2.0离线NGram/extractive；PDF/DOCX、BGE/向量质量和远端云鉴权未验",
+      "summary": "严格兼容固定协议，只接受授权原文引用并推导行号；错误/超时分型；独立probe",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B15/integrated-v2/result.json"
+      ]
+    },
+    {
+      "id": "B16",
+      "title": "MCP KV 和 evleven 的独立验收",
+      "status": "completed",
+      "initial_behavior": "固定evleven依赖尚未实际集成验收",
+      "changes": [
+        "在仓库外固定wheel与依赖环境运行现有16项；受控真实MCP stdio；KV会话/团队及重启回归"
+      ],
+      "files": [
+        "scripts/evleven_integration.py",
+        "scripts/evleven_r1_server.py",
+        "tests/integration/test_evleven_r1.py"
+      ],
+      "functional_impact": "在仓库外固定wheel与依赖环境运行现有16项；受控真实MCP stdio；KV会话/团队及重启回归",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "real-evleven",
+          "exit_code": 0,
+          "log": "logs/real-evleven.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B16/evleven-junit.xml"
+      ],
+      "limits": "真实进程/协议，planner为确定性；KV不是语义记忆；未配置未知MCP",
+      "summary": "在仓库外固定wheel与依赖环境运行现有16项；受控真实MCP stdio；KV会话/团队及重启回归",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B16/evleven-junit.xml"
+      ]
+    },
+    {
+      "id": "B17",
+      "title": "Web 真实交互补验",
+      "status": "partial",
+      "initial_behavior": "新Web行为缺当前浏览器证据",
+      "changes": [
+        "现有Chrome真实页面/API、错误重试/SSE/草稿/附件/主题；12页36截图无未捕获JS",
+        "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化"
+      ],
+      "files": [
+        "scripts/platform_browser_smoke.py",
+        "scripts/platform_theme_contract.py"
+      ],
+      "functional_impact": "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/browser-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "触屏探测为0；物理中文IME未完成。Computer Use因无法可靠确定Windows浏览器URL而停止，未换通道绕过；合成composition不代替真实IME。",
+      "summary": "Chrome 12页36截图、API和自动交互回归通过；已探测安装中文输入法及系统窗口自动化",
+      "final_status": "partial",
+      "evidence": [
+        "evidence/B17/browser-final/browser-summary.json",
+        "final-partial-closure-20261003-024521/environment-probe.json",
+        "final-partial-closure-20261003-024521/browser-final/browser-summary.json",
+        "final-partial-closure-20261003-024521/chrome-probe-lifecycle.json"
+      ]
+    },
+    {
+      "id": "B18",
+      "title": "桌面 WebView 壳人工验收",
+      "status": "partial",
+      "initial_behavior": "WebView主题与生命周期缺验证",
+      "changes": [
+        "真实隐藏WebView2加载页面、桥接偏好、隐藏暂停和关闭服务；安装入口smoke",
+        "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过"
+      ],
+      "files": [
+        "pyharness/desktop/bridge.py",
+        "pyharness/desktop/launcher.py"
+      ],
+      "functional_impact": "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "webview-source-entry-v2",
+          "exit_code": 0,
+          "log": "logs/webview-source-entry-v2.log"
+        },
+        {
+          "label": "package-final",
+          "exit_code": 0,
+          "log": "logs/package-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B18/source-entry.json"
+      ],
+      "external_evidence": [],
+      "limits": "可见页DPR为2只是观察；最小化/恢复/缩放、文件对话框、物理IME及完整高DPI体验未完成。",
+      "summary": "pywebview 6.2.1/WebView2 154.0.4258.48真实可见页面与关闭服务已观察；新安装包隐藏入口通过",
+      "final_status": "partial",
+      "evidence": [
+        "evidence/B18/source-entry.json",
+        "final-partial-closure-20261003-024521/webview-visible-result.json",
+        "final-partial-closure-20261003-024521/webview-visible-foreground.jpg",
+        "final-partial-closure-20261003-024521/final-package-command.json"
+      ]
+    },
+    {
+      "id": "B19",
+      "title": "Native Qt 人工验收",
+      "status": "partial",
+      "initial_behavior": "Native缺对应主题与动效策略",
+      "changes": [
+        "接入QSS/受控Painter、QSettings及生命周期timer；offscreen窗口和安装入口",
+        "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过"
+      ],
+      "files": [
+        "pyharness/desktop_native/app.py",
+        "pyharness/desktop_native/appearance.py",
+        "pyharness/desktop_native/main_window.py",
+        "tests/unit/test_native_disposal.py",
+        "tests/unit/test_remediation_delivery.py"
+      ],
+      "functional_impact": "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "native-source-entry",
+          "exit_code": 0,
+          "log": "logs/native-source-entry.log"
+        },
+        {
+          "label": "package-final",
+          "exit_code": 0,
+          "log": "logs/package-final.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B19/source-entry.json"
+      ],
+      "external_evidence": [],
+      "limits": "单显示器，Qt DPR为2；物理输入、高DPI/多屏和完整人工窗口体验未验。",
+      "summary": "Qt 6.11.2可见窗口和菜单已观察；修复事件循环停止及C++销毁时的外观资源释放，定向与安装入口通过",
+      "final_status": "partial",
+      "evidence": [
+        "evidence/B19/source-entry.json",
+        "final-partial-closure-20261003-024521/native-visible-result.json",
+        "final-partial-closure-20261003-024521/native-visible.jpg",
+        "final-partial-closure-20261003-024521/native-disposal-root-cause.json",
+        "final-partial-closure-20261003-024521/final-package-command.json"
+      ]
+    },
+    {
+      "id": "B20",
+      "title": "CLI 与 ACP 分开验收",
+      "status": "completed",
+      "initial_behavior": "CLI和ACP结果不能混称",
+      "changes": [
+        "安装包CLI中文流式JSONL/退出码；独立真实stdio initialize/chat/read_events/shutdown/重启游标与多会话",
+        "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留"
+      ],
+      "files": [
+        "pyharness/cli.py",
+        "pyharness/acp.py",
+        "tests/unit/test_cli_approval_ownership.py"
+      ],
+      "functional_impact": "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "installed-protocols-v2",
+          "exit_code": 0,
+          "log": "logs/installed-protocols-v2.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B20/installed-protocols.json"
+      ],
+      "limits": "使用确定性本地传输，未测试特定第三方ACP品牌客户端；独立真实stdio协议客户端已验证。ConPTY合并输出，stdout/stderr分离由独立pipe证据验证。",
+      "summary": "真实ConPTY完成TTY/help/中文流式/审批输入/退出；有序Ctrl+C自然退出130；旧审批订阅已修复，最终安装包APR-503为零，句柄清理通过；独立真实stdio ACP证据保留",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B20/installed-protocols.json",
+        "final-partial-closure-20261003-024521/terminal-closure.json",
+        "final-partial-closure-20261003-024521/approval-root-cause.json",
+        "final-partial-closure-20261003-024521/final-approval-result.json",
+        "final-partial-closure-20261003-024521/conpty-cancel.json"
+      ]
+    },
+    {
+      "id": "B21",
+      "title": "正常重启 回放与错误恢复",
+      "status": "completed",
+      "initial_behavior": "正常恢复与断电保证容易混称",
+      "changes": [
+        "真实B14正常重启及RAG/ACP重启；Session/Run/审批/Trace/Artifact/usage/KV/账户/主题与repair回归"
+      ],
+      "files": [
+        "pyharness/core/orchestration.py",
+        "pyharness/ui/appearance.py"
+      ],
+      "functional_impact": "真实B14正常重启及RAG/ACP重启；Session/Run/审批/Trace/Artifact/usage/KV/账户/主题与repair回归",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "b14-relative-real",
+          "exit_code": 0,
+          "log": "logs/b14-relative-real.log"
+        },
+        {
+          "label": "b15-real-integrated-v2",
+          "exit_code": 0,
+          "log": "logs/b15-real-integrated-v2.log"
+        },
+        {
+          "label": "installed-protocols-v2",
+          "exit_code": 0,
+          "log": "logs/installed-protocols-v2.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [
+        "evidence/B14/relative-contract-run/real-model-result.json",
+        "evidence/B20/installed-protocols.json"
+      ],
+      "limits": "不承诺副作用重放、跨机Secret、热备、断电事务或多进程HA",
+      "summary": "真实B14正常重启及RAG/ACP重启；Session/Run/审批/Trace/Artifact/usage/KV/账户/主题与repair回归",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B14/relative-contract-run/real-model-result.json",
+        "evidence/B20/installed-protocols.json"
+      ]
+    },
+    {
+      "id": "B22",
+      "title": "性能与资源的有界测量",
+      "status": "completed",
+      "initial_behavior": "没有当前有界性能数据",
+      "changes": [
+        "100会话、1000消息长会话、1000合成轨迹、50Artifact、4并发Run与4动效模式测量"
+      ],
+      "files": [
+        "pyharness/ui/theme-kit/particles/engine.js"
+      ],
+      "functional_impact": "100会话、1000消息长会话、1000合成轨迹、50Artifact、4并发Run与4动效模式测量",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "bounded-performance",
+          "exit_code": 0,
+          "log": "logs/bounded-performance.log"
+        },
+        {
+          "label": "performance-followup-v2",
+          "exit_code": 0,
+          "log": "logs/performance-followup-v2.log"
+        },
+        {
+          "label": "trace-performance",
+          "exit_code": 0,
+          "log": "logs/trace-performance.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "headless/CDP TaskDuration、JS heap和Python traced allocation；非整机CPU/RSS/功耗或真实显示器FPS保证 首次结果错误字段results及零帧旧间隔已在followup明确纠正；空Trace不作压力证据，独立1000条有效事件结果非空。",
+      "summary": "100会话、1000消息长会话、1000合成轨迹、50Artifact、4并发Run与4动效模式测量",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B22/performance.json",
+        "evidence/B22/followup.json",
+        "evidence/B22/trace-performance.json"
+      ]
+    },
+    {
+      "id": "B23",
+      "title": "本地账户权限与 SaaS 边界",
+      "status": "completed",
+      "initial_behavior": "本地账户容易误称完整SaaS",
+      "changes": [
+        "回归owner/member/viewer、跨团队、降权、最后owner与资源授权；文档明确边界"
+      ],
+      "files": [
+        "pyharness/application/accounts.py",
+        "pyharness/desktop/accounts_api.py",
+        "docs/security/approval-and-memory-policy.md"
+      ],
+      "functional_impact": "回归owner/member/viewer、跨团队、降权、最后owner与资源授权；文档明确边界",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "p1-green",
+          "exit_code": 0,
+          "log": "logs/p1-green.log"
+        },
+        {
+          "label": "p3-entry-roles",
+          "exit_code": 0,
+          "log": "logs/p3-entry-roles.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "不含支付、Organization、云Worker、公网认证或生产多租户安全认证",
+      "summary": "回归owner/member/viewer、跨团队、降权、最后owner与资源授权；文档明确边界",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml"
+      ]
+    },
+    {
+      "id": "B24",
+      "title": "汇总验证 打包与交付判断",
+      "status": "completed",
+      "initial_behavior": "需对最终源码重新收口",
+      "changes": [
+        "最终全量、授权AST、语法/敏感路径检查、新wheel/sdist三种安装及包内离线资源/MIME通过"
+      ],
+      "files": [
+        "reports/PYHARNESS-34-CARD-IMPLEMENTATION.md"
+      ],
+      "functional_impact": "最终全量、授权AST、语法/敏感路径检查、新wheel/sdist三种安装及包内离线资源/MIME通过",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "final-regression-targeted",
+          "exit_code": 0,
+          "log": "logs/final-regression-targeted.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "package-final",
+          "exit_code": 0,
+          "log": "logs/package-final.log"
+        },
+        {
+          "label": "installed-assets",
+          "exit_code": 0,
+          "log": "logs/installed-assets.log"
+        },
+        {
+          "label": "installed-protocols-v2",
+          "exit_code": 0,
+          "log": "logs/installed-protocols-v2.log"
+        },
+        {
+          "label": "safety-final-v2",
+          "exit_code": 0,
+          "log": "logs/safety-final-v2.log"
+        },
+        {
+          "label": "static-final",
+          "exit_code": 0,
+          "log": "logs/static-final.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "本地候选；没有远程CI或发布。完整人工设备与真实视觉仍见partial卡。",
+      "summary": "最终全量、授权AST、语法/敏感路径检查、新wheel/sdist三种安装及包内离线资源/MIME通过",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B24/junit-full-v2.xml",
+        "validation/artifacts/package-summary.json",
+        "evidence/B24/installed-assets.json",
+        "evidence/B24/safety-scan.json"
+      ]
+    },
+    {
+      "id": "U01",
+      "title": "范围与模块契约定版",
+      "status": "completed",
+      "initial_behavior": "主题组件与宿主边界未定",
+      "changes": [
+        "独立theme-kit与host adapter契约，注入配置/偏好，不接业务API"
+      ],
+      "files": [
+        "docs/architecture/theme-kit.md",
+        "pyharness/ui/theme-kit/appearance/controller.js"
+      ],
+      "functional_impact": "独立theme-kit与host adapter契约，注入配置/偏好，不接业务API",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "仅现有静态Web/Qt体系，不迁移前端框架",
+      "summary": "独立theme-kit与host adapter契约，注入配置/偏好，不接业务API",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ]
+    },
+    {
+      "id": "U02",
+      "title": "主题 tokens 与可读性基线",
+      "status": "completed",
+      "initial_behavior": "主题变量分散",
+      "changes": [
+        "命名空间tokens、light/dark/tech-blue对比和静态可读回退"
+      ],
+      "files": [
+        "pyharness/ui/theme-kit/appearance/controller.js",
+        "pyharness/ui/theme-kit/contracts/preferences.js",
+        "pyharness/ui/theme-kit/particles/engine.js",
+        "pyharness/ui/theme-kit/styles/theme.css",
+        "pyharness/ui/theme-kit/tokens/themes.js"
+      ],
+      "functional_impact": "命名空间tokens、light/dark/tech-blue对比和静态可读回退",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/appearance-dark.png",
+        "evidence/B17/browser-final/appearance-light.png"
+      ],
+      "external_evidence": [],
+      "limits": "自动布局/截图不是全面WCAG认证",
+      "summary": "命名空间tokens、light/dark/tech-blue对比和静态可读回退",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/appearance-dark.png",
+        "evidence/B17/browser-final/appearance-light.png"
+      ]
+    },
+    {
+      "id": "U03",
+      "title": "接入真实 Platform 静态首版",
+      "status": "completed",
+      "initial_behavior": "科技蓝尚未接真实页面",
+      "changes": [
+        "真实Platform页面共享tokens和控制器，业务DOM及API不替换"
+      ],
+      "files": [
+        "pyharness/ui/platform.html"
+      ],
+      "functional_impact": "真实Platform页面共享tokens和控制器，业务DOM及API不替换",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/dashboard.png"
+      ],
+      "external_evidence": [],
+      "limits": "不宣称新产品页面或完整设计重构",
+      "summary": "真实Platform页面共享tokens和控制器，业务DOM及API不替换",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/dashboard.png"
+      ]
+    },
+    {
+      "id": "U04",
+      "title": "纯 Canvas 粒子引擎",
+      "status": "completed",
+      "initial_behavior": "没有正式粒子引擎",
+      "changes": [
+        "纯Canvas、单RAF、粒子80上限、DPR2及逻辑面积上限；销毁释放"
+      ],
+      "files": [
+        "pyharness/ui/theme-kit/appearance/controller.js",
+        "pyharness/ui/theme-kit/contracts/preferences.js",
+        "pyharness/ui/theme-kit/particles/engine.js",
+        "pyharness/ui/theme-kit/styles/theme.css",
+        "pyharness/ui/theme-kit/tokens/themes.js"
+      ],
+      "functional_impact": "纯Canvas、单RAF、粒子80上限、DPR2及逻辑面积上限；销毁释放",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "有界装饰动效，不承诺所有GPU性能",
+      "summary": "纯Canvas、单RAF、粒子80上限、DPR2及逻辑面积上限；销毁释放",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B22/performance.json"
+      ]
+    },
+    {
+      "id": "U05",
+      "title": "动效偏好与可见性策略",
+      "status": "completed",
+      "initial_behavior": "动效偏好和生命周期未统一",
+      "changes": [
+        "normal/low/off、reduced-motion、页面/宿主/遮挡组合暂停"
+      ],
+      "files": [
+        "pyharness/ui/theme-kit/appearance/controller.js",
+        "pyharness/ui/theme-kit/contracts/preferences.js",
+        "pyharness/ui/theme-kit/particles/engine.js",
+        "pyharness/ui/theme-kit/styles/theme.css",
+        "pyharness/ui/theme-kit/tokens/themes.js"
+      ],
+      "functional_impact": "normal/low/off、reduced-motion、页面/宿主/遮挡组合暂停",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "webview-source-entry-v2",
+          "exit_code": 0,
+          "log": "logs/webview-source-entry-v2.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "低动效使用静态回退，关闭时不继续RAF",
+      "summary": "normal/low/off、reduced-motion、页面/宿主/遮挡组合暂停",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ]
+    },
+    {
+      "id": "U06",
+      "title": "注入式 PreferenceStore",
+      "status": "completed",
+      "initial_behavior": "偏好存储依赖页面",
+      "changes": [
+        "注入Web localStorage及WebView原子FilePreferences白名单；无Secret字段"
+      ],
+      "files": [
+        "pyharness/ui/appearance.py",
+        "pyharness/desktop/bridge.py",
+        "pyharness/ui/theme-kit/contracts/preferences.js"
+      ],
+      "functional_impact": "注入Web localStorage及WebView原子FilePreferences白名单；无Secret字段",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "webview-source-entry-v2",
+          "exit_code": 0,
+          "log": "logs/webview-source-entry-v2.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B18/source-entry.json"
+      ],
+      "external_evidence": [],
+      "limits": "本地偏好，不跨账户云同步",
+      "summary": "注入Web localStorage及WebView原子FilePreferences白名单；无Secret字段",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B18/source-entry.json"
+      ]
+    },
+    {
+      "id": "U07",
+      "title": "离线资源与安装包",
+      "status": "completed",
+      "initial_behavior": "安装包中离线资源需确认",
+      "changes": [
+        "新wheel/sdist包含7项theme-kit/adapter离线资源；安装包逐项内容/SHA/MIME/nosniff及越界404通过"
+      ],
+      "files": [
+        "pyharness/desktop/app.py",
+        "pyharness/ui/theme-kit",
+        "pyharness/ui/theme-kit/appearance/controller.js",
+        "pyharness/ui/theme-kit/contracts/preferences.js",
+        "pyharness/ui/theme-kit/particles/engine.js",
+        "pyharness/ui/theme-kit/styles/theme.css",
+        "pyharness/ui/theme-kit/tokens/themes.js"
+      ],
+      "functional_impact": "新wheel/sdist包含7项theme-kit/adapter离线资源；安装包逐项内容/SHA/MIME/nosniff及越界404通过",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "package-final",
+          "exit_code": 0,
+          "log": "logs/package-final.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "installed-assets",
+          "exit_code": 0,
+          "log": "logs/installed-assets.log"
+        },
+        {
+          "label": "installed-protocols-v2",
+          "exit_code": 0,
+          "log": "logs/installed-protocols-v2.log"
+        },
+        {
+          "label": "safety-final-v2",
+          "exit_code": 0,
+          "log": "logs/safety-final-v2.log"
+        },
+        {
+          "label": "static-final",
+          "exit_code": 0,
+          "log": "logs/static-final.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [],
+      "external_evidence": [],
+      "limits": "本地候选；没有远程CI或发布。完整人工设备与真实视觉仍见partial卡。",
+      "summary": "新wheel/sdist包含7项theme-kit/adapter离线资源；安装包逐项内容/SHA/MIME/nosniff及越界404通过",
+      "final_status": "completed",
+      "evidence": [
+        "validation/artifacts/package-summary.json",
+        "validation/artifacts/package-summary.json",
+        "evidence/B24/installed-assets.json",
+        "evidence/B24/safety-scan.json"
+      ]
+    },
+    {
+      "id": "U08",
+      "title": "WebView 与可选经典页适配",
+      "status": "completed",
+      "initial_behavior": "WebView/classic未共享主题",
+      "changes": [
+        "平台/classic adapter接入同一组件；宿主桥接与页面可见性"
+      ],
+      "files": [
+        "pyharness/ui/index.html",
+        "pyharness/ui/host-adapters"
+      ],
+      "functional_impact": "平台/classic adapter接入同一组件；宿主桥接与页面可见性",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "webview-source-entry-v2",
+          "exit_code": 0,
+          "log": "logs/webview-source-entry-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/appearance-classic.png",
+        "evidence/B18/source-entry.json"
+      ],
+      "external_evidence": [],
+      "limits": "物理WebView人工验收单列B18",
+      "summary": "平台/classic adapter接入同一组件；宿主桥接与页面可见性",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/appearance-classic.png",
+        "evidence/B18/source-entry.json"
+      ]
+    },
+    {
+      "id": "U09",
+      "title": "可选 Native Qt 主题适配",
+      "status": "partial",
+      "initial_behavior": "Native主题无对应路径",
+      "changes": [
+        "Qt QSS/Painter实现受控主题，独立timer和偏好重载",
+        "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归"
+      ],
+      "files": [
+        "pyharness/desktop_native/app.py",
+        "pyharness/desktop_native/appearance.py",
+        "pyharness/desktop_native/main_window.py",
+        "tests/unit/test_native_disposal.py",
+        "tests/unit/test_remediation_delivery.py"
+      ],
+      "functional_impact": "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "native-source-entry",
+          "exit_code": 0,
+          "log": "logs/native-source-entry.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        },
+        {
+          "label": "partial-closure-final-full",
+          "exit_code": 0,
+          "log": "final-partial-closure-20261003-024521/final-full.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B19/source-entry.json"
+      ],
+      "external_evidence": [],
+      "limits": "与B19统一标准：物理输入、高DPI/多屏和完整人工窗口体验未验，不能仅凭offscreen或DPR观察标completed。",
+      "summary": "Native主题代码、偏好和资源生命周期已完成；真实可见窗口已观察，补充C++销毁与提前停循环回归",
+      "final_status": "partial",
+      "evidence": [
+        "evidence/B19/source-entry.json",
+        "final-partial-closure-20261003-024521/native-disposal-root-cause.json",
+        "final-partial-closure-20261003-024521/native-visible-result.json",
+        "final-partial-closure-20261003-024521/final-package-command.json"
+      ]
+    },
+    {
+      "id": "U10",
+      "title": "主题业务保持与复用验收",
+      "status": "completed",
+      "initial_behavior": "复用与业务保持缺证据",
+      "changes": [
+        "第二宿主挂载销毁、缺粒子回退、草稿附件保持、暂停泄漏检查及有界性能对比"
+      ],
+      "files": [
+        "scripts/platform_theme_contract.py"
+      ],
+      "functional_impact": "第二宿主挂载销毁、缺粒子回退、草稿附件保持、暂停泄漏检查及有界性能对比",
+      "environment": [
+        "Windows local isolated test data",
+        "Python 3.13.13; existing Chrome; Qt/WebView where applicable"
+      ],
+      "commands": [
+        {
+          "label": "browser-final",
+          "exit_code": 0,
+          "log": "logs/browser-final.log"
+        },
+        {
+          "label": "bounded-performance",
+          "exit_code": 0,
+          "log": "logs/bounded-performance.log"
+        },
+        {
+          "label": "final-full-v2",
+          "exit_code": 0,
+          "log": "logs/final-full-v2.log"
+        }
+      ],
+      "tests": [
+        "Final suite 2687 passed / 41 skipped / 0 failures, coverage 84.10%; deterministic/local gates, no repeated paid model run."
+      ],
+      "browser_evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json"
+      ],
+      "external_evidence": [],
+      "limits": "无移动实机续航和整机功耗测量",
+      "summary": "第二宿主挂载销毁、缺粒子回退、草稿附件保持、暂停泄漏检查及有界性能对比",
+      "final_status": "completed",
+      "evidence": [
+        "evidence/B17/browser-final/theme-attachment-summary.json",
+        "evidence/B22/followup.json"
+      ]
+    }
+  ],
+  "validation": {
+    "pytest": {
+      "collected": 2728,
+      "passed": 2687,
+      "skipped": 41,
+      "failed": 0,
+      "seconds": 241.653
+    },
+    "coverage_percent": 84.10358897493546,
+    "coverage_floor": 75,
+    "skip_reasons": {
+      "Provision pinned local evleven R1 wheel first": 16,
+      "Windows mode 位无安全含义（ACL 尽力而为），本检查仅 POSIX 生效": 1,
+      "OS does not grant symlink creation: 1314": 1,
+      "requires real POSIX permission bits": 20,
+      "Windows ACL 尽力而为(spec)": 1,
+      "requires real POSIX directory and file permissions": 1,
+      "无符号链接权限(Windows 需管理员/开发者模式)": 1
+    },
+    "browser": {
+      "pages": 12,
+      "screenshots": 36,
+      "uncaught_js_errors": 0,
+      "transport": "deterministic model"
+    },
+    "package": "Final repaired wheel installed in base/native/desktop; Native stderr explicitly free of Qt teardown RuntimeError; HTTP and hidden WebView passed. Exact committed rebuild and hashes in external manifest.",
+    "assets": 7,
+    "static": "authorization AST, Python parse, JS syntax, git diff, pattern secret/path scan passed"
+  },
+  "real_model": {
+    "connection": "shidongai",
+    "model": "deepseek-v4-flash-0731",
+    "cumulative_requests": 5,
+    "cumulative_input_tokens": 11401,
+    "cumulative_output_tokens": 1010,
+    "real_model_requests": 4,
+    "approvals": [
+      {
+        "tool": "fs.read_file",
+        "approval_id": 15,
+        "decision": "approved"
+      },
+      {
+        "tool": "fs.read_file",
+        "approval_id": 27,
+        "decision": "approved"
+      },
+      {
+        "tool": "fs.read_file",
+        "approval_id": 38,
+        "decision": "approved"
+      },
+      {
+        "tool": "fs.write_file",
+        "approval_id": 52,
+        "decision": "approved"
+      },
+      {
+        "tool": "exec.shell_run",
+        "approval_id": 66,
+        "decision": "approved"
+      },
+      {
+        "tool": "workspace.apply_patch",
+        "approval_id": 88,
+        "decision": "approved"
+      },
+      {
+        "tool": "workspace.export_artifact",
+        "approval_id": 100,
+        "decision": "approved"
+      },
+      {
+        "tool": "workspace.export_artifact",
+        "approval_id": 112,
+        "decision": "approved"
+      }
+    ],
+    "run_status": "completed",
+    "waiting_approval_observed": true,
+    "patch_sha256": "492b77287b272429e509272a5adfe24b28e25a3b1e062ef4155b4d4ba7d842d9",
+    "test_report_sha256": "e7cbdfa876e00ddac2d46b2fc48f3feb8a92f62527c4dcaba11309befc210448",
+    "pytest": "1 passed",
+    "target_applied": true,
+    "restart_recovery": true,
+    "transport_retries": 0,
+    "host_fallback": false,
+    "elapsed_seconds": 26.634,
+    "cumulative_elapsed_upper_bound": 41.634
+  },
+  "real_model_limit": "The successful Run used 4 requests; earlier cancelled Run used 1. Five model-originated tool calls and three operator artifact actions. No additional model requests for final regression, packaging or recovered screenshots. Live test predates final tighten-only registry/early-readiness changes; those changes have deterministic and full regression coverage, not a repeated paid run.",
+  "docker": {
+    "engine": "Docker Desktop Linux Engine",
+    "client": "29.6.2",
+    "server": "29.6.2",
+    "image": "pyharness-sandbox:python-3.13.2-pytest-9.1.1",
+    "image_id": "sha256:bdba4d3b1212cb69913a5967ef36bca68604f3bc3d538a4a26042043785611f5",
+    "checks": "14 basic + 10 extended assertions with actual containers; not a new remote CI result",
+    "rootfs": "read-only",
+    "user": "65534:65534",
+    "network": "none",
+    "capabilities": "ALL dropped",
+    "privileged": false,
+    "socket": "not mounted",
+    "cleanup": "owned test containers/workspaces/processes reported empty"
+  },
+  "integrations": {
+    "rag": "Real fixed rag-engine 0.2.0, offline NGram/extractive: ingest, authorized quote/line, empty evidence, deletion, restart, offline platform startup passed",
+    "rag_unverified": [
+      "PDF/DOCX",
+      "BGE/vector semantic quality",
+      "remote cloud authentication"
+    ],
+    "evleven": "Fixed 1.1.0 wheel, 16 actual integration tests passed with deterministic planner",
+    "mcp": "Controlled real stdio process; no arbitrary remote server configured",
+    "kv": "Deterministic session/team permission and persistence tests, not semantic memory"
+  },
+  "reviews": {
+    "read_only_reviewers": 2,
+    "closed_findings": [
+      {
+        "severity": "High",
+        "finding": "Vision profile can change after runtime construction",
+        "resolution": "Bind actual runtime identity and enforce before image egress; fake transport regressions"
+      },
+      {
+        "severity": "High",
+        "finding": "Scheduled/legacy entry could bypass required evidence",
+        "resolution": "Prepare current task evidence at runtime entry before model"
+      },
+      {
+        "severity": "Medium",
+        "finding": "Retry loses vision/attachment fields",
+        "resolution": "Preserve metadata and rerun normal validation"
+      },
+      {
+        "severity": "Medium",
+        "finding": "Late upload response reattaches cleared attachment",
+        "resolution": "Ignore response for removed upload; browser event barrier regression"
+      },
+      {
+        "severity": "Medium",
+        "finding": "Evidence-required child rejected even with valid evidence",
+        "resolution": "Query child intent inside its timeout and cleanup; positive and zero-request negative regressions"
+      }
+    ],
+    "remaining_critical_high_medium": 0,
+    "full_suite_failures_fixed": [
+      "INV02 brittle line number replaced by unique AST file/function/receiver assertion",
+      "INV04 policy must never acquire Provider",
+      "Missing model and missing explicit connection rejected before Session creation"
+    ]
+  },
+  "performance": {
+    "dataset": "100 sessions x 10 messages; separate 1000-message session; 1000 synthetic Trace events; 50 artifacts; 4 concurrent deterministic Runs",
+    "measurements": {
+      "fts_existing_100_sessions": {
+        "ms": 256.2964999997348
+      },
+      "all_session_trace": {
+        "ms": 14.094400001340546
+      },
+      "concurrent_four_runs": {
+        "ms": 557.8888999989431
+      },
+      "artifact_list_50": {
+        "ms": 13.619999997899868
+      },
+      "run_list": {
+        "ms": 13.566300000093179
+      },
+      "fts_truncation": {
+        "ms": 84.64949999688542
+      }
+    },
+    "trace_projection": {
+      "status": "passed",
+      "fixture": "1000 synthetic schema-validated llm.response events; no model invocation or real Run claim",
+      "events": 1000,
+      "returned_trace": 500,
+      "retained_latest": true,
+      "projection_ms": [
+        10.687100002542138,
+        10.369100000389153,
+        10.903900001721922,
+        7.729500001005363,
+        7.3957999993581325
+      ],
+      "log_bytes": 298572,
+      "model_requests": 0
+    },
+    "limits": "No frame interval is claimed for zero-frame off/low samples; earlier stats retained prior active frames. CDP renderer time / JS heap / Python traced allocations are not total CPU, RSS, physical FPS or power."
+  },
+  "protection": "No protected worktree writes. Starting/final branch, HEAD and Git status match; no initial protected-file content hash baseline, so not a byte-for-byte forensic claim. No remote Git writes/CI run/merge/tag/release/deploy.",
+  "secrets": "No raw real key retrieved/exported. Normal application resolver used authorized existing connection only. Trace projects public fields; artifact redaction and pattern scan passed. These checks are not a proof against every possible secret encoding.",
+  "optimization_feasibility": [
+    [
+      "增量历史搜索索引",
+      "可行，建议后续",
+      "每次重建100会话索引；当前约50–256ms",
+      "需继续保持租户/会话授权和删除一致性；本轮不引入第二真源"
+    ],
+    [
+      "Run/Artifact分页与索引",
+      "可行，先扩大有界样本",
+      "4 Run与50 Artifact列表约14ms，尚无大规模结论",
+      "先测更大但有限数据；不据小样本改成分布式"
+    ],
+    [
+      "更严格图片解码与解压上限",
+      "可行，单独安全任务",
+      "当前验证文件结构/大小/像素声明",
+      "需要固定解码依赖和畸形图像测试；不冒充已完成"
+    ],
+    [
+      "真实视觉供应商验收",
+      "当前不可完成",
+      "shidongai未声明supports_vision",
+      "需要用户确认受支持的模型能力及独立调用预算，不自动切换供应商"
+    ],
+    [
+      "物理IME/高DPI/触屏验收",
+      "需设备人工操作",
+      "Chrome自动事件；可见WebView/Qt观察，完整物理输入与DPI未验",
+      "保留B17/B18/B19/U09 partial；不能用截图或单元测试代替"
+    ],
+    [
+      "粒子更低CPU与设备档位",
+      "可行，先采样",
+      "3秒renderer task正常约0.188s、静态约0.004–0.005s",
+      "不是整机功耗；可后续在真实低端设备测FPS再调参"
+    ],
+    [
+      "RAG向量/复杂文档质量",
+      "可行但另行验收",
+      "本轮固定0.2.0使用NGram/extractive",
+      "需固定embedding模型、语料和评价集；PDF/DOCX/BGE未验"
+    ],
+    [
+      "CLI第三方ACP客户端兼容",
+      "可行，待指定客户端",
+      "真实stdio协议已过，外部客户端未测",
+      "不新增不存在的cancel方法；保持当前协议"
+    ],
+    [
+      "生产SaaS、HA、云Worker",
+      "不属于本轮可交付能力",
+      "仅本地账户/团队/运行时",
+      "需要独立架构和安全评估；不应把本轮结果扩大为生产认证"
+    ]
+  ],
+  "partial_closure": {
+    "starting_commit": "19945f06ec0bda02f506e3a6a687413831530471",
+    "evidence_directory": "final-partial-closure-20261003-024521",
+    "recorded_utc": "2026-10-02T19:31:58.681641+00:00",
+    "partial_cards": [
+      "B10",
+      "B17",
+      "B18",
+      "B19",
+      "U09"
+    ],
+    "product_fixes": [
+      "CLI bootstrap ApprovalProvider stale verdict subscriber",
+      "Native appearance C++ destruction and early event-loop-stop disposal"
+    ],
+    "source_sha256": {
+      "pyharness/cli.py": "0c45a6810ef2bc24ecc58bb06cdd4924edf405f2d1b6ca5b0b47222f40049ce3",
+      "pyharness/desktop_native/appearance.py": "0d423c1d123915f43733bf6f5d8c1640852bbeca83bf8efb56a8f887648dc896",
+      "pyharness/desktop_native/app.py": "34a3de6480260e07e715ba3687a993e2eb486a521da4d1a8964f11f1354198be",
+      "pyharness/desktop_native/main_window.py": "e83824ede62d20b143c860801e7b53467b50784d04c8738fbff9807bdc2917a0",
+      "tests/unit/test_cli_approval_ownership.py": "3a062cbb827fb9e08a54177badaae27cad8a6fbbb461e213651f1f455f7f3c0d",
+      "tests/unit/test_native_disposal.py": "96d7e5cd5d67ccf2c0d500e98a68e53cd8dc6a4064405ef4bed19abbd1d2ac2b",
+      "tests/unit/test_remediation_delivery.py": "b1acf29bc68f7f36c42347f0ba6449f0b683e88ca72bec84d69271228c4711c3"
+    },
+    "version_binding": "Gates ran on the dirty frozen base plus the listed exact file hashes; final local commit and exact-commit archives bound by external manifest. No remote CI claim.",
+    "new_real_model_requests": 0,
+    "external_integration_reruns": false,
+    "remote_writes": false,
+    "physical_computer_use_stop": "Windows browser URL policy guard stopped further physical UI automation. No alternate route used. Headless browser gate is ordinary deterministic code regression, not physical input evidence.",
+    "historical_package_false_green": "final-partial-closure-20261003-024521/package-initial-adjudication.json",
+    "ctrl_c_not_repeated": true
+  }
+}

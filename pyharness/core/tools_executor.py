@@ -180,18 +180,7 @@ class ApprovalRoundResult:
 
 
 # ================================================================ 文本辅助
-def render_result_text(raw: Any) -> str:
-    """Provider 原始返回 → 统一文本(dict/list JSON 序列化;str 原样;None → 空)。"""
-    if isinstance(raw, str):
-        return raw
-    if raw is None:
-        return ""
-    if isinstance(raw, (dict, list)):
-        try:
-            return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return str(raw)
-    return str(raw)
+from pyharness.core.result_text import render_result_text
 
 
 def summarize_text(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
@@ -312,7 +301,9 @@ class ToolExecutor:
     def schemas_for(self, scope: Any = None, *,
                     toolset: Optional[set[str]] = None) -> list[dict]:
         """门面对 registry.schemas_for 透传(agent-loop 每轮下发 F007)。"""
-        return self._r.schemas_for(scope, toolset=toolset)
+        schemas=self._r.schemas_for(scope, toolset=toolset)
+        hidden=getattr(self,'hidden_tools',set())
+        return [schema for schema in schemas if schema['function']['name'] not in hidden]
 
     # ------------------------------------------------------ F026 轮内连败计数
     def reset_turn_failures(self) -> None:
@@ -463,6 +454,15 @@ class ToolExecutor:
         except PyHError as e:
             return await self._on_error(ctx, call, e.code, e.to_model_message())
         call = replace(call, defn=defn)                 # 挂契约(guard 读 danger 面)
+        runtime = getattr(ctx, 'platform_runtime', None)
+        validate_path = getattr(runtime, 'validate_file_call', None)
+        if callable(validate_path):
+            error = validate_path(call.name, call.raw_args, ctx)
+            if error:
+                result = await self._on_error(ctx, call, 'TLB-803', json.dumps(error, ensure_ascii=False))
+                if not error['recoverable']:
+                    raise PyHError('platform_workspace_path_denied')
+                return result
         # ---- 关1b 先验后跑(TLB-803 → 参数校验失败 summary;本函数立即返回,
         # 后续任何一行不执行 —— 畸形参数零调用,INV-06)
         try:
@@ -721,6 +721,14 @@ class ToolExecutor:
         后并发重入 → 重叠副作用"(Python 无法安全 kill 运行中线程,只能不复用)。
         正常完成则 ``shutdown(wait=True)`` 立即收口(线程已结束)。见偏离说明 13。
         """
+        runtime = getattr(ctx, 'platform_runtime', None)
+        if runtime is not None:
+            async def original():
+                return await self._run_original_provider(defn, args, ctx)
+            return await runtime.execute(defn.name, args, ctx, original)
+        return await self._run_original_provider(defn, args, ctx)
+
+    async def _run_original_provider(self, defn: Any, args: dict, ctx: Any) -> Any:
         handle = self._provider_handle(defn.name)
         if inspect.iscoroutinefunction(handle):
             return await handle(args, ctx)              # wait_for 在外层掐断

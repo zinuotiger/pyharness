@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from pyharness.core.session import SessionLog
-from pyharness.core.task_queue import TaskQueue
+from pyharness.core.task_queue import TaskQueue, TaskResult
 from pyharness.core.workflow import WorkflowRunner, queue_submit_adapter
 from pyharness.errors import PyHError
 
@@ -30,6 +30,7 @@ class _FakeRunner:
         await self.session.append("agent.message",
                                   {"content": f"[{task.id}] ok"}, actor="agent",
                                   task_id=task.id)
+        return TaskResult(ok=True)
 
 
 async def _session() -> SessionLog:
@@ -88,3 +89,13 @@ async def test_empty_steps_rejected():
     with pytest.raises(PyHError) as e:
         await runner.run([])
     assert e.value.code == "EVT-100"
+
+
+async def test_workflow_error_never_exports_transport_exception(caplog):
+    async def fail(intent):
+        raise RuntimeError('Authorization: Bearer synthetic-private-credential')
+    runner=WorkflowRunner(await _session(),fail)
+    with caplog.at_level('DEBUG'):
+        result=await runner.run(['synthetic'],stop_on_fail=True)
+    assert not result[0]['ok']
+    assert 'synthetic-private-credential' not in str(result)+caplog.text

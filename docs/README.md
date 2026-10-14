@@ -1,7 +1,7 @@
 # PyHarness — DeepSeek Harness 的 Python 全功能复刻
 
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项功能,6 阶段开发,Windows 桌面程序形态。
-> 状态: full-pipeline 全流程完成(63 份 md / 1.25MB,矛盾清零),代码阶段进行中(errors.py 已实现)。
+> 这是设计文档导航；下列阶段路线和文档数量属于历史设计记录。当前实现与实际运行验证以 [STATUS.md](../STATUS.md) 和 [候选报告](../reports/PYHARNESS-ENGINEERING-RC-20260924.md) 为准。
 
 ## AI 编码地图(从哪开始读)
 
@@ -61,6 +61,6 @@ Python 3.11 · pydantic · JSONL 事件溯源 · DeepSeek + qwen-max 降级 · p
 "我完整分析了 DeepSeek Harness(9,044 文件),然后用 Python 全功能复刻了它的架构——事件溯源会话日志、guard 单调拒绝的工具管道、能力 seam 三件套、自研插件总线,66 项功能分 6 阶段推进,产出 60 份文档 1.24MB(含 32 份编码规格/313 函数),每阶段可运行可演示,最终形态是双击即用的 Windows 桌面程序,带 Agent 干活轨迹回放。代码和全套规格文档都在 GitHub。"
 
 ## 关联
-- 需求文档.md / 架构设计.md(早期草案,PRD-Core.md 为准)
+- [需求基线](PRD-Core.md) / [架构决策](ADD.md)
 - TECH-ANCHOR.md(根目录,技术锚定 + 变更记录)
-- pyharness/(代码,按 specs/ 顺序实现中)
+- ../pyharness/（当前实现）

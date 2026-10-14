@@ -33,7 +33,7 @@
 
 **Repudiation(抵赖)**:R-1 执行无 guard 记录(插件绕 execute 自执行)→ INV-04+F031 自检兜底。R-2 人类否认批准 → approval.* 含 by 且强同步落盘。R-3 AI 否认被拦 → 主场景三条 guard.rejected+拒绝后无 tool.result,可证明(INV-05)。
 
-**信息泄露(模型上下文本身是泄露通道)**:I-1 凭据入上下文并外发 → g-credential-read+g-fs-path 拒+脱敏 INV-09(R5)。I-2 越权读隐私文件 → R7 workspace 几何边界(POL-FS-1/2/3)。I-3 spill 泄露 → 私有区权限 600+随会话清理(F039)。I-4 审计日志本身敏感 → 权限 600、不进版本库、按策略清理(§8.4)。
+**信息泄露(模型上下文本身是泄露通道)**:I-1 凭据入上下文并外发 → g-credential-read+g-fs-path 拒+脱敏 INV-09(R5)。I-2 越权读隐私文件 → R7 workspace 几何边界(POL-FS-1/2/3)。I-3 spill 泄露 → POSIX 私有目录 700、文件创建即 600+随会话清理(F039)。I-4 审计日志本身敏感 → 权限 600、不进版本库、按策略清理(§8.4)。
 
 **DoS(拒绝服务)**:D-1 死循环烧钱 → R6 三闸:F007 轮数≤30(强制终态)、F032 预算硬闸(输出≤5 万 token/成本≤1 元)、F017/F025 超时(总 180s/工具 60s)+收敛检测(3 轮无新信息提前终止)。**三闸在代码里不在提示词里**。D-2 上下文爆炸 → 文件>64KB 转 spill、抓取>32KB 截断、窗口 64k 截断+compaction。D-3 子进程耗尽 → F052 无 shell/超时杀树/输出截断。D-4 重试风暴 → F028 上限 4 次退避、F013 全链失败 LLM-310 终止。
 
@@ -169,7 +169,7 @@ tool.call(danger≥high) → approval.requested(approval_id=请求 seq, args_sum
 
 **命令白名单与执行纪律(subprocess/PTY,唯一多进程出口、最高风险面)**:①双重授权——g-exec+scope 显式授权,strict 默认拒;②无 shell 解释——argv 列表传参禁 shell=True,防 shell 拼接注入;③cwd 限 workspace;④超时杀进程树(默认 60s)防孤儿;⑤输出上限 stdout 32KB/stderr 8KB 超限转 spill;⑥PTY 单例 ≤1/会话、输出按行成事件、退出必释放(F053);⑦workflow(F050)只允许调已注册能力,非任意代码模板。**白名单的本质**:不维护"允许的命令名列表"(穷举不起),而是维护**授权边界**——谁(g-exec+scope)在哪儿(cwd=workspace)能跑什么形态(argv 无 shell)。边界比名单抗绕过:名单要穷举,边界只守几个几何点。
 
-**文件影响域(workspace 几何)**:单点 resolve(F055)——所有 fs.*/workspace.* 统一经 resolve_in_workspace,POL-FS-1/2/3(绝对路径/`..`/symlink-junction 越界)归一拦截;workspace 外一律拒,显式授权只读例外须 config+guard(例外也留痕);写限 workspace 内、content>1MB 拒、覆写→g-overwrite 审批、原子写防半文件(F035);删=critical 拒,strict 下 deny_tools 再兜一层;附件(F061)魔数校验+类型白名单+sha256 寻址,防伪装文件进 workspace;spill(F039)落私有区(600),只存引用+≤2KB 摘要。
+**文件影响域(workspace 几何)**:单点 resolve(F055)——所有 fs.*/workspace.* 统一经 resolve_in_workspace,POL-FS-1/2/3(绝对路径/`..`/symlink-junction 越界)归一拦截;workspace 外一律拒,显式授权只读例外须 config+guard(例外也留痕);写限 workspace 内、content>1MB 拒、覆写→g-overwrite 审批、原子写防半文件(F035);删=critical 拒,strict 下 deny_tools 再兜一层;附件(F061)魔数校验+类型白名单+sha256 寻址,防伪装文件进 workspace;spill(F039)落私有区(目录 700、文件 600),只存引用+≤2KB 摘要。
 
 **网络影响域**:allowlist 默认空=禁一切外发(F023/N13);web_fetch 域名不在白名单→POL-NET-1;web_search ≤20 次/会话(F037)。域名归一比对使 IP 直连/编码混淆失效;DNS 重绑定列残余风险(允许域名由用户显式配置)。抓取内容经 F038 正文提取去导航/脚本→截断→spill,HTML 不入上下文。
 

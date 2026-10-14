@@ -1,7 +1,7 @@
 # specs/spill.py.md — 编码规格
 
 > **模块文件**:`pyharness/core/spill.py` | **功能编号**:F039(输出溢出 spill)· 联动 F034(读文件超 64KB)/F038(抓取超 32KB)/F052(子进程输出)/tools_executor 关4(结果 finalize)/F060(repair 读窗口) | **权威口径**:PRD-Core §5.4 F039(验收伪代码权威)、DIS-SEAM §6.1(seam A 九段式:Provider 接口/Consumer/生命周期权威)、CFG.md §3.6(storage.spill_dir=~/.pyharness/spill、spill.max_per_file_bytes=10MB)、EVENT-SCHEMA §2(tool.result.spill_ref={ref,chars,lines,preview(头500)} 字段级)、ERR.md §2.3(PERS-221/222/223);冲突以 PRD-Core 为准
-> **一句话**:工具输出溢出基础设施(基础设施型 seam,Consumer=脊柱结果检查器,LLM 不直调 put)——超限原始大文本落**会话私有 spill 区(workspace 外、权限 600)**,上下文只放 ≤2KB 摘要 + `spill_ref` 引用;模型要全文经 LLM 可见的读工具按行取回,已读量计入防循环烧预算;**截断不吞事实,溢出部分可查**(MAP §3.5)。
+> **一句话**:工具输出溢出基础设施(基础设施型 seam,Consumer=脊柱结果检查器,LLM 不直调 put)——超限原始大文本落**会话私有 spill 区(workspace 外、目录权限 700、文件权限 600)**,上下文只放 ≤2KB 摘要 + `spill_ref` 引用;模型要全文经 LLM 可见的读工具按行取回,已读量计入防循环烧预算;**截断不吞事实,溢出部分可查**(MAP §3.5)。
 > **代码目录**:`pyharness/core/spill.py`(DIS-SEAM §6.1 ⑨ 落点 core/tools.py + capabilities/storage/ 的 storage 侧实现;specs 统一落 core/,模块路径以本文件为准)。
 
 ## 模块职责
@@ -10,7 +10,7 @@
 2. **上限与摘要固定(CFG §3.6)**:spill 单文件 ≤10MB(`storage.spill.max_per_file_bytes`,默认 10485760),超限 PERS-223 拒写并回喂(上游截断/分块);摘要=头 500 字符 + 行数 + 大小(固定三要素,不随实现漂移);chars=len(text)、lines=text.count("\n")+1。
 3. **read:按行取回 + 越权零读取(PERS-222)**:LLM 经暴露工具按行读回(`ref`,`start`,`limit` 默认 0/200),返回 content + more;ref 解析强制会话私有区 containment——绝对路径/`..`/符号链接逃逸一律 PERS-222 **零读取**(同 call 无部分返回),防跨会话越权(本会话 ref 只指本会话 spill 文件)。
 4. **防循环烧预算**:每次 read 的返回字符数累入 `ctx.counters`(`spill_read_chars`),预算/轮数闸可据此终止"读全文-再读"死循环(PRD F039 边界条件;DIS-SEAM §6.1 ④)。
-5. **生命周期与清理策略**:enter=会话首访惰性建目录(workspace 外,权限 600,Windows 上 ACL 尽力而为、主防线=位置与路径 containment);detach=幂等摘除(摘读工具、释放句柄,**文件不删**——留 F060 归档/repair 读取窗口);**purge_session 订阅 session.finished 删除本会话 spill 目录**(PRD F039"spill 随会话生命周期";SECURITY I-3"随会话清理"),删除前再做 containment 校验、目录不存在幂等。
+5. **生命周期与清理策略**:enter=会话首访惰性建目录(workspace 外,目录权限 700、文件权限 600,Windows 上 ACL 尽力而为、主防线=位置与路径 containment);detach=幂等摘除(摘读工具、释放句柄,**文件不删**——留 F060 归档/repair 读取窗口);**purge_session 订阅 session.finished 删除本会话 spill 目录**(PRD F039"spill 随会话生命周期";SECURITY I-3"随会话清理"),删除前再做 containment 校验、目录不存在幂等。
 6. **出口脱敏(INV-09)**:put 落盘前对 text 执行 `ctx.redact`(F016 全出口脱敏)——spill 文件是 SECURITY §4 明文列出的出口之一,含疑似 key 原文即 INV-09 违规(构建阻断 check_secrets.py 会 grep spill 样本)。
 7. **LLM 可见面最小化**:LLM 只见"读"工具(`storage.spill`,schema=ref/start/limit);put 是 Provider 内部方法,不进工具表(DIS-SEAM §6.1 ②,防模型拿 put 当存储滥写)。
 
@@ -31,13 +31,13 @@
 | `_SessionDir` | root/spill_root/contained(realpath) | containment 单点判定,所有 ref 必经 |
 | 事件承载 | tool.result.spill_ref | {ref,chars,lines,preview};事件 payload ≤64KB(N3),spill 全文不进事件 |
 
-**常量**:`SUMMARY_PREVIEW=500`(头 500 字符);`MAX_PER_FILE` 读 `storage.spill.max_per_file_bytes`(默认 10485760);`DEFAULT_LIMIT=200`;`MODE_PRIVATE=0o600`。
+**常量**:`SUMMARY_PREVIEW=500`(头 500 字符);`MAX_PER_FILE` 读 `storage.spill.max_per_file_bytes`(默认 10485760);`DEFAULT_LIMIT=200`;`MODE_PRIVATE=0o600`(文件);`_MODE_PRIVATE_DIR=0o700`(目录)。
 
 ## 类与函数清单
 
 ### `async def enter(ctx) -> Path` — 会话首访建私有目录(F039,幂等)
 
-**功能**:惰性创建 `spill_dir/<session_id>`(workspace 外),目录权限 600;已存在则幂等返回;创建失败(PERS-221)以结构化错误上抛,由 Consumer 转 tool.error 回喂("输出归档写入失败,请重试")。
+**功能**:惰性创建 `spill_dir/<session_id>`(workspace 外),目录权限 700;已存在则幂等返回;创建失败(PERS-221)以结构化错误上抛,由 Consumer 转 tool.error 回喂("输出归档写入失败,请重试")。
 
 ```python
 async def enter(ctx):
@@ -45,11 +45,11 @@ async def enter(ctx):
     sid = ctx.session.session_id                                   # 会话隔离键
     d = root / sid
     try:
-        d.mkdir(parents=True, exist_ok=True)                       # 幂等
-        os.chmod(d, MODE_PRIVATE)                                  # 600(Windows ACL 尽力而为)
+        d.mkdir(parents=True, exist_ok=True, mode=_MODE_PRIVATE_DIR)                       # 幂等
+        os.chmod(d, _MODE_PRIVATE_DIR)                             # 700(Windows ACL 尽力而为)
     except OSError as e:
         raise PyHError("PERS-221", ctx={"dir": str(d),
-            "advice": "查 spill 目录权限(600)与磁盘空间(F039)"}) from e
+            "advice": "查 spill 目录权限(700)、文件权限(600)与磁盘空间(F039)"}) from e
     return d.resolve()                                             # 归一根,后续 containment 基准
 ```
 
@@ -59,7 +59,7 @@ async def enter(ctx):
 |---|---|---|---|
 | `PyHError` | 目录创建/权限失败 | PERS-221 | 查目录权限与空间;重试 |
 
-**关联测试**:test_f039_spill.py(目录惰性创建/会话隔离)、ERR 排障"查 spill 目录权限(600)与空间"。
+**关联测试**:test_f039_spill.py(目录惰性创建/会话隔离)、ERR 排障"查 spill 目录权限(700)、文件权限(600)与空间"。
 
 ### `async def put(text: str, kind: str, ctx) -> dict` — 超限输出落盘(F039,Consumer 唯一入口)
 
@@ -74,12 +74,16 @@ async def put(text, kind, ctx):
     text = ctx.redact(text)                                        # 出口脱敏 INV-09
     name = f"spill-{uuid4().hex[:8]}.txt"
     tmp = d / (name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="")             # 临时文件
+    with open(tmp, "x", encoding="utf-8", newline="",
+              opener=lambda path, flags: os.open(path, flags, MODE_PRIVATE)) as fh:
+        fh.write(text)                                            # 创建即 0600，独占临时文件
     os.replace(tmp, d / name)                                      # 原子替换,坏行不落地
     return {"spilled": True, "ref": f"{d.parent.name}/{name}",     # 会话内相对引用
             "chars": len(text), "lines": text.count("\n") + 1,
             "preview": text[:SUMMARY_PREVIEW]}                     # 头 500 字符固定
 ```
+
+失败只清理由本次独占创建成功的临时文件；命名碰撞时不得覆盖或删除已有文件。
 
 **参数表**:`text`=超限原始文本(已由 Consumer 判定 >2KB);`kind`=来源标注(read/fetch/exec/pty…,入文件名审计前缀可扩展);`ctx`=门面。**返回**:`SpillMeta`。**异常表**:
 
@@ -168,7 +172,7 @@ async def purge_session(session_id, ctx):
 | `PyHError` | session_id 逃逸 spill 根 | PERS-222 | 拒清理(防御纵深,正常不可达) |
 | `OSError` | 删除失败(占用/权限) | —(本地告警) | 残留文件由 F060 repair/归档兜底 |
 
-**关联测试**:test_f039_spill.py(生命周期清理:finished 后目录消失;ref 再读 → TLB-802)、SECURITY I-3(私有区权限 600+随会话清理)、EVENT-SCHEMA session.finished 订阅序。
+**关联测试**:test_f039_spill.py(生命周期清理:finished 后目录消失;ref 再读 → TLB-802)、SECURITY I-3(私有目录 700/文件 600+随会话清理)、EVENT-SCHEMA session.finished 订阅序。
 
 ### `def _resolve_ref(ref: str, ctx) -> Path | None` — ref containment 单点(PERS-222 唯一判定)
 

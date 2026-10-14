@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -98,11 +98,15 @@ class LlmRequestPayload(_PayloadBase):
     degraded_from: Optional[str] = None
     prompt_tokens: Optional[int] = Field(default=None, ge=0)
     n_tools: Optional[int] = Field(default=None, ge=0)
+    role: Optional[str] = None
+    attempt: Optional[int] = Field(default=None, ge=1)
 
 
 class LlmResponsePayload(_PayloadBase):
     """llm.response:content 与 tool_calls 至少其一(空 content=工具调用轮)。"""
     model: str = Field(min_length=1)
+    role: Optional[str] = None
+    request_seq: Optional[int] = Field(default=None, ge=1)
     finish_reason: str = Field(min_length=1)   # stop/tool_calls/length/content_filter/…
     content: str = ""
     tool_calls: Optional[list] = None          # 原生 tool_calls(id/name/arguments 原文)
@@ -115,6 +119,14 @@ class LlmResponsePayload(_PayloadBase):
         return self
 
 
+class PlatformResourcePayload(_PayloadBase):
+    """Platform resource lifecycle fact, stored in its owning SessionLog."""
+    action: str = Field(min_length=1, max_length=40)
+    record: dict
+    command_summary: str | None = None
+    exit_code: int | None = None
+
+
 class LlmUsagePayload(_PayloadBase):
     """llm.usage:计量事件;in/out_tokens ≥0(预算硬闸只用 token)。"""
     model: str = Field(min_length=1)
@@ -122,6 +134,8 @@ class LlmUsagePayload(_PayloadBase):
     out_tokens: int = Field(ge=0)
     cache_hit: Optional[int] = Field(default=0, ge=0)
     cost_est: Optional[float] = Field(default=None, ge=0)
+    estimated: bool = False
+    input_unknown: bool = False
 
 
 class LlmErrorPayload(_PayloadBase):
@@ -129,6 +143,7 @@ class LlmErrorPayload(_PayloadBase):
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     retryable: bool
+    diagnostics: Optional[dict] = None
     attempt: Optional[int] = Field(default=None, ge=0)
 
 
@@ -183,6 +198,18 @@ class ApprovalRequestedPayload(_PayloadBase):
     args_summary: str = Field(min_length=1)
     ttl_ms: int = Field(default=120_000, gt=0)
     risk: Optional[str] = Field(default=None, pattern=r"^(high|critical)$")
+    details: Optional[dict] = None
+
+
+class ApprovalReviewedPayload(_PayloadBase):
+    approval_id: int
+    call_id: str
+    reviewer: str
+    decision: Literal['approve', 'deny', 'manual']
+    reason: str
+    invocation_sha256: str
+    context_sha256: str
+    scope: dict
 
 
 class ApprovalOutcomePayload(_PayloadBase):

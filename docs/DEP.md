@@ -10,7 +10,7 @@
 
 **10 章**:1 环境准备 · 2 安装步骤 · 3 配置准备 · 4 分阶段运行指南 · 5 CLI 命令参考 · 6 故障排查 · 7 数据位置与备份 · 8 卸载/清理 · 9 面试录屏演示脚本 · 10 关联测试
 
-**命令环境约定**：本项目为独立 PyHarness，当前根目录为 `D:\zinuotiger-workspace\repositories\pyharness`。PowerShell 使用明确路径；Bash 片段仅供具备相应 shell 的环境。平台、中文与空格路径结果以本轮验收报告为准。历史阶段演示的预期输出是使用说明，不是当前运行证据。
+**命令环境约定**：本项目为独立 PyHarness，当前根目录为 `<PyHarness source directory>`。PowerShell 使用明确路径；Bash 片段仅供具备相应 shell 的环境。平台、中文与空格路径结果以本轮验收报告为准。历史阶段演示的预期输出是使用说明，不是当前运行证据。
 
 ---
 
@@ -98,7 +98,7 @@ pyharness/
 ## 2.2 使用已有仓库
 
 ```powershell
-Set-Location -LiteralPath 'D:\zinuotiger-workspace\repositories\pyharness'
+Set-Location -LiteralPath '<PyHarness source directory>'
 git rev-parse --show-toplevel
 ```
 
@@ -302,7 +302,7 @@ uv run pyharness chat --stream
 ### 4.3.3 主模型 401 自动降级 qwen-max(演示:临时把 key 改错)
 
 ```bash
-export DEEPSEEK_API_KEY="sk-wrong-key-for-demo"
+export DEEPSEEK_API_KEY="<your-api-key>"
 uv run pyharness chat --once "你好"
 ```
 

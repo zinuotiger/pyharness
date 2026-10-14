@@ -160,17 +160,7 @@ def _cfg_read(ctx: Any, dotted: str, default: Any) -> Any:
     return cur
 
 
-def _redact(ctx: Any, text: str) -> str:
-    """出口脱敏(INV-09):ctx.redact 注入面调用;未接线/失败 → 原样(读路径
-    不因脱敏中断,与 tool_fs._redact 同款;spill 落盘侧还有一层脱敏兜底)。"""
-    fn = getattr(ctx, "redact", None)
-    if not callable(fn):
-        return text
-    try:
-        return fn(text)
-    except Exception as exc:                    # noqa: BLE001 脱敏故障不阻断抓取
-        log.warning("ctx.redact 执行失败,原样返回: %s", exc)
-        return text
+from pyharness.core.tool_redaction import _redact
 
 
 def _get_secret(ctx: Any, name: str) -> Optional[str]:

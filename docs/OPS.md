@@ -6,7 +6,7 @@
 
 **8 章 + 附**:1 定位 · 2 日常操作 · 3 监控与告警 · 4 故障排查(S-01~S-09) · 5 数据管理 · 6 升级与变更 · 7 安全运维 · 8 常见坑(Windows) · 9 关联文档
 
-**命令环境约定**(同 DEP):Windows 11 + git-bash;`~` = `C:\Users\<用户名>`;项目根 = `~/Desktop/mini-harness`;统一 `uv run` 前缀(无需激活 venv);中文路径/文件原生 UTF-8。**用户数据根 `~/.pyharness`(storage.root)** 不在项目内,删项目不影响历史(DEP §7.1)。
+**命令环境约定**(同 DEP):Windows 11 + git-bash;`~` = `C:\Users\<用户名>`;项目根 = `$REPO`;统一 `uv run` 前缀(无需激活 venv);中文路径/文件原生 UTF-8。**用户数据根 `~/.pyharness`(storage.root)** 不在项目内,删项目不影响历史(DEP §7.1)。
 
 ---
 
@@ -307,7 +307,7 @@ spill 是**会话私有超大内容归档区**(读入 >64KB 转 `spill_ref`,抓�
 
 ```bash
 # ① 备份:tar -C ~ -czf ~/pre-upgrade-$(date +%F).tar.gz .pyharness
-# ② 拉新代码:cd ~/Desktop/mini-harness && git pull(或换新包)
+# ② 拉新代码:cd $REPO && git pull(或换新包)
 # ③ 依赖更新:uv sync        # .venv 不自动跟随源码,改依赖必跑(DEP §2.5)
 # ④ 配置预检:uv run pyharness config validate
 # ⑤ 冒烟:    uv run pyharness chat --once "你好"

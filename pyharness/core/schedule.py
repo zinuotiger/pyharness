@@ -219,18 +219,9 @@ class Scheduler:
                 return q
         return None
 
-    def _iter_session_events(self) -> list[Any]:
-        """会话事件流只读遍历(session.replay/events_after 语义;计数与重建共用)。"""
-        s = self.session
-        if s is None:
-            return []
-        if hasattr(s, "events_after"):        # SessionLog 增量读(seq 升序)
-            return list(s.events_after(0))
-        if hasattr(s, "replay"):              # 存储层真源回放
-            return list(s.replay())
-        if hasattr(s, "events"):              # 测试替身/轻量落点
-            return list(s.events)
-        return []
+    def _iter_session_events(self):
+        from pyharness.core.event_reader import session_events
+        return session_events(self.session)
 
     def _danger_level(self, tool: str) -> str:
         """单工具危险级解析(F023;未知工具视同 none,显式 override 由调用方把关)。"""
@@ -508,6 +499,31 @@ class Scheduler:
         sess = self._session_ctx(ctx)
         await sess.append("schedule.removed", {"name": name}, actor="system")
         self._jobs.pop(name, None)            # 事件落定 → 内存摘除(INV-01)
+
+    async def edit(self, name: str, kind: str, expr: str, intent: str, ctx: Any = None) -> None:
+        """Replace a definition atomically via one existing registration fact.
+
+        Already submitted executions retain their original intent. No remove /
+        re-register window can lose the schedule when persistence fails.
+        """
+        old=self._require(name)
+        spec=self._validate_spec(kind,expr)
+        if not isinstance(intent,str) or not intent.strip():
+            raise_code('EVT-100',field='intent')
+        template={'intent':intent.strip()}
+        first=self._first_fire(kind,expr,now())
+        risky=old.is_risky or self._derive_risky(template)
+        sess=self._session_ctx(ctx)
+        event=await sess.append('schedule.registered',{'name':name,'kind':kind,'expr':expr,
+            'template':template,'is_risky':risky,'paused':old.paused,'next_fire_at':iso(first)},actor='system',sync=True)
+        self._jobs[name]=ScheduleJob(name=name,kind=kind,expr=expr,template=template,
+            is_risky=risky,paused=old.paused,next_fire_at=first,last_fired_at=old.last_fired_at,
+            created_seq=event.seq,spec=spec)
+
+    async def run_now(self, name: str, ctx: Any = None) -> None:
+        """Explicit immediate execution through the same Schedule → TaskQueue path."""
+        job=self._require(name)
+        await self._fire(ctx,job,now())
 
     async def pause(self, name: str, ctx: Any = None) -> None:
         """暂停:到点不触发但保留定义与窗口;重复暂停幂等(无事件)。"""

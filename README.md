@@ -3,6 +3,13 @@
 > 一句话: 用 Python 复刻 DSH 全部架构思想(非源码翻译)的 Agent 框架——事件溯源会话 + 工具管道 + 自研插件总线,66 项清单按代码/入口落地,6 阶段开发,Windows 桌面程序形态;关键主链均有可重复真链探针。
 > 当前被测代码、测试统计与安装证据见 [STATUS.md](STATUS.md)。2026-09-21 的 2,110 collected / 2,106 passed / 4 skipped 及历史真实模型探针，仅适用于当时报告的版本和环境，不能代替当前验收。项目包含真实运行时、治理、持久化、CLI、ACP、Web 和原生入口；确定性模型测试不证明真实模型自主规划。
 
+## Platform Web V1
+
+`pyharness-desktop` 的 Web 首页现为真实数据驱动的中文工作台，原管理界面保留在 `/classic`。
+新平台包括会话、Run、审批、Agent 版本、Artifact、知识检索、连接与计划任务，以及默认拒绝执行的 Sandbox 策略。
+参阅 [工作台指南](docs/user-guide/web-workbench.md)、[架构与 API](docs/architecture/platform-web-v1.md)、[安全边界](docs/security/sandbox-boundary.md) 和 [本轮报告](reports/PYHARNESS-PLATFORM-WEB-V1.md)。
+当前机器的 Docker daemon 不可用；本轮没有读取用户模型凭据，真实模型和真实容器验收均准确记录为环境阻塞。`host_approved` 不具备 OS 级隔离。
+
 ## 从 Agent Demo 到 Governed Agent Runtime（从智能体演示到治理型智能体运行时）
 
 > 多数 Agent 仓库停在「能跑通一次对话」。本项目把**运行时治理**当成一等公民：工具执行经
@@ -24,7 +31,7 @@
 ## 从这里开始(Current State)
 
 > ⚠️ **当前能力与已知限制见 [LIMITATIONS.md](LIMITATIONS.md) —— 建议先读它。**
-> 仓库根目录下的 `S1_*`~`S6_*` 是**治理期阶段报告**(历史记录);`docs/baseline/*` 与 `REFACTOR_PLAN.md` 是 **S0 时点快照**。它们描述的是**当时**的形态,**不代表当前状态**。
+> 历史治理阶段报告及本机基线快照未纳入 Engineering RC 分发文件。保留的规格中如引用历史报告，属于历史来源说明；当前候选范围与运行证据见 `STATUS.md` 和 `reports/PYHARNESS-ENGINEERING-RC-20260924.md`。
 
 | 想了解 | 读 |
 |---|---|
@@ -32,15 +39,15 @@
 | 架构总览(视图) | [docs/MAP.md](docs/MAP.md) |
 | 架构决策(22 条 ADR,每条含"违反后果") | [docs/ADD.md](docs/ADD.md) |
 | 治理型运行时:目标架构与逐模块迁移映射 | [GOVERNED_AGENT_RUNTIME_DESIGN.md](GOVERNED_AGENT_RUNTIME_DESIGN.md) |
-| 面试向单点导览(不变量测试面) | [S6-2b_RELEASE_README.md](S6-2b_RELEASE_README.md) |
-| 开发过程(阶段报告) | 根目录 `S1_*`~`S6_*`(按需翻阅,**非入门必读**) |
+| 面试向单点导览(不变量测试面) | [治理不变量索引](docs/INVARIANT_REGISTRY.md) |
+| 开发过程(阶段报告) | 历史阶段记录保留于 Git 历史；当前验收见候选报告 |
 
 
 ## 治理不变量测试面(S6-2b,已冻结)
 
 > **S6-2b 是什么**:把「治理型 Agent 运行时」的 5 条架构不变量(INV-01~INV-05)转成 **31 条可执行断言**,用「若该性质被破坏,测试是否必然失败」的口径逐条证伪,并以 **14 次 mutation** 反证测试自身的鉴别力。
 > **完成了什么 / 为什么值得看**:它不只补了测试 —— 这套方法**真的抓出一条 P0 生产违约**(`auto_title` 越过 Agent Loop 直调对话出口,违反 INV-02),根因是规格指定的 `mini` 出口在实现中缺失;修复**仅 +15 行生产代码**,并以类别式出口边界(而非例外名单)固化。
-> 冻结锚点 `a0c0917` · 完整导览:**[S6-2b_RELEASE_README.md](S6-2b_RELEASE_README.md)**
+> 冻结锚点 `a0c0917` · 完整导览:**[治理不变量索引](docs/INVARIANT_REGISTRY.md)**
 
 ## 架构图
 
@@ -190,9 +197,9 @@ Web 仅监听 `127.0.0.1`、`localhost`、`::1`；localhost 归一到 IPv4，IPv
 "我完整分析了 DeepSeek Harness(9,044 文件),然后用 Python 全功能复刻了它的架构——事件溯源会话日志、guard 单调拒绝的工具管道、能力 seam 三件套、自研插件总线,66 项功能分 6 阶段推进,产出 60 份文档 1.24MB(含 32 份编码规格/313 函数),每阶段可运行可演示,最终形态是双击即用的 Windows 桌面程序,带 Agent 干活轨迹回放。代码和全套规格文档都在 GitHub。"
 
 ## 关联
-- 需求文档.md / 架构设计.md(早期草案,PRD-Core.md 为准)
+- [需求基线](docs/PRD-Core.md) / [架构决策](docs/ADD.md)
 - TECH-ANCHOR.md(根目录,技术锚定 + 变更记录)
-- pyharness/(代码,按 specs/ 顺序实现中)
+- pyharness/（当前实现；具体已验证范围见 STATUS.md）
 
 ---
 

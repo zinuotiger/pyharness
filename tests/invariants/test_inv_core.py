@@ -64,18 +64,27 @@ def test_inv02_no_direct_conversation_entry_call():
 def test_inv02_loop_is_the_only_dynamic_entry_dispatcher():
     """INV-02(静态):`getattr(ctx.llm, <method>)` 动态派发**仅**允许在 agent_loop 内。
 
-    这是 agent-loop 调用对话出口的真实形态(`agent_loop.py:240-241`),也是
+    这是 AgentLoop.run_turn 调用对话出口的真实形态,也是
     "唯一合法调用方 = agent-loop"这一表述的**可验证实现形式**。
     """
     sites = []
     for p, src in _iter_sources():
-        for n in ast.walk(ast.parse(src)):
+        tree = ast.parse(src)
+        parents = {child: parent for parent in ast.walk(tree)
+                   for child in ast.iter_child_nodes(parent)}
+        for n in ast.walk(tree):
             if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == "getattr" and n.args
                     and isinstance(n.args[0], ast.Attribute)
                     and n.args[0].attr == "llm"):
-                sites.append(f"{p.relative_to(_ROOT).as_posix()}:{n.lineno}")
-    assert sites == ["pyharness/core/agent_loop.py:241"], (
+                owner = parents.get(n)
+                while owner is not None and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    owner = parents.get(owner)
+                sites.append((p.relative_to(_ROOT).as_posix(),
+                              owner.name if owner is not None else None,
+                              ast.dump(n.args[0])))
+    assert sites == [("pyharness/core/agent_loop.py", "run_turn",
+                      "Attribute(value=Name(id='ctx', ctx=Load()), attr='llm', ctx=Load())")], (
         "INV-02 违约:llm 门面的动态派发点不在 agent_loop 唯一位置 -> " + str(sites))
 
 
@@ -262,6 +271,8 @@ def test_inv01_append_only_predicate_detects_rewrite(tmp_path):
 # 白名单为**文件级**(不锁行号 ⇒ 不因文件上方增删而误报),且**双向校验**:
 # 既查"有写站点但未登记",也查"已登记但已无写站点"(防白名单过期)。
 _WRITE_ALLOWLIST = {
+    'core/sandbox.py': 'Bounded private Git input extraction, never a message history store.',
+    "application/platform_service.py": "Platform V1 uploaded artifact bytes; metadata is recorded in the existing owning SessionLog, never a second message history",
     "core/pty.py": "已禁用 PTY 的遗留 fd 写入是终端管道，非会话历史",
     "persistence.py": "SessionStore 追加句柄(open 'a')+ repair 专用原子截断重写"
                       "(_rewrite_without_tail:临时文件+fsync+rename,逐字节保留全部完整行)",
@@ -933,7 +944,7 @@ async def _inv05_reject(case: str, tmp_path):
         verdict = None
     elif case == "guard":                                  # 越出 workspace ⇒ g-fs-path
         name, raw, danger, allowed = ("fs.read_file",
-                                      {"path": "C:/Windows/win.ini"}, "none", None)
+                                      {"path": str(tmp_path.parent / (tmp_path.name + "-outside") / "win.ini")}, "none", None)
         verdict = None
     elif case == "critical":
         name, raw, danger, allowed = "fs.delete_file", {"path": "a.txt"}, "critical", None
@@ -1026,7 +1037,7 @@ async def test_inv05_reject_flush_failure_does_not_reach_provider(tmp_path):
     reg = _inv05_registry(prov, name="fs.read_file")
     with pytest.raises(Exception):
         await ToolExecutor(reg).execute(
-            _inv04_call(raw={"path": "C:/Windows/win.ini"}, call_id="c-fail"), ctx)
+            _inv04_call(raw={"path": str(tmp_path.parent / (tmp_path.name + "-outside") / "win.ini")}, call_id="c-fail"), ctx)
 
     assert prov.calls == 0, "落盘失败后 Provider 绝不能被调用(fail-closed)"
     assert not sess.of("tool.result")

@@ -35,6 +35,17 @@ def _create_window(wv: Any, app: DesktopApp, bridge: DesktopBridge):
         window.events.closing += lambda: app.request_shutdown()
     except Exception:                                   # noqa: BLE001 假窗/旧版无事件面
         log.debug("window.events.closing 不可用,关窗停服由 bridge.on_close 承担")
+    def visibility(hidden):
+        def notify(*args):
+            try:
+                window.evaluate_js("window.dispatchEvent(new CustomEvent('pyharness-host-visibility',{detail:{hidden:"
+                                   + ('true' if hidden else 'false') + "}}))")
+            except Exception:
+                log.debug('Appearance visibility notification unavailable')
+        return notify
+    for name, hidden in [('minimized',True),('hidden',True),('restored',False),('shown',False)]:
+        event = getattr(getattr(window, 'events', None), name, None)
+        if event is not None: event += visibility(hidden)
     return window
 
 

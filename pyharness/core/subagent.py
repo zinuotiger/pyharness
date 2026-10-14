@@ -187,18 +187,7 @@ class SubagentStatus:
 
 
 # ------------------------------------------------------------------ 文本辅助
-def render_result_text(raw: Any) -> str:
-    """子执行器原始返回 → 统一文本(dict/list JSON 序列化;str 原样;None → 空)。"""
-    if isinstance(raw, str):
-        return raw
-    if raw is None:
-        return ""
-    if isinstance(raw, (dict, list)):
-        try:
-            return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            return str(raw)
-    return str(raw)
+from pyharness.core.result_text import render_result_text
 
 
 def summarize(out: Any, max_chars: int = SUMMARY_MAX_CHARS) -> str:
@@ -294,6 +283,10 @@ class SubagentManager:
         self._entered: bool = False             # enter 完成标记(幂等闸)
         self._announced: bool = False           # announce 完成标记(幂等闸)
         self._children: dict[str, ChildHandle] = {}
+        # Bounded immutable results, never completed tasks/session/scope handles.
+        from collections import OrderedDict
+        self._completed = OrderedDict()
+        self._completed_limit = 128
         self._sem = asyncio.Semaphore(self._max_concurrent)  # 结构表字段(计数闸见偏离 4)
         self._active: int = 0                   # 并发计数(真源;BUSY 拒新判定)
         self._sub_seq = itertools.count(1)      # 子 id 单调源
@@ -412,11 +405,19 @@ class SubagentManager:
                          session=child_session,
                          # 继承父预算计数器:子 agent 用量并入同一预算闸(P2 修复,
                          # 此前 None → 子 scope 预算恒 ok,烧钱无感)
-                         counters=getattr(parent_scope, "_counters", None),
+                         counters=self._child_counters(parent_scope, limits),
                          bus=getattr(self, "_bus", None))
         except Exception as exc:                            # noqa: BLE001
-            log.warning("子 scope 构造失败 sub=%s: %s(降级 None)", sub_id, exc)
-            return None
+            raise PyHError('GRD-403', ctx={'reason': 'child_scope_unavailable'}) from exc
+
+    @staticmethod
+    def _child_counters(parent_scope, limits):
+        from pyharness.core.llm import UsageCounters
+        parent = getattr(parent_scope, '_counters', None)
+        if isinstance(parent, UsageCounters):
+            parent._limits = parent_scope.limits
+            return parent.new_task(limits, parent=parent)
+        return parent
 
     # ============================================================ 事件写口
     async def _write_event(self, type_: str, payload: dict, *, actor: str,
@@ -784,7 +785,7 @@ class SubagentManager:
         # ④ 预算 = 父 × spec.budget_ratio(计入父任务:charge_hook 注入位,偏离 3)
         parent_scope = self._parent_scope
         if ctx is not None:
-            parent_scope = parent_scope or getattr(ctx, "scope", None)
+            parent_scope = getattr(ctx, "scope", None) or parent_scope
         limits = None
         if parent_scope is not None:
             limits = _scale_limits(getattr(parent_scope, "limits", None),
@@ -800,6 +801,12 @@ class SubagentManager:
             if callable(factory):
                 child_scope = factory(parent_scope, sub_id, child, limits,
                                       spec.deny_extra)
+            if parent_scope is not None and child_scope is None:
+                raise PyHError('GRD-403', ctx={'reason': 'child_scope_unavailable'})
+            if child_scope is not None and spec.tools_subset is not None:
+                permitted = set(spec.tools_subset)
+                inherited = getattr(child_scope.policy, 'allowed_tools', None)
+                child_scope.policy.allowed_tools = permitted if inherited is None else permitted & inherited
             anchor = self._parent_anchor(ctx)
             # 子会话引导(独立 seq=1;真实 JSONL 由装配注 persistence)
             await self._bootstrap_child(child, sub_id)
@@ -921,19 +928,51 @@ class SubagentManager:
             self._release_slot()
         if self._children.get(h.sub_id) is h:
             self._children.pop(h.sub_id, None)
+            self._completed[h.sub_id] = (h.state, h.summary, h.error_code)
+            while len(self._completed) > self._completed_limit:
+                self._completed.popitem(last=False)
+            if h.result is not None and h.result.done() and not h.result.cancelled():
+                h.result.exception()  # Retrieve failures even without a waiting join.
+
+    def _historic_result(self, sub_id):
+        """Only owned child IDs may be recovered from this parent's event log."""
+        events = list(self._ensure_session().events_after(0))
+        if not any(e.type == 'subagent.spawned' and e.payload.get('sub_id') == sub_id for e in events):
+            return None
+        for event in reversed(events):
+            p = event.payload
+            if p.get('sub_id') == sub_id:
+                if event.type == 'subagent.joined':
+                    return ('done', p['summary'], None)
+                if event.type == 'subagent.failed':
+                    import re
+                    match = re.match(r'\[([A-Z]+-\d+)\]', p.get('summary', ''))
+                    return ('failed', None, match[1] if match else 'CYC-999')
+            if event.type == 'system.cancelled' and p.get('what') == 'subagent:'+sub_id:
+                return ('cancelled', None, None)
+        reader = getattr(self._runner, 'completed_result', None)
+        return reader(sub_id) if callable(reader) else None
 
     # ============================================================ 结果回收
     async def join(self, sub_id: str, *, timeout: Optional[float] = None,
                    ctx: Any = None) -> Optional[str]:
         """主循环 await 子任务终态取回摘要:成功 → summary(≤2KB);失败 → raise 原
         PyHError(回喂可行动文本);timeout → None(调用方决定再等/取消/先干别的);
-        子不存在/已回收 → EVT-101(spawn 返回值才是合法 sub_id;结果只可 join 一次)。
+        Completed results support repeated join; evicted entries use owned history.
         """
         h = self._children.get(sub_id)
         if h is None:
+            result = self._completed.get(sub_id) or self._historic_result(sub_id)
+            if result is not None:
+                state, summary, code = result
+                if state == 'cancelled':
+                    raise asyncio.CancelledError
+                if state == 'failed':
+                    raise PyHError(code or 'CYC-999')
+                return summary
             raise_code("EVT-101", sub_id=sub_id,
-                       hint="sub_id 不存在或已回收",
-                       advice="spawn 返回值才是合法 sub_id;结果只可 join 一次")
+                       hint="sub_id 不存在或没有可恢复的终态",
+                       advice="使用本会话 spawn 返回的子任务 ID")
         if h.state in ("spawning", "running"):
             h.state = "joining"                 # 等待期状态(ChildState 词表)
         try:
@@ -1069,7 +1108,13 @@ class SubagentSpawnProvider:
             notify=(True if args.get("notify") is None
                     else bool(args.get("notify"))))
         sub_id = await self._mgr.spawn(spec, ctx)       # 四道闸内聚(spawn 校验)
-        return await self._mgr.join(sub_id, ctx=ctx)    # 摘要 ≤2KB(join 到终态)
+        try:
+            return await self._mgr.join(sub_id, ctx=ctx)
+        except asyncio.CancelledError:
+            # This provider owns its synchronous child. Independent join timeouts
+            # still leave detached work alive; cancellation must not orphan it.
+            await self._mgr.cancel(sub_id, reason='parent-cancelled')
+            raise
 
 
 __all__ = [

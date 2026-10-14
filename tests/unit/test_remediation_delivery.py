@@ -132,6 +132,7 @@ def test_native_main_cleans_partial_initialization_and_interrupt(monkeypatch,sta
             if stage=='window':raise RuntimeError('window fault')
         def show(self):
             if stage=='show':raise RuntimeError('show fault')
+        def dispose(self):calls.append('window-dispose')
     def context():
         if stage=='config':raise RuntimeError('config fault')
         return SimpleNamespace()
@@ -142,7 +143,9 @@ def test_native_main_cleans_partial_initialization_and_interrupt(monkeypatch,sta
     monkeypatch.setattr(module,'NativeController',Controller)
     monkeypatch.setattr(module,'MainWindow',Window)
     assert module.main([])==(130 if stage=='interrupt' else 1)
-    assert calls==(['loop-close'] if stage in ('config','controller') else ['controller-close','loop-close'])
+    expected = ['loop-close'] if stage in ('config','controller') else ['controller-close','loop-close']
+    if stage in ('show','interrupt','run'):expected.insert(0,'window-dispose')
+    assert calls==expected
 
 async def test_native_controller_uses_real_application_channel(tmp_path,adapter_factory):
     from PySide6.QtWidgets import QApplication

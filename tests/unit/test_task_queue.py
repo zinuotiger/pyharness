@@ -23,7 +23,7 @@ import asyncio
 import pytest
 
 from pyharness.core.session import SessionLog
-from pyharness.core.task_queue import QueueStatus, TaskQueue
+from pyharness.core.task_queue import QueueStatus, TaskQueue, TaskResult
 from pyharness.errors import PyHError
 
 SID = "s-taskqu01"   # Envelope.session_id 需 ≥8 字符
@@ -89,6 +89,7 @@ class FakeRunner:
                 if self.exc_once:
                     self.exc = None              # 仅首任务注入故障(后续任务照常)
                 raise exc
+            return TaskResult(ok=True)
         finally:
             self.active -= 1
 

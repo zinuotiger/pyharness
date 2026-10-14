@@ -32,7 +32,7 @@ CFG.md §3.1/§3.5(llm.retry/llm.degrade/llm.probe/budget.task.* 配置键)。
 6. AdapterHealth.degraded 单次 ok 回 healthy:伪码 degraded 态永不回 healthy 属缺口
    (DIS 4.4 线性状态机 healthy→degraded→down→healthy 语义);llm.recovered 通知由
    probe_loop 按状态翻转发出(mark 保持纯状态机无副作用、无 bus 句柄依赖)。
-7. 探针 ping 超时(5s wait_for 的 TimeoutError)与非 PyHError 未预期异常同判失败
+7. 探针 ping 超时(5s deadline 的 TimeoutError)与非 PyHError 未预期异常同判失败
    (伪码异常表只列 PyHError);探针尽力而为,失败不落 llm.retry、不计 F029 用量。
 8. 降级/预算通知事件(system.error/budget.warn/llm.recovered)为尽力而为出口:
    EventBus.emit 同步返回分发协程,同步决策点 fire-and-forget(create_task 排程,
@@ -213,6 +213,7 @@ class FallbackChain:
         (或 degrade.enabled=false 主模型败)→ LLM-310 终态(err_hist 携带排查)。
         """
         err_hist: list[tuple[str, str]] = []
+        last_diagnostics = None
         enabled = bool(ctx.config.llm.degrade.enabled)
         # 降级总开关(CFG llm.degrade.enabled):关 = 只走当前 idx 适配器,败即 LLM-310
         end = len(self.chain) if enabled else min(self.idx + 1, len(self.chain))
@@ -231,6 +232,7 @@ class FallbackChain:
                                                  sleep_left=sleep_left)
             except PyHError as e:
                 err_hist.append((name, e.code))
+                last_diagnostics = e.ctx.get("diagnostics")
                 if (e.code in _DEGRADE_CODES and enabled
                         and i + 1 < len(self.chain)
                         and self._may_degrade(e, ctx)):
@@ -241,7 +243,7 @@ class FallbackChain:
                 if e.code in _DEGRADE_CODES:
                     break                     # 链尾/降级关:全链耗尽 → LLM-310(偏离 5)
                 raise                         # LLM-304 业务错等:不降级直接上抛
-        raise_code("LLM-310", err_hist=err_hist,
+        raise_code("LLM-310", err_hist=err_hist, diagnostics=last_diagnostics,
                    advice="全链失败,任务终止(不无限降级)")
 
     # ====================================================== 指数退避(F028)
@@ -265,13 +267,18 @@ class FallbackChain:
                     raise_code("CFG-601", reason="structural", adapter=name,
                                missing=method,
                                detail="适配器缺降级链请求方法")
-                return await fn(messages, tools, ctx=ctx)
+                from pyharness.core.llm_diagnostics import call_attempt
+                token = call_attempt.set(attempt + 1)
+                try:
+                    return await fn(messages, tools, ctx=ctx)
+                finally:
+                    call_attempt.reset(token)
             except PyHError as e:
                 if e.code not in _RETRYABLE_CODES:
                     raise                             # LLM-302/304:不重试
                 if attempt == n_attempts - 1:
                     # 退避预算耗尽:交 chat_with_fallback 降级决策
-                    raise_code("LLM-303", model=name, exhausted=True)
+                    raise_code("LLM-303", model=name, exhausted=True, diagnostics=e.ctx.get("diagnostics"))
                 await ctx.session.append(
                     "llm.retry",
                     {"model": name, "attempt": attempt,
@@ -281,7 +288,7 @@ class FallbackChain:
                 wait = delay * random.uniform(1 - jitter, 1 + jitter)
                 if sleep_left is not None:            # 链级退避总预算闸
                     if sleep_left[0] <= 0:
-                        raise_code("LLM-303", model=name, exhausted=True)
+                        raise_code("LLM-303", model=name, exhausted=True, diagnostics=e.ctx.get("diagnostics"))
                     wait = min(wait, sleep_left[0])
                     sleep_left[0] -= wait
                 await asyncio.sleep(wait)
@@ -348,7 +355,11 @@ class FallbackChain:
                     continue
                 prev = self.health[name].state
                 try:
-                    await asyncio.wait_for(adp.ping(), timeout=5.0)
+                    # Keep the deadline in the owner task: Python 3.11 wait_for
+                    # can lose external cancellation when its child finishes
+                    # concurrently, leaving shutdown waiting for this loop.
+                    async with asyncio.timeout(5.0):
+                        await adp.ping()
                     self.health[name].mark(True)
                 except (PyHError, asyncio.TimeoutError):
                     self.health[name].mark(False)

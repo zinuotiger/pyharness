@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from pyharness.application.platform_models import AgentDefinition
 from pyharness.core.sandbox import fail, safe_path, read_regular
@@ -10,6 +11,33 @@ from pyharness.core.provider_result import ProviderOutcome
 
 
 class PlatformRuntime:
+    async def run_task(self, event, ctx, invoke):
+        """Own platform identity, evidence, deadline and cleanup at the boundary."""
+        from pyharness.application.accounts import current_actor
+        token = current_actor.set((event.payload.get('meta') or {}).get('platform', {}).get('actor'))
+        result = None
+        raised = False
+        try:
+            async def turn():
+                await self.prepare_evidence(event, ctx)
+                return await invoke()
+            result = await asyncio.wait_for(turn(), self.definition.timeout)
+            if result is not None and result.reason == 'complete':
+                await self.finish(ctx)
+            return result
+        except BaseException:
+            raised = True
+            raise
+        finally:
+            try:
+                await self.release(ctx)
+            except Exception as exc:
+                if not raised and (result is None or result.reason == 'complete'):
+                    raise
+                logging.getLogger(__name__).warning('cleanup after failed execution: %s', type(exc).__name__)
+            finally:
+                current_actor.reset(token)
+
     def __init__(self, platform, definition: AgentDefinition, session_id: str):
         self.platform = platform
         self.definition = definition
@@ -242,7 +270,7 @@ class PlatformRuntime:
         if changes:
             await self.platform.record_generated(ctx,'changes.patch',''.join(patch).encode(),manifest=changes,validation_status=validation)
         if commands:
-            await self.platform.record_generated(ctx,'test-report.json',json.dumps(commands,ensure_ascii=False,indent=2).encode())
+            await self.platform.record_generated(ctx,'test-report.json',json.dumps(commands,ensure_ascii=False,indent=2).encode(),validation_status=validation)
 
     async def release(self, ctx):
         task = str(ctx.task_id or '')
@@ -364,6 +392,9 @@ class PlatformRuntime:
         self.model_identity={'id':self.definition.model_connection or state['active'],
             'model':getattr(adapter,'model',spine.settings.llm.model),'base_url':spine.settings.llm.base_url,
             'fallback_models':list(spine.settings.llm.fallback_models or [])}
+        if self.definition.executor == 'codex':
+            self.model_identity = {'id':None,'model':self.definition.codex_model or 'codex_default',
+                                   'base_url':None,'fallback_models':[]}
         async def boundary_only(args,ctx):
             fail('platform_runtime_required')
         aliases={'file.read':('fs.read_file','low'),'file.write':('fs.write_file','high'),'file.list':('fs.list_dir','low')}
@@ -379,7 +410,7 @@ class PlatformRuntime:
             spine.tool_registry.register_tool(ToolDefinition(name=name,description='Replace one exact text occurrence in the private workspace',owner='builtin',danger='high',approval='always',
                 schema={'type':'object','properties':{k:{'type':'string'} for k in ('path','old','new')},'required':['path','old','new'],'additionalProperties':False}),provider=boundary_only)
         # Narrow the existing Scope; never broaden an existing denial.
-        all_names = list(spine.tool_registry._tools)
+        all_names = spine.tool_registry.names()
         for name in ('fs.read_file','fs.list_dir','fs.write_file','fs.patch','file.read','file.list','file.write','file.patch'):
             if spine.tool_registry.has(name):
                 definition=spine.tool_registry.lookup(name)
@@ -403,6 +434,7 @@ class PlatformRuntime:
             skill=spine.skills.load(name)
             spine.sysprompt.template.parts.insert(1,TemplatePart('text',body=str(skill.get('content') or skill.get('body') or '')))
         spine.platform_runtime = self
+        spine.task_lifecycle = self
         spine.approval._platform_runtime = self
         # Chat cards authorize one call, even if another call has identical args.
         spine.approval._merge_window_ms = 0

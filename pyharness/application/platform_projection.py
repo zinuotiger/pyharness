@@ -8,6 +8,22 @@ from pyharness.core.llm_diagnostics import public_diagnostics
 
 TERMINAL = {"completed", "failed", "cancelled"}
 
+
+def task_events(events, task_id):
+    """Resolve legacy untagged facts only within their explicit segment fence."""
+    active = None
+    for event in events:
+        payload = event.payload
+        if event.type == 'segment.start':
+            active = payload.get('task_id')
+        owner = getattr(event,'task_id',None) or payload.get('task_id')
+        if event.type == 'user.message':
+            owner = (payload.get('meta') or {}).get('platform',{}).get('task_id') or owner
+        if (owner or active) == task_id:
+            yield event
+        if event.type == 'segment.end':
+            active = None
+
 def error_kind(code):
     if str(code).startswith("LLM-"): return "model"
     if str(code).startswith("APR-"): return "approval"
@@ -97,6 +113,7 @@ def project(session_id, events, live_tasks=(), *, trace_run_id=None, trace_limit
             meta = bindings.get(task, default_binding)
             runs[task] = Run(run_id=f'{session_id}~{task}', session_id=session_id, task_id=task,
                 queued_at=e.ts,
+                executor=meta.get('definition',{}).get('executor','engine'),
                 name=summary(meta.get('name', task), 120), agent_id=meta.get('agent_id'),
                 agent_version=meta.get('agent_version'), retry_count=meta.get('retry_count', 0))
         if kind == 'segment.start' and task not in active:
@@ -119,6 +136,11 @@ def project(session_id, events, live_tasks=(), *, trace_run_id=None, trace_limit
             (role is None and str(p.get('code', '')).startswith('LLM-') and current is not None))
         if run:
             if kind == 'agent.message': successful.add(current)
+            if kind == 'executor.event' and p.get('action') == 'turn_completed' and p.get('record',{}).get('status') == 'completed':
+                successful.add(current)
+            if kind == 'executor.event' and p.get('action') == 'usage':
+                usage_counts[current] = usage_counts.get(current,0)+1
+                run.token_usage += p['record'].get('input_tokens',0)+p['record'].get('output_tokens',0)
             if kind == 'llm.request':
                 requests[current] = requests.get(current, 0) + 1
                 last_request[current] = {'request_seq': e.seq, 'model': p.get('model')}
@@ -199,9 +221,15 @@ def project(session_id, events, live_tasks=(), *, trace_run_id=None, trace_limit
             step = steps[cid]
             step.status = 'completed' if kind == 'tool.result' and p.get('ok') else 'failed'
             step.finished_at = e.ts
-        if (kind == 'system.error' or kind.startswith(('tool.', 'llm.', 'approval.', 'decision.', 'platform.', 'agent.'))) and kind not in ('llm.chunk',):
+        if (kind == 'system.error' or kind.startswith(('task.', 'executor.', 'tool.', 'llm.', 'approval.', 'decision.', 'platform.', 'agent.'))) and kind not in ('llm.chunk',):
             # Never expose llm.request/response bodies or private reasoning fields.
             public = {k: p[k] for k in ('name','code','reason','ok','model','in_tokens','out_tokens','cost_est') if k in p}
+            if kind == 'executor.event':
+                public = {'executor':p['executor'],'action':p['action'],
+                    'record':redact(p['record'])}
+            if kind == 'platform.artifact':
+                public = {'action':p['action'], **{k:p.get('record',{}).get(k)
+                    for k in ('artifact_id','filename','size','validation_status')}}
             if kind=='platform.sandbox':
                 record=p.get('record',{})
                 public.update({k:record[k] for k in ('sandbox_id','backend','status','network','cpus','memory_mb','pids_limit') if k in record})

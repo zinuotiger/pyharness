@@ -60,299 +60,31 @@ from typing import Any, Optional, TextIO, Union
 
 from pyharness.errors import PyHError, raise_code
 
-log = logging.getLogger("pyharness.acp")
 
 # ------------------------------------------------------------ 协议常量
-PROTOCOL_VERSION = "1.0"
-BRIDGE_METHODS: list[str] = ["initialize", "chat", "approve",
-                             "read_events", "shutdown"]
-MAX_EVENT_LIMIT = 500          # read_events 单批上限(锁死)
-DEFAULT_EVENT_LIMIT = 200      # read_events 缺省批量
 
 # 热路径引擎码:错误只留 code+advice,不加 detail(ADR-011 远端最小化)
-_HOT_CODES = frozenset({"GRD-401", "GRD-403", "LLM-310", "PERS-202"})
 
 # 疑似敏感键名(redact 命中即打码,INV-09 不泄密)
-_SENSITIVE_KEY_HINTS = ("secret", "token", "apikey", "api_key", "password",
-                        "credential", "private", "key")
 
 
 # ------------------------------------------------------------ 数据结构
-@dataclass
-class JsonRpcRequest:
-    """入站请求:jsonrpc 恒 "2.0";id 缺失/None = 通知(不回响应)。"""
-
-    jsonrpc: str = "2.0"
-    id: Optional[Union[int, str]] = None
-    method: str = ""
-    params: dict = field(default_factory=dict)
-
-
-@dataclass
-class AcpState:
-    """连接会话态(桥进程内):cursor = 已投递事件最大 seq(游标订阅只进不退)。
-
-    _bound_log 为实现附加(偏离 10:会话同柄缓存,非 spec 字段);bridge_ref 记装配
-    引用(ctx/shell),当前未消费,保留字段供上层审计。
-    """
-
-    client_id: str
-    session_id: Optional[str] = None
-    cursor: int = 0
-    busy: bool = False
-    bridge_ref: Any = None
-    notify_shutdown: bool = False          # shutdown 请求/通知 → 净退旗标
-    _bound_log: Any = field(default=None, repr=False)
 
 
 # ------------------------------------------------------------ 流式 IO 辅助
-def _write_line(out: Optional[TextIO], obj: dict) -> None:
-    """协议行写 stdout:每次写+flush(双工实时);buffer 优先(UTF-8 字节)。"""
-    stream = out if out is not None else sys.stdout
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
-    buf = getattr(stream, "buffer", None)
-    if buf is not None:                    # 真实 stdout:UTF-8 字节,免控制台编码坑
-        buf.write(line.encode("utf-8"))
-        buf.flush()
-    else:                                  # StringIO 等注入替身:文本直写
-        stream.write(line)
-        stream.flush()
-
-
-async def _readline_async(stream: Any) -> Optional[str]:
-    """异步逐行读 stdin(to_thread 让出事件循环,审批 TTL 等定时器不饿死)。"""
-
-    def _read() -> str:
-        try:
-            return stream.readline()
-        except (ValueError, OSError):
-            return ""                       # 流损坏按 EOF 处理(serve 记日志退 1)
-
-    line = await asyncio.to_thread(_read)
-    if not line:                            # EOF(上游关闭管道)→ 净退
-        return None
-    return line
 
 
 # ------------------------------------------------------------ 响应构造
-def error_resp(rid: Optional[Union[int, str]], code: int, message: str,
-               data: Optional[dict] = None) -> dict:
-    """JSON-RPC 错误响应(标准码直构;data 可选)。"""
-    body: dict[str, Any] = {"code": code, "message": message}
-    if data:
-        body["data"] = data
-    return {"jsonrpc": "2.0", "id": rid, "error": body}
-
-
-def _redact(ctx: dict) -> dict:
-    """ctx 脱敏(INV-09):疑似敏感键打码,值截断 200 字符,嵌套只留类型标记。"""
-    out: dict[str, Any] = {}
-    for k, v in (ctx or {}).items():
-        if any(hint in str(k).lower() for hint in _SENSITIVE_KEY_HINTS):
-            out[str(k)] = "[redacted]"
-        elif isinstance(v, (str, int, float, bool)) or v is None:
-            out[str(k)] = str(v)[:200] if isinstance(v, str) else v
-        else:
-            out[str(k)] = f"<{type(v).__name__}:{len(v)}>" if hasattr(
-                v, "__len__") else f"<{type(v).__name__}>"
-    return out
-
-
-def engine_error(rid: Optional[Union[int, str]], e: PyHError) -> dict:
-    """引擎错 → -32603 壳 + data={code,message,advice}(ADR-011 远端只回 code+advice)。
-
-    热路径码(GRD-401/403/LLM-310/PERS-202)不加 detail;其余码的 ctx 经 _redact
-    后才进 detail——远端绝不见 ctx 敏感值/密钥原文。
-    """
-    body: dict[str, Any] = {"code": e.code, "message": e.message,
-                            "advice": e.spec.advice}
-    if e.code not in _HOT_CODES:
-        body["detail"] = _redact(e.ctx or {})
-    return error_resp(rid, -32603, e.message, body)
 
 
 # ------------------------------------------------------------ 会话门面适配
-async def _maybe_await(res: Any) -> Any:
-    """同步/异步兼容调用(引擎各面注入形状不一,commands.py/task_queue.py 同款先例)。"""
-    if inspect.isawaitable(res):
-        return await res
-    return res
-
-
-async def _create_session(ctx: Any) -> str:
-    """新建会话(initialize 无 sessionId 路径):委托 ctx.session.create()。
-
-    门面缺 create(如 ctx.session 即已绑定日志)→ EVT-106 明确报错(偏离 1:
-    绝不静默自建,防伪造会话状态)。
-    """
-    mgr = getattr(ctx, "session", None)
-    fn = getattr(mgr, "create", None)
-    if not callable(fn):
-        raise_code("EVT-106", hint="会话门面未装配 create(桥无法新建会话);"
-                   "显式传 sessionId 绑定既有会话")
-    sid = await _maybe_await(fn())
-    if not isinstance(sid, str) or not sid.strip():
-        raise_code("EVT-106", session_id=sid,
-                   hint="会话门面 create 返回非法 sid(须非空字符串)")
-    return sid
-
-
-async def _open_session(ctx: Any, sid: str) -> Any:
-    """绑定既有会话(重放重建):委托 ctx.session.open_session(sid)。
-
-    两种注入形状(偏离 1):(a) 门面 open_session → 委托;(b) ctx.session 即已绑定
-    会话日志且 sid 匹配 → 直用;均不可达 → EVT-106(先 initialize 或注入门面)。
-    """
-    mgr = getattr(ctx, "session", None)
-    if mgr is None:
-        raise_code("EVT-106", session_id=sid,
-                   hint="会话未装配(ctx.session=None);先 initialize")
-    fn = getattr(mgr, "open_session", None)
-    if callable(fn):
-        return await _maybe_await(fn(sid))
-    if getattr(mgr, "sid", None) == sid:   # ctx.session 即当前会话日志
-        return mgr
-    raise_code("EVT-106", session_id=sid,
-               hint="会话门面未装配 open_session 且 ctx.session 未绑定该 sid;"
-                    "先 initialize 或注入门面")
-
-
-async def _ensure_bound(ctx: Any, st: AcpState,
-                        sid_param: Any) -> tuple[Any, str]:
-    """解析当前操作会话:同柄复用,异柄重开;未初始化/无参数 → EVT-106。"""
-    sid = sid_param if sid_param is not None else st.session_id
-    if not sid:
-        raise_code("EVT-106", hint="会话未就绪:先 initialize"
-                   "(或请求带 sessionId)")
-    if not isinstance(sid, str) or not sid.strip():
-        raise_code("EVT-100", field="sessionId", session_id=sid,
-                   hint="sessionId 须非空字符串")
-    log_ = st._bound_log                     # 同柄缓存(INV-03,偏离 10)
-    if log_ is None or getattr(log_, "sid", None) != sid:
-        log_ = await _open_session(ctx, sid)
-        st._bound_log = log_
-    return log_, sid
-
-
-def _closed_of(log_: Any) -> bool:
-    """会话是否终态:stats()["closed"] 权威;缺 stats 面回退私有位(纯只读判读)。"""
-    stats = getattr(log_, "stats", None)
-    if callable(stats):
-        try:
-            return bool(stats().get("closed", False))
-        except Exception:                    # noqa: BLE001 门面异常 → 视为未终态
-            pass
-    return bool(getattr(log_, "_closed", False))
-
-
-def _last_seq_of(log_: Any) -> int:
-    """会话当前最大 seq(seq_range 上界;stats 缺面回退尾事件遍历)。"""
-    stats = getattr(log_, "stats", None)
-    if callable(stats):
-        try:
-            return int(stats().get("seq", 0) or 0)
-        except Exception:                    # noqa: BLE001
-            pass
-    last = 0
-    for env in _iter_log(log_):
-        last = env.seq
-    return last
-
-
-def _iter_log(log_: Any):
-    """会话事件迭代(events_after(0) 全量;门面无该面时为空)。"""
-    ea = getattr(log_, "events_after", None)
-    if callable(ea):
-        yield from ea(0)
-    return
-
-
-def _env_dict(env: Any) -> dict:
-    """Envelope → 协议事件 dict(偏离 6:model_dump 序列化,十字段全量)。"""
-    dump = getattr(env, "model_dump", None)
-    if callable(dump):
-        return dump(exclude_none=True)
-    # 兜底:手工投影(非 pydantic 信封的注入替身)
-    return {k: getattr(env, k) for k in
-            ("seq", "ts", "type", "session_id", "actor", "origin",
-             "task_id", "payload", "trace")
-            if getattr(env, k, None) is not None}
 
 
 # ------------------------------------------------------------ 方法实现
-async def _ensure_repaired(ctx: Any, sid: str) -> None:
-    """启动/绑定会话的 repair 前置(F060;偏离 8:pyharness.repair 未落地)。
-
-    装配方注入 ctx.repair.ensure_repaired(sid) 后自动生效(损坏先修再 open);
-    未装配 = 跳过——PERS-201 坏行仍由 open_session 回放记跳隔离,不阻断启动。
-    """
-    repair = getattr(ctx, "repair", None)
-    fn = getattr(repair, "ensure_repaired", None)
-    if callable(fn):
-        await _maybe_await(fn(sid))
 
 
-def _set_channel(ctx: Any, st: AcpState) -> None:
-    """ctx.channel = "acp:<client_id>":桥即人类审批通道(非 headless)。
-
-    命令面/审批面据此判定交互通道存在(R8/APR-501);仅当 ctx 允许赋值时生效
-    (未装配/只读 ctx 静默跳过,装配层语义由 bootstrap 保证)。
-    """
-    try:
-        ctx.channel = f"acp:{st.client_id}"
-    except Exception:                        # noqa: BLE001 只读门面:跳过
-        log.debug("ctx.channel 赋值失败(只读门面?),bridge=%s", st.client_id)
-
-
-def _engine_model(ctx: Any) -> str:
-    """能力清单 model:ctx.config.llm.model(未装配配置 → 空串,不阻塞协商)。"""
-    cfg = getattr(ctx, "config", None)
-    llm = getattr(cfg, "llm", None)
-    model = getattr(llm, "model", None)
-    return str(model) if model else ""
-
-
-async def cmd_initialize(ctx: Any, st: AcpState, params: dict) -> dict:
-    """能力协商(initialize):能力清单 + 会话绑定/新建 + 通道确立。
-
-    sessionId 参数 → 绑定既有会话(repair 前置 → open → 终态 EVT-104 拒);
-    缺省 → 新建会话(session.created 由门面 create 落,created=True)。
-    st.cursor 复位 0(新连接游标从 0 起);ctx.channel = "acp:<client>"。
-    """
-    params = params or {}
-    sid = params.get("sessionId")
-    if sid is not None and (not isinstance(sid, str) or not sid.strip()):
-        raise_code("EVT-100", field="sessionId", session_id=sid,
-                   hint="sessionId 须非空字符串(缺省则新建会话)")
-    if sid:
-        await _ensure_repaired(ctx, sid)      # 损坏先 repair(F060 前置)
-        log_ = await _open_session(ctx, sid)  # 绑定既有(重放重建)
-        if _closed_of(log_):                  # 终态会话不可续 chat
-            raise_code("EVT-104", session_id=sid,
-                       advice="会话已终态(session.finished);请另开新 sessionId")
-        created = False
-    else:
-        sid = await _create_session(ctx)      # 新建会话(created seq=1)
-        created = True
-    st.session_id = sid
-    st.cursor = 0
-    st._bound_log = None                      # 绑定柄下次操作惰性解析
-    _set_channel(ctx, st)                     # 桥 = 审批通道(非 headless)
-    return {"protocolVersion": PROTOCOL_VERSION,
-            "methods": list(BRIDGE_METHODS),
-            "events": {"cursor": True},
-            "session": {"id": sid, "created": created},
-            "engine": {"model": _engine_model(ctx),
-                       "headless_channel": False}}
-
-
-def _task_enqueued_seq(log_: Any, task_id: str) -> Optional[int]:
-    """submit 后定位本任务 task.enqueued 的 seq(chat seq_range 下界)。"""
-    for env in _iter_log(log_):
-        if env.type == "task.enqueued" and env.payload.get("task_id") == task_id:
-            return env.seq
-    return None                              # 队列异会话(偏离 10)→ 未知下界
-
+from pyharness.acp_protocol import (log, PROTOCOL_VERSION, BRIDGE_METHODS, MAX_EVENT_LIMIT, DEFAULT_EVENT_LIMIT, _HOT_CODES, _SENSITIVE_KEY_HINTS, JsonRpcRequest, AcpState, _write_line, _readline_async, error_resp, _redact, engine_error, _is_id_type, parse_request)
+from pyharness.acp_sessions import (_maybe_await, _create_session, _open_session, _ensure_bound, _closed_of, _last_seq_of, _iter_log, _env_dict, _ensure_repaired, _set_channel, _engine_model, _task_enqueued_seq, close_owned_runtimes)
 
 async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
     """ACP 会话队列惰性装配:轻量 ctx(无队列/异会话队列)时接真实引擎。
@@ -419,21 +151,38 @@ async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
     return runtime.task_queue
 
 
-async def close_owned_runtimes(ctx):
-    runtimes = getattr(ctx, '_acp_runtimes', {})
-    errors = []
-    for sid, runtime in list(runtimes.items()):
-        try:
-            await runtime.engine_spine.close()
-        except BaseException as exc:
-            errors.append(exc)
-        else:
-            runtimes.pop(sid, None)
-    if getattr(ctx, '_acp_owns_llm', False):
-        try: await ctx.llm_runtime.aclose()
-        except BaseException as exc: errors.append(exc)
-    if errors:
-        raise BaseExceptionGroup('ACP runtime cleanup failed', errors)
+async def cmd_initialize(ctx: Any, st: AcpState, params: dict) -> dict:
+    """能力协商(initialize):能力清单 + 会话绑定/新建 + 通道确立。
+
+    sessionId 参数 → 绑定既有会话(repair 前置 → open → 终态 EVT-104 拒);
+    缺省 → 新建会话(session.created 由门面 create 落,created=True)。
+    st.cursor 复位 0(新连接游标从 0 起);ctx.channel = "acp:<client>"。
+    """
+    params = params or {}
+    sid = params.get("sessionId")
+    if sid is not None and (not isinstance(sid, str) or not sid.strip()):
+        raise_code("EVT-100", field="sessionId", session_id=sid,
+                   hint="sessionId 须非空字符串(缺省则新建会话)")
+    if sid:
+        await _ensure_repaired(ctx, sid)      # 损坏先 repair(F060 前置)
+        log_ = await _open_session(ctx, sid)  # 绑定既有(重放重建)
+        if _closed_of(log_):                  # 终态会话不可续 chat
+            raise_code("EVT-104", session_id=sid,
+                       advice="会话已终态(session.finished);请另开新 sessionId")
+        created = False
+    else:
+        sid = await _create_session(ctx)      # 新建会话(created seq=1)
+        created = True
+    st.session_id = sid
+    st.cursor = 0
+    st._bound_log = None                      # 绑定柄下次操作惰性解析
+    _set_channel(ctx, st)                     # 桥 = 审批通道(非 headless)
+    return {"protocolVersion": PROTOCOL_VERSION,
+            "methods": list(BRIDGE_METHODS),
+            "events": {"cursor": True},
+            "session": {"id": sid, "created": created},
+            "engine": {"model": _engine_model(ctx),
+                       "headless_channel": False}}
 
 
 def _chat_summary(log_: Any, task_id: str, enq_seq: Optional[int],
@@ -631,41 +380,6 @@ async def dispatch(ctx: Any, st: AcpState, req: JsonRpcRequest) -> dict:
 
 
 # ------------------------------------------------------------ 行解析
-def _is_id_type(v: Any) -> bool:
-    """JSON-RPC id 合法型:int|str(禁 bool——bool 是 int 子类,非合法 id)。"""
-    return isinstance(v, (int, str)) and not isinstance(v, bool)
-
-
-def parse_request(line: str,
-                  *, write: Optional[TextIO] = None) -> Optional[JsonRpcRequest]:
-    """行解析(协议错 → 标准码响应就地写出并返回 None,调用方 continue)。
-
-    -32700:非法 JSON;-32600:信封非法(非对象/jsonrpc 版本/method 类型/
-    id 类型);-32602:params 非对象。id 缺失/None = 通知(id=None)。
-    """
-    try:
-        raw = json.loads(line)
-    except json.JSONDecodeError as e:
-        _write_line(write, error_resp(None, -32700, "Parse error",
-                                      {"detail": str(e)[:300]}))
-        return None
-    if (not isinstance(raw, dict)
-            or raw.get("jsonrpc") != "2.0"
-            or not isinstance(raw.get("method"), str)
-            or not raw.get("method")
-            or ("id" in raw and raw["id"] is not None
-                and not _is_id_type(raw["id"]))):
-        rid = raw.get("id") if isinstance(raw, dict) and _is_id_type(
-            raw.get("id")) else None
-        _write_line(write, error_resp(rid, -32600, "Invalid Request"))
-        return None
-    params = raw.get("params")
-    if params is not None and not isinstance(params, dict):
-        _write_line(write, error_resp(raw.get("id"), -32602,
-                                      "Invalid params"))
-        return None
-    return JsonRpcRequest(jsonrpc="2.0", id=raw.get("id"),
-                          method=raw["method"], params=params or {})
 
 
 # ------------------------------------------------------------ 主循环

@@ -60,294 +60,30 @@ from pydantic import (BaseModel, ConfigDict, Field, ValidationError, create_mode
 from pyharness.errors import PyHError, raise_code
 from pyharness.events.vocab import summarize_validation
 
+from pyharness.core.tool_definition import (log, NAME_RE, RESERVED, INJECTION_MARKERS, TOOL_REGISTERED, REGISTRY_UPDATED, DANGER_LEVELS, _raise_busy, ToolDefinition)
+from pyharness.core.tool_schema import (_sanitize, _literal_annotation, _annotation_from, _field_spec, _object_model, _compile_model)
+
 if TYPE_CHECKING:  # 仅类型标注;总线实例鸭子注入(可 None = 未接线)
     from pyharness.bus.event_bus import EventBus
 
-log = logging.getLogger("pyharness.tools_registry")
 
 # ------------------------------------------------------------------ 常量
-NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{1,63}$")
 """工具名锚定:小写字母开头,后续 a-z0-9_. ,总长 2~64(spec 字段表规则)。"""
 
 # 保留名:脊柱八模块(PRD §2.2/PARAMETER-ANCHOR;spec 内部索引表 8 项)+
 # system_prompt 下划线拼写变体(bus/registry.py 两拼写同收,口径共享,见偏离 2)。
-RESERVED: frozenset = frozenset({
-    "agent-loop", "tools", "session", "llm", "system-prompt", "system_prompt",
-    "scope", "agent", "persistence",
-})
 
 # T-07 description 防注入:能力元数据不得夹带“忽略先前指令”类改写文本(描述与
 # 执行同谓词,CONSTRAINTS-03 T-07);匹配为大小写不敏感的子串黑名单。
-INJECTION_MARKERS: tuple[str, ...] = (
-    "忽略之前", "忽略以上", "忽略先前", "忽略前面", "忽略所有之前",
-    "ignore previous", "ignore all previous", "ignore prior",
-)
-
-TOOL_REGISTERED = "tool.registered"    # 总线瞬时类型(77 词表外,见偏离 1)
-REGISTRY_UPDATED = "registry.updated"  # F003 瞬时广播(EventBus 预置类型)
-
-DANGER_LEVELS: tuple[str, ...] = ("none", "low", "high", "critical")
 
 
 # ------------------------------------------------------------- 错误辅助
-def _raise_busy(**ctx: Any) -> None:
-    """字面量 BUSY 上抛(BUSY = 无域前缀字面量码,ERR.md §2.11)。
-
-    errors.raise_code 对未登记码兜底改判 CYC-999,故 BUSY 按 spec 伪码
-    (raise PyHError("BUSY", ctx=…))直接构造——code 字段保持字面量 BUSY,
-    供调用方/测试按 .code 断言(agent.py/scope.py 同款先例)。
-    """
-    raise PyHError("BUSY", ctx=dict(ctx))
 
 
 # ------------------------------------------------------------ ToolDefinition
-class ToolDefinition(BaseModel):
-    """冻结工具契约(五要素 = name/description/schema/danger/owner+provider 载体)。
-
-    注册后不可变(frozen):改工具 = 注销重注册留痕(原则 2)。schema 为 JSON-Schema
-    dict(parameters),禁止 pydantic 模型对象混入——注册时编译 pydantic 模型(F026)。
-    描述 ≤200 字且禁注入特征(T-07);approval=never 只允许 none/low 危险级
-    (矛盾契约构造即拒)。
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    name: str                                   # ^[a-z][a-z0-9_.]{1,63}$ 全库唯一
-    description: str = Field(min_length=1, max_length=200)   # 给 LLM/人类,≤200 字
-    # JSON-Schema(parameters),注册时编译;存储字段用 schema_ 规避 pydantic 对
-    # 父类 BaseModel.schema(v1 兼容属性)的同名遮蔽警告,经 validation_alias
-    # 收 "schema" 关键字/输入键,对外属性 defn.schema 由 property 提供(偏离 5)。
-    schema_: dict[str, Any] = Field(validation_alias="schema")
-    output_schema: Optional[dict[str, Any]] = None  # 输出校验声明(executor 关4 用)
-    danger: Literal["none", "low", "high", "critical"]  # 危险级,注册后不可变
-    guard_hooks: tuple[str, ...] = ()           # 追加 guard 逻辑名(如 "g-exec"),只加严
-    approval: Literal["never", "auto", "always"] = "auto"  # auto=danger 分级裁决
-    timeout_s: int = 60                         # Provider 执行超时(F017,executor 关3)
-    owner: str                                  # 能力/插件 id 或 "builtin"/"spine"
-    ctx_path: Optional[str] = None              # 定位器键(如 tools.fs.read)
-    version: str = "1.0.0"                      # 能力版本
-
-    @property
-    def schema(self) -> dict[str, Any]:
-        """JSON-Schema 访问面(spec 字段名;消费方 defn.schema 不变)。"""
-        return self.schema_
-
-    @field_validator("name")
-    @classmethod
-    def _name_shape(cls, v: str) -> str:
-        """名称形态在模型构造期即锁死(注册层再验一次,双保险)。"""
-        if not isinstance(v, str) or not NAME_RE.fullmatch(v):
-            raise ValueError(f"工具名须匹配 {NAME_RE.pattern!r}")
-        return v
-
-    @field_validator("description")
-    @classmethod
-    def _description_clean(cls, v: str) -> str:
-        """T-07 防注入:描述含改写指令特征 → 构造即拒(registry 层同谓词)。"""
-        low = v.lower()
-        hit = next((m for m in INJECTION_MARKERS if m.lower() in low), None)
-        if hit is not None:
-            raise ValueError(f"description 含注入特征 {hit!r}(T-07 拒)")
-        return v
-
-    @model_validator(mode="after")
-    def _approval_danger_consistent(self) -> "ToolDefinition":
-        """approval=never 只允许 none/low 危险级(矛盾契约构造即拒)。"""
-        if self.approval == "never" and self.danger not in ("none", "low"):
-            raise ValueError("approval=never 只允许 danger ∈ none/low")
-        return self
 
 
 # ---------------------------------------------- schema → pydantic 编译器(F026)
-def _sanitize(part: str) -> str:
-    """名称片段清洗:非 [A-Za-z0-9_] 字符替换为 _ (防 create_model 名污染)。"""
-    return re.sub(r"[^A-Za-z0-9_]", "_", part) or "_"
-
-
-def _literal_annotation(values: list[Any]) -> Any:
-    """动态 Literal 构造(eval 受限命名空间;值不可哈希 → TypeError 上抛)。
-
-    Python 3.13 的 typing.Literal 为特殊形式,无法经 __class_getitem__ 动态
-    展开,故把值逐一 repr 成 Python 字面量后在仅含 Literal 的命名空间 eval——
-    值来自 JSON-Schema dict,repr 文本不可执行任意代码(白名单命名空间)。
-    """
-    for v in values:
-        hash(v)                     # 不可哈希(如 dict)→ TypeError → TLB-803
-    expr = "Literal[" + ", ".join(repr(v) for v in values) + "]"
-    return eval(expr, {"Literal": Literal})  # noqa: S307 受限命名空间,见上
-
-
-def _annotation_from(prop: dict[str, Any], model_name: str, key: str) -> Any:
-    """单个属性 schema → typing 注解;不支持形态抛 ValueError(TLB-803 上游收)。
-
-    顺序:const/enum(不依赖 type)→ 标量 → array → object → null → anyOf/oneOf
-    (仅“单实型 + null”组合 → Optional);组合型/allOf/$ref → ValueError 早失败,
-    不静默降级成宽松类型(坏 schema 注册期即暴露,而非调用期神秘失败)。
-    """
-    if not isinstance(prop, dict):
-        raise ValueError(f"属性 {key!r} 的 schema 须为 dict,"
-                         f"实为 {type(prop).__name__}")
-
-    # ---- const:字面量单值
-    if "const" in prop:
-        v = prop["const"]
-        if v is None:
-            return Optional[Any]
-        return _literal_annotation([v])
-
-    # ---- enum:字面量集合(允许 null 成员 → Optional)
-    if "enum" in prop:
-        vals = prop["enum"]
-        if not isinstance(vals, list) or not vals:
-            raise ValueError(f"属性 {key!r} 的 enum 须为非空 list")
-        if any(v is None for v in vals):
-            non_null = [v for v in vals if v is not None]
-            if not non_null:
-                return Optional[Any]
-            return Optional[_literal_annotation(non_null)]
-        return _literal_annotation(vals)
-
-    # ---- anyOf/oneOf:仅“单实型 + null”(OpenAI nullable 惯用形态)
-    for comb in ("anyOf", "oneOf"):
-        if comb in prop:
-            parts = prop[comb]
-            if not isinstance(parts, list) or not parts:
-                raise ValueError(f"属性 {key!r} 的 {comb} 须为非空 list")
-            real = [p for p in parts
-                    if not (isinstance(p, dict) and p.get("type") == "null")]
-            if len(real) != len(parts) - 1 or len(real) != 1:
-                raise ValueError(f"属性 {key!r} 的 {comb} 仅支持单实型+null 组合")
-            return Optional[_annotation_from(real[0], model_name, key)]
-    if "$ref" in prop or "allOf" in prop:
-        raise ValueError(f"属性 {key!r} 含 $ref/allOf,本注册表编译器不支持"
-                         "(能力包须内联展开)")
-
-    t = prop.get("type")
-    if t is None:
-        raise ValueError(f"属性 {key!r} 缺 type(且无 enum/const/组合型)")
-
-    if t == "string":
-        return str
-    if t == "integer":
-        return int
-    if t == "number":
-        return float
-    if t == "boolean":
-        return bool
-    if t == "null":
-        return type(None)
-
-    if t == "array":
-        items = prop.get("items")
-        if items is None:
-            return list[Any]                    # 合法 JSON-Schema:元素任意
-        if isinstance(items, dict):
-            return list[_annotation_from(items, model_name, f"{key}[]")]
-        raise ValueError(f"属性 {key!r} 的 items 仅支持单一 schema dict")
-
-    if t == "object":
-        props = prop.get("properties", {})
-        if not isinstance(props, dict):
-            raise ValueError(f"属性 {key!r} 的 properties 须为 dict")
-        return _object_model(f"{model_name}_{_sanitize(key)}", props,
-                             prop.get("required"))
-
-    raise ValueError(f"属性 {key!r} 的 type {t!r} 不支持")
-
-
-def _field_spec(prop: dict[str, Any], ann: Any, *,
-                required: bool) -> tuple[Any, Any]:
-    """属性约束装配 → (annotation, default);default 为 ... / 具体默认值 / Field。
-
-    映射:str maxLength/minLength → max_length/min_length、pattern;数值
-    minimum/maximum/exclusiveMinimum/exclusiveMaximum → ge/le/gt/lt;array
-    minItems/maxItems → min_length/max_length。Literal 化字段(enum/const/组合)
-    忽略标量约束(Literal 已锁值域)。约束值非法(int()/re.compile 失败)→
-    ValueError → TLB-803 早失败,不静默忽略。
-    可选字段(非 required)一律 Optional 化 + 缺省 None(schema default 优先):
-    LLM 省略可选参数不误伤,显式传 null 亦放行。
-    """
-    kw: dict[str, Any] = {}
-    t = prop.get("type")
-    literalized = any(k in prop for k in ("enum", "const", "anyOf", "oneOf"))
-    if not literalized:
-        if t == "string":
-            if "maxLength" in prop:
-                kw["max_length"] = int(prop["maxLength"])
-            if "minLength" in prop:
-                kw["min_length"] = int(prop["minLength"])
-            if "pattern" in prop:
-                re.compile(str(prop["pattern"]))   # 无效正则早失败(TLB-803)
-                kw["pattern"] = str(prop["pattern"])
-        elif t in ("integer", "number"):
-            for s_key, f_key in (("minimum", "ge"), ("maximum", "le"),
-                                 ("exclusiveMinimum", "gt"),
-                                 ("exclusiveMaximum", "lt")):
-                if s_key in prop:
-                    kw[f_key] = prop[s_key]
-        elif t == "array":
-            if "minItems" in prop:
-                kw["min_length"] = int(prop["minItems"])
-            if "maxItems" in prop:
-                kw["max_length"] = int(prop["maxItems"])
-
-    if not required:
-        if ann is not type(None):
-            ann = Optional[ann]
-        kw["default"] = prop.get("default")      # 可选字段恒有默认(缺省 None)
-        return ann, Field(**kw)
-    # 必填字段
-    if "default" in prop:
-        kw["default"] = prop["default"]
-        return ann, Field(**kw)
-    if kw:
-        return ann, Field(**kw)
-    return ann, ...
-
-
-def _object_model(model_name: str, props: dict[str, Any],
-                  required: Any) -> type[BaseModel]:
-    """properties dict → pydantic 模型(extra=forbid,恒 populate_by_name)。
-
-    属性名可为任意字符串(非标识符亦可,create_model 经 **dict 展开,实测可用;
-    model_dump 输出原名 == schema 属性名,INV-06 可逐字段比对)。required 引用
-    未知属性 / 非 list → ValueError(TLB-803 上游收)。
-    """
-    if not isinstance(props, dict):
-        raise ValueError("object 的 properties 须为 dict")
-    req = required or []
-    if not isinstance(req, list) or not all(isinstance(r, str) for r in req):
-        raise ValueError("required 须为 str 元素 list")
-    missing = [r for r in req if r not in props]
-    if missing:
-        raise ValueError(f"required 引用未知属性: {missing}")
-
-    fields: dict[str, Any] = {}
-    for key, prop in props.items():
-        ann = _annotation_from(prop, model_name, key)
-        fields[key] = _field_spec(prop, ann, required=key in req)
-    return create_model(model_name,
-                        __config__=ConfigDict(extra="forbid",
-                                              populate_by_name=True),
-                        **fields)
-
-
-def _compile_model(tool_name: str, schema: Any) -> type[BaseModel]:
-    """工具注册时的 schema 编译入口(F026 早失败;失败 ValueError → TLB-803)。"""
-    if isinstance(schema, BaseModel):
-        raise ValueError("禁止 pydantic 模型对象混入 schema(须 JSON-Schema dict)")
-    if not isinstance(schema, dict):
-        raise ValueError(f"schema 须为 JSON-Schema dict,实为 {type(schema).__name__}")
-    t = schema.get("type")
-    if t not in (None, "object"):
-        raise ValueError(f"顶层 type 须为 object(或省略),实为 {t!r}")
-    if t is None and "properties" not in schema and "required" not in schema:
-        # 顶层既无 type 也无 properties/required(如 {"path": …} 裸键)→ 非
-        # object 参数形态,拒(空参数工具应显式写 {"type": "object"})
-        raise ValueError("顶层缺 type/properties,非 object 参数形态")
-    props = schema.get("properties", {})
-    return _object_model(f"ToolArgs_{_sanitize(tool_name)}", props,
-                         schema.get("required"))
 
 
 # ------------------------------------------------------------- ToolRegistry

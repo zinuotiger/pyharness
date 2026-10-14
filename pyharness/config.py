@@ -23,12 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from pyharness.errors import ConfigError, raise_code
 
-log = logging.getLogger("pyharness.config")
-
 
 # ===================================================================== 常量
 # ---------------------------------------------------------- L1 权威默认值
 # CFG.md §3 默认值列的唯一落地;禁读环境/文件生成(可复现);任意键缺省必可加载。
+from pyharness.config_models import (UnitPriceCfg, _default_unit_price, TimeoutCfg, RetryCfg, DegradeCfg, ProbeCfg, UsageCfg, LlmCfg, CompactCfg, ContentCfg, NetworkCfg, PolicyCfg, GuardsCfg, ApprovalCfg, TrustlistCfg, AttachmentCfg, BudgetTaskCfg, MonthlyCfg, BudgetCfg, LogJsonlCfg, LogCfg, StorageJsonlCfg, SpillCfg, FtsCfg, StorageCfg, McpServerCfg, SkillsCfg, ShellWebCfg, ShellAcpCfg, ShellCfg)
+from pyharness.config_values import log, RUNTIME_MUTABLE, BUILTIN_GUARDS, _SECRET_RE, _SECRET_KEYS, _TOOL_DANGER_BASELINE, _DANGER_RANK, _SECRET_KEY_HINTS, deep_merge, flatten, set_dotted, get_dotted, _set_dotted_new, yaml_load_file, collect_config_files, load_file_layer, parse_env_value
+
 DEFAULTS: dict = {
     "config": {"schema_version": 1},
     "llm": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com",
@@ -96,6 +97,31 @@ DEFAULTS: dict = {
 
 # ------------------------------------------------ PH_ 环境变量白名单(CFG §4.3)
 # env/CLI 共用唯一键面;名单外 PH_* → CFG-607 警告不中止;秘密不在白名单。
+
+# 热更白名单(CFG §6.2 观测/无害键);其余一律需重启 → CFG-608
+
+# F023 五内置 guard(F023;禁全关/禁关未注册名)
+
+# 秘密引用语法:仅 env:NAME / file:PATH(CFG §7.1)
+
+# secret-ref 型键(CFG §7.1:llm.api_key / shell.web.token;credentials.yaml 内键归凭据模块)
+
+# 工具危险基线(CFG §3.3 明示的高危项);其余工具基线以注册期声明为准,
+# 配置加载期未知 → 视同 none(显式标定不构成"调低",运行期由工具注册表复核)。
+
+# render_show 判定"疑似秘密值"的键名提示(INV-09 脱敏)
+
+
+# ================================================================= 合并原语
+
+
+# ================================================================= 文件层 L2
+
+
+# ================================================================= env 层 L3
+
+
+# ================================================================= 主管线
 ENV_WHITELIST: dict[str, str] = {
     "PH_CFG_PATH": "cfg_path",               # 特殊:指向配置文件而非配置值
     "PH_LLM_MODEL": "llm.model", "PH_LLM_BASE_URL": "llm.base_url",
@@ -126,153 +152,6 @@ ENV_WHITELIST: dict[str, str] = {
     "PH_ACP_ENABLED": "shell.acp.enabled",
 }
 
-# 热更白名单(CFG §6.2 观测/无害键);其余一律需重启 → CFG-608
-RUNTIME_MUTABLE: frozenset = frozenset({
-    "log.level", "log.file", "llm.probe.interval_s",
-    "llm.usage.unit_price", "budget.monthly.alert_ratio"})
-
-# F023 五内置 guard(F023;禁全关/禁关未注册名)
-BUILTIN_GUARDS = frozenset({
-    "g-fs-path", "g-credential-read", "g-net-outbound", "g-exec", "g-overwrite"})
-
-# 秘密引用语法:仅 env:NAME / file:PATH(CFG §7.1)
-_SECRET_RE = re.compile(r"^(env:[A-Za-z_][A-Za-z0-9_]*|file:.+)$")
-
-# secret-ref 型键(CFG §7.1:llm.api_key / shell.web.token;credentials.yaml 内键归凭据模块)
-_SECRET_KEYS = ("llm.api_key", "shell.web.token")
-
-# 工具危险基线(CFG §3.3 明示的高危项);其余工具基线以注册期声明为准,
-# 配置加载期未知 → 视同 none(显式标定不构成"调低",运行期由工具注册表复核)。
-_TOOL_DANGER_BASELINE: dict[str, str] = {"fs.delete_file": "high"}
-_DANGER_RANK: dict[str, int] = {"none": 0, "low": 1, "high": 2, "critical": 3}
-
-# render_show 判定"疑似秘密值"的键名提示(INV-09 脱敏)
-_SECRET_KEY_HINTS = ("api_key", "token", "secret", "password", "credential")
-
-
-# ================================================================= 合并原语
-def deep_merge(base: dict, override: dict) -> dict:
-    """键级深合并(CFG §1.2):标量后层覆盖、字典键级并集、列表整体替换、null=删键回落 L1。"""
-    out = dict(base)
-    for k, v in override.items():
-        if v is None:                        # 显式 null = 删键,回落低层默认
-            out.pop(k, None)
-            continue
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = deep_merge(out[k], v)   # 字典:键级深合并,两键并集
-        else:
-            out[k] = v                       # 标量覆盖;列表整体替换(不逐元素合并)
-    return out
-
-
-def flatten(d: dict, prefix: str = "") -> dict:
-    """嵌套 dict → 点分键平面(env/CLI/hot-update 寻址用)。"""
-    out: dict = {}
-    for k, v in d.items():
-        key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            out.update(flatten(v, key))      # 递归展开
-        else:
-            out[key] = v                     # 叶子收进平面
-    return out
-
-
-def set_dotted(d: dict, key: str, value: Any) -> None:
-    """点分键写入嵌套 dict(逐层建 dict)。"""
-    parts = key.split(".")
-    node = d
-    for p in parts[:-1]:
-        node = node.setdefault(p, {})
-    node[parts[-1]] = value
-
-
-def get_dotted(d: dict, key: str) -> Any:
-    """点分键读嵌套 dict;路径中断返回 None。"""
-    node: Any = d
-    for p in key.split("."):
-        node = node[p] if isinstance(node, dict) else None
-        if node is None:
-            return None
-    return node
-
-
-def _set_dotted_new(key: str, value: Any) -> dict:
-    """构造仅含单个点分键的嵌套 dict(热更候选快照铺层用)。"""
-    out: dict = {}
-    set_dotted(out, key, value)
-    return out
-
-
-# ================================================================= 文件层 L2
-def yaml_load_file(path: str) -> dict:
-    """YAML 安全加载单个文件;文件缺失 → 回落 L1 记 info;语法错 → CFG-601(file_parse)中止。"""
-    p = Path(path).expanduser()
-    if not p.exists():
-        log.info("config file missing, fallback L1: %s", path)
-        return {}
-    try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            raise ValueError("root 必须是映射")
-        return data
-    except Exception as e:                   # 语法/权限/类型错一律启动中止(半套比没配更危险)
-        raise_code("CFG-601", reason="file_parse", file=str(p),
-                   detail=f"{type(e).__name__}:{e}")
-
-
-def collect_config_files(cli_path: Optional[str]) -> list[Path]:
-    """搜索顺序(CFG §2.1):--config 显式(不再搜其余)→ PH_CFG_PATH → ~/.pyharness/config.yaml → config.d/*.yaml 升序;缺失 → 空列表回落 L1。"""
-    if cli_path:
-        return [Path(cli_path).expanduser()]            # 显式指定后不再搜其余路径
-    env_path = os.environ.get("PH_CFG_PATH")
-    if env_path:
-        return [Path(env_path).expanduser()]            # 部署环境统一指向
-    home = Path("~/.pyharness").expanduser()
-    files: list[Path] = []
-    main = home / "config.yaml"
-    if main.exists():
-        files.append(main)
-    frag = sorted((home / "config.d").glob("*.yaml"))   # 文件名升序逐文件 merge
-    files.extend(frag)
-    return files
-
-
-def load_file_layer(cli_path: Optional[str]) -> dict:
-    """L2 层汇总:主文件 + config.d 片段按序 deep_merge,后文件覆盖前文件。"""
-    acc: dict = {}
-    for f in collect_config_files(cli_path):
-        acc = deep_merge(acc, yaml_load_file(str(f)))
-    return acc
-
-
-# ================================================================= env 层 L3
-def parse_env_value(raw: str) -> Any:
-    """env 值严格解析:bool/int/float/列表(逗号或 JSON 数组);空串 = 未设置。
-
-    偏离点:白名单含字符串键(llm.model/base_url/storage 路径/log.file 等),
-    全部按伪码在 int/float 失败后 CFG-601 会让这些键永不可用——故末尾回退原串,
-    交由 pydantic schema 收口(字符串落数字字段仍会 CFG-601 type_range,语义不变)。
-    """
-    if raw == "":
-        return None                          # 空串 = 未设置
-    low = raw.strip().lower()
-    if low in {"1", "true", "yes", "on"}:
-        return True
-    if low in {"0", "false", "no", "off"}:
-        return False
-    if "," in raw or raw.startswith("["):    # 列表:逗号或 JSON 数组
-        try:
-            return json.loads(raw) if raw.startswith("[") else [s.strip() for s in raw.split(",")]
-        except json.JSONDecodeError as e:
-            raise_code("CFG-601", reason="env_parse", detail=str(e))
-    try:
-        return int(raw)                      # int 优先
-    except ValueError:
-        try:
-            return float(raw)                # float
-        except ValueError:
-            return raw                       # 原串回退(字符串键;数字键由 pydantic 拒)
-
 
 def env_subset() -> dict:
     """L3 层:白名单内 PH_* 收集并按映射展开为嵌套键;名单外 PH_* → CFG-607 警告不中止。"""
@@ -292,7 +171,6 @@ def env_subset() -> dict:
     return out
 
 
-# ================================================================= 主管线
 def _merge_layers(cli_path: Optional[str],
                   cli_overrides: tuple[tuple[str, Any], ...]) -> dict:
     """四层深合并:L1 ← L2(文件) ← L3(env) ← L4(CLI),返回合并后原始 dict。"""
@@ -529,87 +407,6 @@ class ConfigMeta(BaseModel):
     schema_version: int = Field(1, ge=1, le=999)
 
 
-class UnitPriceCfg(BaseModel):
-    """单价条目(元/百万 token,F029/N14):只影响估算/报表。"""
-    in_per_million: float = Field(..., ge=0)
-    out_per_million: float = Field(..., ge=0)
-
-
-def _default_unit_price() -> dict[str, UnitPriceCfg]:
-    return {
-        "deepseek-chat": UnitPriceCfg(in_per_million=2.0, out_per_million=8.0),
-        "qwen-max": UnitPriceCfg(in_per_million=4.0, out_per_million=12.0),
-    }
-
-
-class TimeoutCfg(BaseModel):
-    """llm.timeout — 三档超时(F017);档序在 validate_rules ③ 复核。"""
-    connect_s: int = Field(10, ge=1, le=300)
-    first_token_s: int = Field(60, ge=1, le=600)
-    total_s: int = Field(180, ge=1, le=1800)
-
-
-class RetryCfg(BaseModel):
-    """llm.retry — 退避(F028)。"""
-    attempts: int = Field(4, ge=0, le=8)
-    base_delay_s: float = Field(1.0, ge=0.1, le=60)
-    jitter: float = Field(0.3, ge=0, le=0.5)
-
-
-class DegradeCfg(BaseModel):
-    """llm.degrade — 降级链(F013)。"""
-    enabled: bool = True
-    rate_limit_consecutive: int = Field(2, ge=1, le=5)
-    max_per_session: int = Field(5, ge=1, le=20)
-
-
-class ProbeCfg(BaseModel):
-    """llm.probe — 探针周期(F033)。"""
-    interval_s: int = Field(60, ge=10, le=3600)
-
-
-class UsageCfg(BaseModel):
-    """llm.usage — 单价表(只影响估算/报表)。"""
-    unit_price: dict[str, UnitPriceCfg] = Field(default_factory=_default_unit_price)
-
-
-class LlmCfg(BaseModel):
-    """llm.* — 模型域(F012/F013/F028/F029/F030/F033)。"""
-    model: str = "deepseek-chat"
-    base_url: str = "https://api.deepseek.com"
-    api_key: str = "env:DEEPSEEK_API_KEY"       # secret-ref 型,字面量由 validate_rules 拒载
-    temperature: float = Field(0.7, ge=0, le=1.5)
-    max_tokens: int = Field(4096, ge=1, le=32768)
-    fallback_models: list[str] = Field(default_factory=lambda: ["qwen-max"])
-    timeout: TimeoutCfg = Field(default_factory=TimeoutCfg)
-    retry: RetryCfg = Field(default_factory=RetryCfg)
-    degrade: DegradeCfg = Field(default_factory=DegradeCfg)
-    probe: ProbeCfg = Field(default_factory=ProbeCfg)
-    usage: UsageCfg = Field(default_factory=UsageCfg)
-
-    @field_validator("base_url")
-    @classmethod
-    def _url_ok(cls, v: str) -> str:
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("base_url 须 http(s):// 开头(合法 URL)")
-        return v
-
-
-class CompactCfg(BaseModel):
-    """loop.compact — 上下文压缩(F058)。"""
-    trigger_ratio: float = Field(0.75, ge=0.5, le=0.95)
-    min_new_rounds: int = Field(10, ge=1, le=100)
-    keep_recent_rounds: int = Field(12, ge=1, le=100)
-    summarize_budget_tokens: int = Field(400, ge=50, le=2000)
-
-
-class ContentCfg(BaseModel):
-    """loop.content — 工具内容截断(F034/F037/F038)。"""
-    file_spill_bytes: int = Field(65536, ge=1024, le=1048576)
-    fetch_max_chars: int = Field(32768, ge=1024, le=1048576)
-    search_result_chars: int = Field(8000, ge=512, le=32768)
-
-
 class LoopCfg(BaseModel):
     """loop.* — 循环域(F007/F010/F017/F022/F026/F043/F058/F063)。"""
     model_config = ConfigDict(validate_assignment=True)
@@ -650,37 +447,8 @@ class SandboxCfg(BaseModel):
         return value
 
 
-class NetworkCfg(BaseModel):
-    """security.network — 外发 allowlist(F023/N13/F037)。"""
-    allowed_domains: list[str] = Field(default_factory=list)
-    web_search_per_session: int = Field(20, ge=0, le=1000)
-    search_backend: Literal["disabled", "bing", "duckduckgo"] = "bing"
-    search_endpoint: str = "https://cn.bing.com/search"
-
-
-class PolicyCfg(BaseModel):
-    """security.policy — 权限预设基集上只增的 deny/只读例外(F023/F055)。"""
-    deny_tools_extra: list[str] = Field(default_factory=list)
-    read_extra_dirs: list[str] = Field(default_factory=list)
-    preset: Literal["locked", "readonly", "standard", "strict"] = "strict"
     # 档位语义(engine._apply_preset):strict=默认最小权限;standard=放宽域约束
     # (危险级仍由 guard/审批管);readonly=除只读/自管理外全禁;locked=仅对话
-
-
-class GuardsCfg(BaseModel):
-    """security.guards — 五内置 guard 显式关单个(禁全关/禁未注册名,validate_rules 复核)。"""
-    disabled: list[str] = Field(default_factory=list)
-
-
-class ApprovalCfg(BaseModel):
-    """security.approval — 审批 TTL/合并窗(F015)。"""
-    ttl_ms: int = Field(120000, ge=1000, le=3600000)   # 120s,超时=denied 安全默认
-    merge_window_s: int = Field(60, ge=0, le=600)
-
-
-class TrustlistCfg(BaseModel):
-    """security.trustlist — 信任名单默认关(SEC §5)。"""
-    enabled: bool = False
 
 
 class CredentialsCfg(BaseModel):
@@ -696,14 +464,6 @@ class CredentialsCfg(BaseModel):
         return value
 
 
-class AttachmentCfg(BaseModel):
-    """security.attachment — 附件限制(F061)。"""
-    max_bytes: int = Field(10485760, ge=1, le=104857600)
-    max_per_message: int = Field(5, ge=1, le=20)
-    mime_whitelist: list[str] = Field(default_factory=lambda: [
-        "image/jpeg", "image/png", "image/webp", "image/gif"])
-
-
 class SecurityCfg(BaseModel):
     """security.* — 安全域(F014/F015/F023/F037/F038/F054/F061)。"""
     sandbox: SandboxCfg = Field(default_factory=SandboxCfg)
@@ -716,91 +476,6 @@ class SecurityCfg(BaseModel):
     trustlist: TrustlistCfg = Field(default_factory=TrustlistCfg)
     credentials: CredentialsCfg = Field(default_factory=CredentialsCfg)
     attachment: AttachmentCfg = Field(default_factory=AttachmentCfg)
-
-
-class BudgetTaskCfg(BaseModel):
-    """budget.task — 单任务硬闸(F032/N5)。"""
-    max_in_tokens: int = Field(2_000_000, ge=1, le=100_000_000)
-    max_out_tokens: int = Field(50_000, ge=1, le=10_000_000)
-    max_cost_yuan: float = Field(1.0, ge=0.01, le=1_000_000)
-
-
-class MonthlyCfg(BaseModel):
-    """budget.monthly — 月度成本估算(跨会话按日志聚合)。"""
-    limit_yuan: float = Field(0.0, ge=0)               # 0=不启用;>0=元
-    alert_ratio: float = Field(0.8, ge=0.5, le=0.99)
-
-
-class BudgetCfg(BaseModel):
-    """budget.* — 成本域(F032/N5/F029)。"""
-    task: BudgetTaskCfg = Field(default_factory=BudgetTaskCfg)
-    warn_ratio: float = Field(0.8, ge=0.5, le=0.99)
-    subagent_ratio: float = Field(0.25, ge=0.01, le=1)
-    monthly: MonthlyCfg = Field(default_factory=MonthlyCfg)
-
-
-class LogJsonlCfg(BaseModel):
-    """log.jsonl — 事件日志攒批(PRD §3.6)。"""
-    flush_interval_s: float = Field(0.5, ge=0.05, le=10)
-    flush_batch: int = Field(64, ge=1, le=1024)
-
-
-class LogCfg(BaseModel):
-    """log.* — 日志域(F009/F011);事件 JSONL 不受 log.level 影响。"""
-    level: Literal["debug", "info", "warning", "error"] = "info"
-    file: str = ""                                       # 空 = 仅控制台
-    rotate_bytes: int = Field(52_428_800, ge=1_048_576, le=1_073_741_824)
-    redact_enabled: bool = True                          # 全出口脱敏(INV-09)
-    jsonl: LogJsonlCfg = Field(default_factory=LogJsonlCfg)
-
-
-class StorageJsonlCfg(BaseModel):
-    """storage.jsonl — 会话日志轮转(F011/N11)。"""
-    rotate_bytes: int = Field(52_428_800, ge=1_048_576, le=1_073_741_824)
-
-
-class SpillCfg(BaseModel):
-    """storage.spill — spill 私有区限额(F039/N3)。"""
-    max_per_file_bytes: int = Field(10_485_760, ge=1024, le=104_857_600)
-    max_per_session_mb: int = Field(100, ge=1, le=10240)
-
-
-class FtsCfg(BaseModel):
-    """storage.fts — 会话 FTS 索引(F057)。"""
-    index_batch_ms: int = Field(200, ge=10, le=5000)
-    query_timeout_s: int = Field(5, ge=1, le=60)
-    result_limit: int = Field(20, ge=1, le=100)
-
-
-class StorageCfg(BaseModel):
-    """storage.* — 存储域(F011/F039/F055/F056/F057);~ 路径运行时再展开。"""
-    root: str = "~/.pyharness"
-    sessions_dir: str = "~/.pyharness/sessions"
-    db_path: str = "~/.pyharness/pyharness.db"
-    workspaces_dir: str = "~/.pyharness/workspaces"
-    archive_days: int = Field(30, ge=0, le=3650)
-    jsonl: StorageJsonlCfg = Field(default_factory=StorageJsonlCfg)
-    spill_dir: str = "~/.pyharness/spill"
-    spill: SpillCfg = Field(default_factory=SpillCfg)
-    fts: FtsCfg = Field(default_factory=FtsCfg)
-
-
-class McpServerCfg(BaseModel):
-    """MCP stdio server 配置;command 为 argv,不经过 shell。"""
-    name: str = Field(min_length=1, max_length=64)
-    command: list[str] = Field(min_length=1, max_length=64)
-    enabled: bool = True
-    timeout_s: int = Field(30, ge=1, le=600)
-    # None preserves existing registrations; [] exposes no tools. Local policy only.
-    allowed_tools: Optional[list[str]] = None
-
-
-class SkillsCfg(BaseModel):
-    """skills.* — local skill root and optional remote registry."""
-    dir: str = "~/.pyharness/skills"
-    registry_url: str = ""
-    max_package_bytes: int = Field(5242880, ge=1024, le=104857600)
-    max_files: int = Field(200, ge=1, le=10000)
 
 
 class PluginsCfg(BaseModel):
@@ -828,24 +503,6 @@ class PluginsCfg(BaseModel):
         if value!=['storage.spill','credentials','storage.kv']:
             raise ValueError('pre_activate: deprecated compatibility list; overrides unsupported')
         return value
-
-
-class ShellWebCfg(BaseModel):
-    """shell.web — Web 外壳(F065);默认仅回环,非回环须配 token(validate_rules)。"""
-    host: str = "127.0.0.1"
-    port: int = Field(8000, ge=1, le=65535)
-    token: str = ""                                        # secret-ref 型
-
-
-class ShellAcpCfg(BaseModel):
-    """shell.acp — ACP 桥(F066)。"""
-    enabled: bool = False
-
-
-class ShellCfg(BaseModel):
-    """shell.* — 外壳域(F064-F066)。"""
-    web: ShellWebCfg = Field(default_factory=ShellWebCfg)
-    acp: ShellAcpCfg = Field(default_factory=ShellAcpCfg)
 
 
 class Settings(BaseModel):

@@ -67,97 +67,51 @@ import httpx
 from pyharness.core.tools_registry import ToolDefinition
 from pyharness.errors import PyHError, raise_code
 
-log = logging.getLogger("pyharness.tool_web")
+from pyharness.core.web_markdown import (_SKIP_TAGS, _BLOCK_TAGS, _HEADING_LEVELS, _NOISE_RE, _WS_RE, _TextExtractor, _attr, _class_hit, html_to_markdown)
+from pyharness.core.web_domains import (_normalize_hostname, _domain_allowed)
+
 
 # ------------------------------------------------------------------ 常量
-SEARCH_PER_SESSION: int = 20
 """web.search 单会话次数闸默认(security.network.web_search_per_session;0=禁用)。"""
 
-SEARCH_RESULT_CHARS: int = 8000
 """搜索结果合计字符预算默认(loop.content.search_result_chars)。"""
 
-FETCH_MAX_CHARS: int = 32768
 """web.fetch 正文转 spill 阈值默认(loop.content.fetch_max_chars)。"""
 
-RAW_HTML_MAX: int = 2_097_152
 """原始 HTML 抓取上限 2MB(防内存/带宽滥用,超限 PERS-223)。"""
 
-HTTP_TIMEOUT: int = 15
 """F038 单次 HTTP 请求墙钟总超时(秒)。"""
 
-CONNECT_TIMEOUT: int = 10
 """F038 连接阶段超时(秒)。"""
 
-REDIRECT_MAX: int = 3
 """重定向跟随上限(≤3 跳,逐跳重验域名;SECURITY §7.3)。"""
 
-BINARY_SAMPLE: int = 8192
 """二进制探测样本字节数(NUL 命中即 TLB-806 拒读,与 tool_fs 同口径)。"""
 
-_MAX_MD: int = 2_097_152
 """html_to_markdown 防御性输出上限(= RAW_HTML_MAX;超限由调用方 spill,偏离 7)。"""
 
-_MAX_REDIRECT_ADVICE: str = "重定向超过 3 跳,已停止"
 """超跳数回喂文案(spec 伪码 advice)。"""
+
+from pyharness.core.web_policy import (log, SEARCH_PER_SESSION, SEARCH_RESULT_CHARS, FETCH_MAX_CHARS, RAW_HTML_MAX, HTTP_TIMEOUT, CONNECT_TIMEOUT, REDIRECT_MAX, BINARY_SAMPLE, _MAX_MD, _MAX_REDIRECT_ADVICE)
+
+from pyharness.core.web_domains_config import (_cfg_holder, _cfg_read, _allowed_domains)
 
 _POL_NET_ADVICE: str = "目标域不在 allowed_domains;需会话显式放行(默认全禁)"
 """allowlist 未命中回喂文案(spec 伪码 advice;重定向域逃逸复用)。"""
 
 # 标签级丢弃(后代全跳):script/style 是 CDATA 指令载体,noscript/svg/head 非正文,
 # nav/footer 属导航/页脚噪声块(职责 3);iframe 同族噪声(内容不可信渲染面)
-_SKIP_TAGS: frozenset = frozenset({
-    "script", "style", "noscript", "svg", "head", "iframe", "nav", "footer",
-})
 
 # 块级换行集(spec 实现要点权威:p/div/li/tr/h1-h6/pre 决定换行;br 单断另行处理)
-_BLOCK_TAGS: frozenset = frozenset({
-    "p", "div", "li", "tr", "pre", "h1", "h2", "h3", "h4", "h5", "h6",
-})
 
-_HEADING_LEVELS: dict[str, int] = {f"h{i}": i for i in range(1, 7)}
 """标题级别映射(开标签时写入 '#'*level + ' ' 前缀)。"""
 
 # class/id 噪声黑名单(spec 正则权威 + re.I,偏离 6):命中即跳过该块及其后代
-_NOISE_RE: re.Pattern = re.compile(
-    r"(^|[\s_-])(nav|menu|ad|ads?|footer|sidebar|banner)([\s_-]|$)", re.I)
 
-_WS_RE: re.Pattern = re.compile(r"\s+")
 """行内空白折叠(HTML 空白 → 单空格)。"""
 
 
 # ---------------------------------------------------------------- 配置辅助
-def _cfg_holder(ctx: Any) -> Any:
-    """配置持有者:ctx.cfg 优先,ctx.config 兼容(装配形态两收)。"""
-    for name in ("cfg", "config"):
-        holder = getattr(ctx, name, None)
-        if holder is not None:
-            return holder
-    return None
-
-
-def _cfg_read(ctx: Any, dotted: str, default: Any) -> Any:
-    """点分键取值,双形态兼容(tool_fs/spill 同款):dict(平铺点分或嵌套)与
-    pydantic 属性链;未接线/缺键回落默认(运行面不因未接线崩溃,阈值有界默认)。"""
-    holder = _cfg_holder(ctx)
-    if holder is None:
-        log.debug("ctx.cfg/config 未接线,配置键 %s 回落默认 %r", dotted, default)
-        return default
-    if isinstance(holder, dict):
-        if dotted in holder:                    # 平铺点分键形态
-            return holder[dotted]
-        cur: Any = holder
-        for part in dotted.split("."):          # 嵌套 dict 形态
-            if not isinstance(cur, dict) or part not in cur:
-                return default
-            cur = cur[part]
-        return cur
-    cur = holder                                # pydantic/属性形态
-    for part in dotted.split("."):
-        nxt = getattr(cur, part, None)
-        if nxt is None:
-            return default
-        cur = nxt
-    return cur
 
 
 from pyharness.core.tool_redaction import _redact
@@ -177,69 +131,7 @@ def _get_secret(ctx: Any, name: str) -> Optional[str]:
     return v if isinstance(v, str) and v else None
 
 
-def _allowed_domains(ctx: Any) -> list[str]:
-    """scope.policy.allowed_domains 读取(默认空 = 禁一切外发,spec 伪码权威)。
-
-    ctx.scope 可能直挂 ScopePolicy(裸 policy 形态)或挂 policy 属性(Scope 形态),
-    两形态同收;scope 未接线 → [] 全禁(fail-closed,与 allowlist 默认一致)。
-    """
-    scope = getattr(ctx, "scope", None)
-    if scope is None:
-        return []
-    pol = getattr(scope, "policy", None)
-    if pol is None:
-        pol = scope                            # 裸 policy 直挂 ctx.scope
-    allowed = getattr(pol, "allowed_domains", None)
-    if not allowed:
-        return []
-    return [str(d) for d in allowed]
-
-
 # ---------------------------------------------------------------- 域名归一闸
-def _normalize_hostname(raw: Any) -> Optional[str]:
-    """URL/域名 → 可比对归一 hostname(spec 伪码口径,与 guard g5 同语义)。
-
-    归一化:小写 → 去尾点 → 去 userinfo/port/路径(urlsplit hostname)→ IDNA
-    编码(国际化域名/编码混淆失效);非 http(s) scheme/解析失败 → None(调用方拒)。
-    """
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        if "://" not in s:                      # 裸域名/带 port 域名补 scheme(仅解析)
-            s = "http://" + s
-        parts = urlsplit(s)
-        if parts.scheme.lower() not in ("http", "https"):
-            return None
-        host = parts.hostname
-    except ValueError:
-        return None
-    if not host:
-        return None
-    host = host.lower().rstrip(".")
-    if not host:
-        return None
-    try:
-        host = host.encode("idna").decode("ascii")   # IDNA 归一(逐标签)
-    except UnicodeError:
-        return None                            # 编码无法归一 → 不可比对 → 拒
-    return host
-
-
-def _domain_allowed(url: str, ctx: Any) -> Optional[str]:
-    """域名归一比对(工具内第二道,F038;spec 伪码权威)。
-
-    命中 allowlist(精确匹配,归一后比较;子域/IP/编码混淆不隐含放行)返回归一
-    域名;未命中/非法 URL 返回 None,由调用方映射 POL-NET-1。
-    """
-    host = _normalize_hostname(url)
-    if host is None:
-        return None
-    for raw in _allowed_domains(ctx):
-        norm = _normalize_hostname(raw)         # allow 条目同规归一(宽松收 URL 形态)
-        if norm is not None and host == norm:
-            return host
-    return None
 
 
 # ------------------------------------------------------------ 会话计数(次数闸)
@@ -414,8 +306,6 @@ class DuckDuckGoBackend:
         parser.feed(resp.raw.decode("utf-8", errors="replace"))
         parser.close()
         return parser.hits[:max(1, int(top_k))]
-
-
 
 
 class BingRssBackend:
@@ -602,137 +492,8 @@ async def http_get(url: str, *, max_bytes: int, ctx: Any,
 
 
 # ------------------------------------------------------------ 正文提取(F038)
-class _TextExtractor(html.parser.HTMLParser):
-    """手写 HTMLParser 状态机正文提取器(spec 实现要点权威)。
-
-    状态:skip(命中丢弃块后的后代深度计数)/parts(输出流,块界以 "\\n" 标记)/
-    links(a 标签栈,出标签拼 [text](url));script/style/noscript/svg/head/
-    iframe/nav/footer 标签与 class/id 噪声命中块整体跳过(其后代不产任何输出),
-    HTML 标签/脚本永不泄漏进结果。feed 全程容错(标准库 parser 容错模式)。
-    """
-
-    def __init__(self, base_url: str = "") -> None:
-        super().__init__(convert_charrefs=True)  # &amp; 等实体并入文本
-        self.base_url = base_url or ""
-        self.parts: list[str] = []              # 输出流(文本 + "\n" 行断标记)
-        self.skip: int = 0                      # 丢弃块深度(skip>0 后代全跳)
-        self.links: list[dict] = []             # a 标签栈 {"href", "parts"}
-
-    # ---------------------------------------------------------- 工具方法
-    def _break(self) -> None:
-        """行断标记(连续块界折叠为单个)。"""
-        if not self.parts or self.parts[-1] != "\n":
-            self.parts.append("\n")
-
-    def _push_text(self, s: str) -> None:
-        """文本入流:a 内收进栈顶链接缓冲,否则直出(相邻块空隙去重空格)。"""
-        if not s:
-            return
-        if self.links:
-            self.links[-1]["parts"].append(s)
-            return
-        if (self.parts and self.parts[-1].endswith(" ")
-                and s.startswith(" ")):
-            s = s.lstrip(" ")                   # 前段尾空格 + 本段首空格去重
-        self.parts.append(s)
-
-    # ---------------------------------------------------------- parser 回调
-    def handle_starttag(self, tag: str, attrs: list) -> None:
-        tag = tag.lower()
-        if self.skip:                           # 丢弃块内:每开一标签深度 +1,
-            self.skip += 1                      # 直至块闭合(后代整体跳过)
-            return
-        if tag in _SKIP_TAGS or _class_hit(attrs):
-            self.skip = 1                       # 命中丢弃块:跳过其后代
-            return
-        if tag == "br":                         # 单行断(非块栈成员)
-            self._break()
-            return
-        if tag in _BLOCK_TAGS:
-            self._break()                       # 块级开:前导换行
-            level = _HEADING_LEVELS.get(tag)
-            if level:                           # 标题:写入 "#"*level + " "
-                self.parts.append("#" * level + " ")
-            return
-        if tag == "a":
-            href = _attr(attrs, "href")
-            self.links.append({"href": href or "", "parts": []})
-            return
-        if tag == "img":                        # 图片取 alt(spec: 图片取 alt)
-            alt = _attr(attrs, "alt")
-            if alt:
-                self._push_text(str(alt))
-            return
-        # 其余行内标签(span/b/strong/code…):忽略,文本由 handle_data 流入
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if self.skip:                           # 丢弃块收口(每个闭合标签 -1)
-            self.skip = max(0, self.skip - 1)
-            return
-        if tag == "a" and self.links:
-            info = self.links.pop()
-            text = _WS_RE.sub(" ", "".join(info["parts"])).strip()
-            href = (info.get("href") or "").strip()
-            if text and href:
-                self._push_text(f"[{text}]({urljoin(self.base_url, href)})")
-            elif text:                          # 无 href 锚:仅保留文本
-                self._push_text(text)
-            return
-        if tag in _BLOCK_TAGS:
-            self._break()                       # 块级闭:尾随换行
-
-    def handle_data(self, data: str) -> None:
-        if self.skip:
-            return                              # 丢弃块内文本不产出
-        s = _WS_RE.sub(" ", data)               # 空白折叠(HTML 空白 → 空格)
-        if s:
-            self._push_text(s)
 
     # 注释/声明/处理指令一律忽略(handle_comment/decl/pis 默认空实现)
-
-
-def _attr(attrs: list, name: str) -> Optional[str]:
-    """属性大小写不敏感取值(HTMLParser 属性名大小写行为跨版本不一,统一收敛)。"""
-    target = name.lower()
-    for k, v in attrs or ():
-        if k is not None and str(k).lower() == target:
-            return v
-    return None
-
-
-def _class_hit(attrs: list) -> bool:
-    """class/id 噪声黑名单命中(class/id 正则,spec 实现要点;re.I 偏离 6)。
-
-    命中 class="nav"/"ad-banner"/"footer x" 等即整块跳过(去导航/广告噪声)。
-    """
-    for attr_name in ("class", "id"):
-        v = _attr(attrs, attr_name)
-        if v and _NOISE_RE.search(str(v)):
-            return True
-    return False
-
-
-def html_to_markdown(html: str, base_url: str) -> str:
-    """正文提取转 Markdown(spec 伪码权威;标准库自含,禁第三方解析依赖)。
-
-    流式解析(不建 DOM):去 script/style/noscript/svg/head/nav/footer 与 class/id
-    噪声块,块级标签换行、标题加 #、链接转 [text](url)、图片取 alt、空白折叠;
-    输出为纯文本 Markdown,HTML 标签/脚本永不泄漏进结果。坏 HTML 容错不中断
-    (parser 默认容错,无异常上抛;feed 层兜底记 debug)。输出 ≤ _MAX_MD(2MB)。
-    """
-    if not isinstance(html, str):
-        html = str(html or "")
-    parser = _TextExtractor(str(base_url or ""))
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception as exc:                    # noqa: BLE001 坏 HTML 不中断
-        log.debug("html_to_markdown feed 异常(容错继续): %s", exc)
-    text = "".join(parser.parts)
-    lines = [ln.strip() for ln in text.splitlines()]   # 逐行清理
-    md = "\n".join(ln for ln in lines if ln)           # 去空行
-    return md[:_MAX_MD]                                # 防御性上限
 
 
 # ============================================================ 五要素注册入口

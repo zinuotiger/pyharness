@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from pyharness.core.sandbox import fail
 from fastapi.routing import APIRoute
 from pyharness.errors import PyHError
+from pyharness.integrations.wechat_ilink import ILinkError
 
 
 class PlatformRoute(APIRoute):
@@ -26,10 +27,18 @@ class PlatformRoute(APIRoute):
                           503 if code in {'sandbox_unavailable','knowledge_unavailable'} else
                           409 if any(s in code for s in ('busy','pending','fixed','in_use','integrity','expired','not_active','not_pending','not_allowed','cannot_delete','baseline','deprecated')) else 422)
                 return JSONResponse({'code':code,'message':code}, status_code=status)
+            except ILinkError as exc:
+                return JSONResponse({'code':exc.code,'message':'微信连接操作未完成，请检查连接状态'},status_code=503)
             except (ValidationError, ValueError, TypeError):
                 return JSONResponse({'code':'invalid_request','message':'请求字段或状态不合法'}, status_code=422)
         return checked
 
+
+from .channel_routes import mount_channels
+from .run_routes import mount_runs
+from .agent_routes import mount_agents
+from .artifact_routes import mount_artifacts
+from .management_routes import mount_management
 
 def mount_platform(desktop):
     class OwnedPlatformRoute(PlatformRoute):
@@ -42,318 +51,14 @@ def mount_platform(desktop):
         desktop.service._ensure_open()
         return desktop.service.platform
 
-    @router.get('/dashboard')
-    async def dashboard():
-        return await service().dashboard()
+    mount_channels(router, desktop, service)
 
-    @router.get('/sessions')
-    async def sessions():
-        return await service().sessions()
+    mount_runs(router, desktop, service)
 
-    @router.post('/sessions')
-    async def create_session():
-        return {'sid':await desktop.service.create_session()}
+    mount_agents(router, desktop, service)
 
-    @router.post('/sessions/{sid}/metadata')
-    async def session_metadata(sid: str, body: dict=Body(...)):
-        return await service().session_metadata(sid, body)
+    mount_artifacts(router, desktop, service)
 
-    @router.get('/history/search')
-    async def history_search(q:str, session_id:str | None=None):
-        return await service().history_search(q,session_id)
-
-    @router.post('/sessions/{sid}/messages/{seq}/edit')
-    async def edit_message(sid:str,seq:int,body:dict=Body(...)):
-        return await service().edit_message(sid,seq,body)
-
-    @router.post('/sessions/{sid}/messages/{seq}/feedback')
-    async def feedback(sid:str,seq:int,body:dict=Body(...)):
-        return await service().feedback(sid,seq,body)
-
-    @router.get('/sessions/{sid}/activity')
-    async def activity(sid:str):
-        return await service().activity(sid)
-
-    @router.post('/sessions/{sid}/subagents/{ident}/cancel')
-    async def cancel_subagent(sid:str,ident:str):
-        return {'ok':await desktop.service.cancel_subagent(sid,ident)}
-
-    @router.post('/sessions/{sid}/jobs/{ident}/cancel')
-    async def cancel_job(sid:str,ident:str):
-        return {'ok':await desktop.service.cancel_job(sid,ident)}
-
-    @router.get('/runs')
-    async def runs(cursor:str | None=None, limit:int | None=None):
-        return await service().runs(cursor=cursor,limit=limit)
-
-    @router.get('/chat/readiness')
-    async def chat_readiness(session_id: str | None = None, agent_id: str | None = None, agent_version: int | None = None):
-        return await service().chat_readiness({'session_id':session_id, 'agent_id':agent_id, 'agent_version':agent_version})
-
-    @router.get('/chat/configuration')
-    async def chat_configuration(session_id: str | None=None, agent_id: str | None=None, version: int | None=None):
-        return await service().chat_setup.configuration(session_id, agent_id, version)
-
-    @router.post('/chat/assistants')
-    async def create_use(body: dict=Body(...)):
-        return service().chat_setup.create_use(body)
-
-    @router.get('/chat/assistants')
-    async def chat_assistants():
-        return service().chat_setup.assistants()
-
-    @router.post('/chat/switch')
-    async def switch_chat(body: dict=Body(...)):
-        return await service().chat_setup.switch(body)
-
-    @router.post('/chat/execution-readiness')
-    async def execution_readiness(body: dict=Body(...)):
-        return await service().chat_setup.readiness(body)
-
-    @router.get('/chat/remote-connections')
-    async def remote_connections():
-        return service().chat_setup.remotes()
-
-    @router.post('/chat/remote-connections')
-    async def remote_connection(body: dict=Body(...)):
-        return service().chat_setup.save_remote(body)
-
-    @router.post('/runs')
-    async def start_run(body: dict = Body(...)):
-        return await service().start_run(body)
-
-    @router.get('/runs/{ident}')
-    async def run(ident: str):
-        return await service().run(ident)
-
-    @router.get('/runs/{ident}/trace')
-    async def trace(ident: str, cursor: str | None=None, limit: int=500):
-        item = await service().run(ident, cursor=cursor, limit=limit)
-        return {'trace':item['trace'], 'total':item['trace_total'],
-                'truncated':item['trace_truncated'], 'cursor':item['trace_cursor']}
-
-    @router.post('/runs/{ident}/cancel')
-    async def cancel(ident: str):
-        return await service().cancel(ident)
-
-    @router.post('/runs/{ident}/retry')
-    async def retry(ident: str):
-        return await service().retry(ident)
-
-    @router.get('/approvals')
-    async def approvals():
-        return await service().approvals()
-
-    @router.post('/approvals/{ident}/{action}')
-    async def decision(ident: str, action: str, body: dict=Body(default={})):
-        if action not in {'approve','reject'}:
-            fail('invalid_action')
-        return await service().decide(ident, action, body or None)
-
-    @router.get('/agents')
-    async def agents():
-        return service().agents()
-
-    @router.post('/agents')
-    async def save_agent(body: dict = Body(...)):
-        try:
-            return service().save_agent(body)
-        except ValidationError:
-            return JSONResponse({'code':'invalid_agent','message':'Agent 配置字段或范围不合法'}, status_code=422)
-
-    @router.put('/agents/{ident}')
-    async def edit_agent(ident: str, body: dict = Body(...)):
-        try:
-            return service().save_agent(body, ident)
-        except ValidationError:
-            return JSONResponse({'code':'invalid_agent','message':'Agent 配置字段或范围不合法'}, status_code=422)
-
-    @router.get('/agents/{ident}')
-    async def agent(ident:str):
-        item=next((a for a in service().agents()['agents'] if a['agent_id']==ident),None)
-        if item is None: fail('agent_not_found')
-        return item
-
-    @router.get('/agents/{ident}/versions')
-    async def versions(ident: str):
-        return service().agent_action(ident, 'versions')
-
-    @router.post('/agents/{ident}/{action}')
-    async def agent_action(ident: str, action: str, body: dict = Body(default={})):
-        return service().agent_action(ident, action, body)
-
-    @router.delete('/agents/{ident}')
-    async def delete_agent(ident: str):
-        return service().agent_action(ident, 'delete')
-
-    @router.get('/artifacts')
-    async def artifacts(cursor:str | None=None, limit:int | None=None):
-        return await service().artifacts(cursor=cursor,limit=limit)
-
-    @router.post('/artifacts')
-    async def upload(body: dict = Body(...)):
-        return await service().upload(body)
-
-    @router.get('/artifacts/{ident}')
-    async def artifact(ident: str):
-        return await service().artifact(ident)
-
-    @router.get('/artifacts/{ident}/download')
-    async def download(ident: str):
-        item, raw = await service().artifact_content(ident)
-        from urllib.parse import quote
-        return Response(raw, media_type='application/octet-stream', headers={
-            'Content-Disposition':"attachment; filename*=UTF-8''" + quote(item['filename']),
-            'X-Content-Type-Options':'nosniff', 'Content-Security-Policy':"default-src 'none'; sandbox"})
-
-    @router.get('/artifacts/{ident}/preview')
-    async def preview(ident: str):
-        item, raw = await service().artifact_content(ident, preview=True)
-        if item['preview_type']=='image':
-            import base64
-            return {'record':item,'image':'data:'+item['media_type']+';base64,'+base64.b64encode(raw).decode(), 'truncated':False}
-        return {'record':item, 'text':raw[:65536].decode('utf-8', errors='replace'), 'truncated':len(raw)>65536}
-
-    @router.get('/operations/{ident}')
-    async def operation(ident:str):
-        task=service().actions.get(ident)
-        if task is None:
-            fail('operation_not_found')
-        if not task.done():
-            return {'status':'waiting'}
-        if task.cancelled():
-            return {'status':'cancelled'}
-        if task.exception():
-            return {'status':'failed','code':'artifact_action_failed'}
-        return {'status':'completed',**task.result()}
-
-    @router.post('/artifacts/{ident}/{action}')
-    async def artifact_action(ident: str, action: str):
-        return await service().request_artifact_action(ident, action)
-
-    @router.delete('/artifacts/{ident}')
-    async def delete_artifact(ident: str):
-        return await service().delete_artifact(ident)
-
-    @router.get('/knowledge')
-    async def knowledge():
-        return service().knowledge_list()
-
-    @router.post('/knowledge')
-    async def add_knowledge(body: dict = Body(...)):
-        return await service().add_knowledge(body)
-
-    @router.post('/knowledge/query')
-    async def query(body: dict = Body(...)):
-        return await service().query_knowledge(body.get('query',''), body.get('sources'))
-
-    @router.delete('/knowledge/{ident}')
-    async def delete_knowledge(ident: str):
-        result = service().delete_knowledge(ident)
-        await service().sync_knowledge()
-        return result
-
-    @router.post('/knowledge/{ident}/{action}')
-    async def knowledge_action(ident:str,action:str,body:dict=Body(default={})):
-        result = service().knowledge_action(ident,action,body)
-        await service().sync_knowledge()
-        return result
-
-    @router.get('/sandboxes')
-    async def sandboxes():
-        platform = service()
-        return {'sandboxes':await platform.sandbox_records(),
-            'health':await platform.sandboxes.backends['isolated'].health(),
-            'warning':'当前命令运行于宿主环境，不具备 OS 级隔离。'}
-
-    @router.get('/sandboxes/{ident}')
-    async def sandbox(ident:str):
-        item=next((r for r in await service().sandbox_records() if r['sandbox_id']==ident),None)
-        if item is None: fail('sandbox_not_found')
-        return item
-
-    @router.post('/sandboxes/{ident}/destroy')
-    async def destroy(ident: str):
-        return await service().destroy_sandbox(ident)
-
-    @router.get('/usage')
-    async def usage(request: Request):
-        return await service().usage(filters=dict(request.query_params))
-
-    @router.get('/system/health')
-    async def health():
-        return await service().health()
-
-    @router.get('/connections')
-    async def connections():
-        models = desktop.service.tenant_state()
-        skills = await desktop.service.list_skills()
-        plugins = await desktop.service.list_plugins()
-        # Configuration is not connectivity evidence. Never expose command/env.
-        cfg = desktop.service.effective_settings()
-        mcp = [{'name':m.name, 'enabled':m.enabled, 'status':'not_probed'} for m in cfg.plugins.mcp_servers]
-        return {'models':models, 'skills':skills, 'plugins':plugins, 'mcp':mcp,
-                'connections':service().connections()}
-
-    @router.post('/connections')
-    async def save_connection(body: dict=Body(...)):
-        try:
-            return service().save_connection(body)
-        except ValidationError:
-            return JSONResponse({'code':'invalid_connection'},status_code=422)
-
-    @router.post('/connections/{ident}/{action}')
-    async def connection_action(ident:str,action:str):
-        return await service().connection_action(ident,action)
-
-    @router.get('/workflows')
-    async def workflows():
-        return await service().workflows.list()
-
-    @router.get('/memory')
-    async def memory(key: str | None = None):
-        return await desktop.service.memory_action({'op':'get','key':key} if key else {'op':'keys'})
-
-    @router.post('/memory')
-    async def edit_memory(body: dict=Body(...)):
-        return await desktop.service.memory_action(body)
-
-    @router.post('/workflows')
-    async def start_workflow(body: dict=Body(...)):
-        return await service().workflows.start(body)
-
-    @router.post('/workflows/{ident}/cancel')
-    async def cancel_workflow(ident: str):
-        return await service().workflows.cancel(ident)
-
-    @router.get('/schedules')
-    async def schedules():
-        from pyharness.core.schedule import Scheduler
-        from dataclasses import asdict
-        rows=[];schedules=[]
-        for session in (await desktop.service.list_sessions())['sessions'][:200]:
-            # Do not start runtimes/credentials while rendering an overview.
-            log=await desktop.service.require_session(session['sid'])
-            scheduler=Scheduler.rebuild_for_session(log)
-            for job in await scheduler.list_jobs():
-                record=asdict(job)
-                record['session_id']=session['sid']
-                record['intent']=scheduler._jobs[job.name].template['intent']
-                for field in ('next_fire_at','last_fired_at'):
-                    record[field]=record[field].astimezone().isoformat() if record[field] else None
-                schedules.append(record)
-            for event in log.events_after(0):
-                if event.type.startswith('schedule.'):
-                    rows.append({'session_id':session['sid'],'type':event.type,'timestamp':event.ts,'payload':event.payload})
-        return {'events':rows[-200:],'schedules':schedules}
-
-    @router.post('/schedules')
-    async def schedule_action(body:dict=Body(...)):
-        sid = str(body.get('session_id') or '')
-        if body.get('action') == 'add':
-            sid = await service().schedule_session(body)
-        return await desktop.service.schedule_action(sid,str(body.get('action') or ''),
-            name=str(body.get('name') or ''),kind=str(body.get('kind') or 'interval'),
-            expr=str(body.get('expr') or ''),intent=str(body.get('intent') or ''))
+    mount_management(router, desktop, service)
 
     desktop.api.include_router(router)

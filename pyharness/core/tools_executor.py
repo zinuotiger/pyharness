@@ -114,143 +114,41 @@ from pyharness.core.tools_registry import (NAME_RE, ToolRegistry,
 from pyharness.errors import PyHError, raise_code
 from pyharness.events.vocab import summarize_validation
 
-log = logging.getLogger("pyharness.tools_executor")
 
 # ====================================================================== 常量
-DEFAULT_TOOL_TIMEOUT: int = 60          # F017 工具默认超时(PARAMETER-ANCHOR 锁定)
-SPILL_THRESHOLD: int = 2048             # 结果文本 >2KB → spill(F039,DIS-SEAM §6.1 G1)
-SUMMARY_MAX_CHARS: int = 2000           # tool.result summary ≤2KB(payload max 2048)
 # F026 轮内同工具连败终止阈值(CFG `loop.max_arg_failures_per_round` 默认 2;装配层注入,
 # 未注入时用本常量——保持"未装配=默认"语义,与 flush_interval_s 同款)
-DEFAULT_MAX_ARG_FAILURES: int = 2
-PARSE_FAIL_NAME: str = "?"              # 解析失败事件 name 回落值(缺工具名时,审计占位)
-_ZOMBIE_POOL_LIMIT: int = 32            # 僵尸线程池保留上限(超出即裁剪已空闲池)
 
 # 参数摘要化优先展示键(审批展示用:先动作后其余,按风险/动作语义排序)
-_SUMMARY_PRIORITY: tuple[str, ...] = (
-    "url", "domain", "host", "target", "path", "src", "dst", "dir",
-    "mode", "command", "cmd", "shell", "message", "content",
-)
 
 # 动作/内容承载键:审批展示时头尾双展示(防恶意尾部被截断隐藏——人类只看到
 # >80 字命令的开头就批准,危险命令段若在尾部则被省略号吞掉)
-_SUMMARY_TAIL_KEYS: frozenset = frozenset(
-    {"command", "cmd", "code", "input", "content", "text", "script",
-     "prompt", "message", "args", "path", "query"})
-
-_TAIL_KEEP: int = 24              # 尾部保留宽度(头尾双展示:尾 ≥24 字符可见)
 
 
 # ================================================================ ExecResult
-@dataclass(frozen=True)
-class ExecResult:
-    """单次工具调用结果(spec 数据结构表;F022 批量入口消费)。
-
-    summary ≤2KB(回喂/审计);truncated/spill_ref 由关4 finalize 产出
-    (超长 → spill 私有区,大结果不进上下文/日志);elapsed_ms = Provider 实耗。
-    """
-
-    ok: bool
-    summary: str
-    truncated: bool = False
-    spill_ref: Optional[dict] = None     # {ref, chars, lines, preview}(事件同型)
-    elapsed_ms: float = 0.0
 
 
 # ========================================================= ApprovalRoundResult
-@dataclass(frozen=True)
-class ApprovalRoundResult:
-    """关2.5 审批编排结果(S3-2-2;取代"allow"/摘要文本的混合字符串返回契约)。
-
-    字段语义(互不等价):
-      - ``decision`` : 本轮治理决策——未获批时为 **D1**;获批重入后为 **D2**
-        (``D2.supersedes == D1.decision_id``);
-      - ``approved`` : **人类是否批准**(granted);
-      - ``executed`` : 是否**放行至关3**(获批 ≠ 放行:重入 reject / 绑定不符时不放行);
-      - ``message``  : 用户可见文案(``executed=False`` 时由调用方原样回喂)。
-
-    边界:``denied``/``timeout``/``APR-501`` 一律 **不产生 D2、不再次 authorize、
-    不执行 provider**(该语义归 approval transport + executor,R1)。
-    """
-
-    decision: Any
-    approved: bool
-    executed: bool
-    message: str = ""
 
 
 # ================================================================ 文本辅助
 from pyharness.core.result_text import render_result_text
 
 
-def summarize_text(text: str, max_chars: int = SUMMARY_MAX_CHARS) -> str:
-    """文本截断摘要(≤max_chars;截断处补 … 记号,防静默丢尾)。"""
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1] + "…"
-
-
-def _short_value(v: Any, width: int = 80, key: Optional[str] = None) -> str:
-    """摘要值短化:dict/list 只报结构;字符串截断;None/bool/int 直写。
-
-    内容承载键(key ∈ _SUMMARY_TAIL_KEYS)超宽时头尾双展示(保留尾部 _TAIL_KEEP
-    字符)——审批视图不得把危险命令段藏在省略号后;普通键单侧截断。
-    """
-    if isinstance(v, dict):
-        return f"<dict {len(v)}键>"
-    if isinstance(v, (list, tuple)):
-        return f"<list {len(v)}项>"
-    if v is None:
-        return "null"
-    s = str(v)
-    if len(s) <= width:
-        return s
-    if key is not None and key in _SUMMARY_TAIL_KEYS:
-        head = s[: max(0, width - _TAIL_KEEP - 2)]
-        return f"{head} … {s[-_TAIL_KEEP:]}"
-    return s[: width - 1] + "…"
-
-
-def summarize(args: Any, *, max_chars: int = 400) -> str:
-    """Consumer 层参数摘要化(审批展示用;spec 速览表 def summarize(args))。
-
-    不由 Provider/LLM 生成(防注入操纵摘要,SECURITY §5):只做键值短化 + 动作
-    键优先排序;超长截断。content/command 类键头尾双展示(尾部可见,防截断隐藏)。
-    """
-    if not isinstance(args, dict) or not args:
-        return "(无参数)"
-    ordered = sorted(args, key=lambda k: (_SUMMARY_PRIORITY.index(k)
-                                          if k in _SUMMARY_PRIORITY else 99, k))
-    parts: list[str] = []
-    for k in ordered:
-        seg = f"{k}={_short_value(args[k], key=k)}"
-        if sum(len(p) for p in parts) + len(seg) > max_chars:
-            parts.append("…")
-            break
-        parts.append(seg)
-    return ", ".join(parts)
-
-
-def _approval_binding(call: Any, args: dict) -> str:
-    """审批绑定指纹:sha1(tool + 规范化参数序列化)。
-
-    唯一用途 = 把"人类批准"与"实际执行"绑定到同一调用:granted 后重入 guard
-    得到 approval 决策时,校验本指纹 == 审批提供器为该 call_id 记录的绑定,
-    不一致 = 批准针对的是不同参数(注入/篡改),拒绝执行(GRD-403)。参数序列化
-    用 sort_keys 定序(同一调用内同 args 确定性一致;跨会话信任仍走 approval 层
-    自己的 canonical_json)。
-    """
-    canon = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha1(f"{call.name}\n{canon}".encode("utf-8")).hexdigest()
-
-
 # ================================================================ ToolExecutor
+
+
+from pyharness.core.execution_result import (log, DEFAULT_TOOL_TIMEOUT, SPILL_THRESHOLD, SUMMARY_MAX_CHARS, DEFAULT_MAX_ARG_FAILURES, PARSE_FAIL_NAME, _ZOMBIE_POOL_LIMIT, _SUMMARY_PRIORITY, _SUMMARY_TAIL_KEYS, _TAIL_KEEP, ExecResult, ApprovalRoundResult, summarize_text, _short_value, summarize, _approval_binding)
+
+from pyharness.core.tool_invocation import ToolInvocation
+from pyharness.core.tool_approval import ToolApproval
+
 async def _authorize_governance(ctx, call, **kwargs):
     """Single governance funnel, including approval re-entry."""
     return await ctx.governance.authorize(call, ctx, **kwargs)
 
 
-class ToolExecutor:
+class ToolExecutor(ToolInvocation, ToolApproval):
     """工具执行管道总闸(统一 Consumer;DIS-SEAM §2.3)。
 
     构造注入 registry(契约/模型/Provider 索引;可 None = 自建空注册表)。
@@ -507,13 +405,18 @@ class ToolExecutor:
         try:
             self._r.mark_running(call.name)             # registry 注销闸联动
             t0 = time.perf_counter()
-            fut = asyncio.create_task(asyncio.wait_for(
-                self._run_provider(defn, args, ctx), timeout=timeout))
+            provider_task = asyncio.create_task(self._run_provider(defn,args,ctx))
+            fut = asyncio.create_task(asyncio.wait_for(provider_task, timeout=timeout))
             self._active = fut
             started = True                          # Provider 已进入 await 点
             try:
                 raw = await fut
             finally:
+                # Cancellation may arrive before wait_for first runs. The owned
+                # provider Task must still be cancelled and awaited in that window.
+                if not provider_task.done():
+                    provider_task.cancel()
+                    await asyncio.gather(provider_task,return_exceptions=True)
                 if self._active is fut:
                     self._active = None
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -585,76 +488,6 @@ class ToolExecutor:
                        hint="ctx.governance 未接线:关2 唯一治理入口缺失,"
                             "拒绝执行(S3-2-2)")
 
-    async def _approval_round(self, ctx: Any, call: ToolCall,
-                              args: dict, *, prior: Any,
-                              binding: str) -> ApprovalRoundResult:
-        """关2.5 审批编排(request → granted 重入治理授权 → 放行/拒绝裁决)。
-
-        返回 ``ApprovalRoundResult``(S3-2-2:取代混合字符串契约)。语义:
-
-        - ``denied`` / ``timeout``:不产生 D2、不再次 authorize、不执行 provider
-          ——返回 ``decision=prior(D1)``, ``approved=False``, ``executed=False``;
-        - ``APR-501``(headless 无通道):同上,并记 ``_rejected``;
-        - ``granted``:重入治理授权 ``authorize(prior=D1)`` 产生 **D2**;
-          重入 reject → GRD-403(批准作废,单调性高于人类即时意志);
-          重入仍 approval → 须过绑定校验(本调用参数指纹 == 审批提供器为该
-          call_id 记录的绑定)才放行,不一致 = 批准针对异参数 → 拒(偏离 3 收紧);
-          allow/校验通过 → 放行至关3。
-
-        **R1**:``denied``/``timeout`` 的语义归 approval transport + executor,
-        不向 ``DecisionEngine`` 传 ``approval_verdict``。
-        """
-        ap = getattr(ctx, "approval", None)
-        if ap is None:
-            raise_code("CYC-999", module="tools_executor",
-                       hint="ctx.approval 未接线:guard 判 need_approval 但审批"
-                            "服务缺失;拒绝执行(fail-closed)")
-        # binding:由 execute() 传入的授权↔执行绑定指纹(与 Decision.inputs_digest
-        # 同源,全流程只算一次;不再在本函数重复计算)。
-        try:
-            verdict = await ap.request(call, summarize(args), ctx, binding=binding)
-        except PyHError as e:
-            if e.code == "APR-501":                     # headless 无通道:直接拒
-                self._rejected.add(call.call_id)
-                # ADR-022 D-7(a):本路径**不发** approval.requested(零事件零等待),
-                # 故派生层**没有任何事件可供反查 call_id** ⇒ 必须经**既有**
-                # tool.error 通道补配对,否则 assistant.tool_calls 悬空 → 端点 400。
-                # 仅更换**事件出口**(副作用即本调用目的),判定语义与返回类型不变;
-                # 未新增事件类型、未触碰 guard.rejected/approval.denied 的产生逻辑。
-                await self._on_error(ctx, call, "APR-501",
-                                     "审批不可用(APR-501),未执行")
-                return ApprovalRoundResult(decision=prior, approved=False,
-                                           executed=False,
-                                           message="审批不可用(APR-501),未执行")
-            raise                                       # 其余错误:装配/落盘故障上抛
-        if verdict != "granted":                        # denied/timeout = 不执行
-            return ApprovalRoundResult(decision=prior, approved=False,
-                                       executed=False,
-                                       message=f"审批{verdict},未执行")
-        # granted ≠ 放行:重入治理授权(第二次求值 → D2;supersedes=D1)
-        # inputs_digest 与首次一致(同 call/同 args → 同绑定指纹)。approval_ref =
-        # 本次 approval lifecycle 的**真实 identity**(= approval.requested 的 seq),
-        # 由 approval 侧只读访问器提供;D1 无此值(它在请求产生**之前**已发射),
-        # 属正确语义——见 INV-APPROVAL-REF(S4-P1-2 冻结口径)。
-        get_ref = getattr(ap, "approval_ref_of", None)
-        approval_ref = get_ref(call.call_id) if get_ref is not None else None
-        d2 = await _authorize_governance(ctx, call, prior=prior,
-                                            inputs_digest=binding,
-                                            approval_ref=approval_ref)
-        if d2 == "reject":                              # 批准时策略收紧 → 作废
-            self._rejected.add(call.call_id)
-            return ApprovalRoundResult(decision=d2, approved=True, executed=False,
-                                       message="审批后 guard 重入拒绝(GRD-403 语义)")
-        if d2 == "approval":                            # 重入仍要求审批(同参已批)
-            check = getattr(ap, "grant_binding", None)
-            if check is not None and check(call.call_id) != binding:
-                # 绑定不一致 = 该 grant 不是针对本次参数的授权(篡改/复用)
-                self._rejected.add(call.call_id)
-                return ApprovalRoundResult(
-                    decision=d2, approved=True, executed=False,
-                    message="审批绑定校验失败(GRD-403):批准与本次调用参数不一致,"
-                            "拒绝执行")
-        return ApprovalRoundResult(decision=d2, approved=True, executed=True)
 
     # ------------------------------------------------------------ 已删除:_reject
     # GAP-12(2026-09-20):原 ``_reject()`` 已删除。取证口径:
@@ -696,7 +529,6 @@ class ToolExecutor:
                            actor="tool", trace=trace)
         return ExecResult(ok=False, summary=msg)
 
-    # ------------------------------------------------------------ Provider 调用
     def _provider_handle(self, name: str) -> Any:
         """解析 Provider 可调用面:provider.handle(args, ctx) 或裸 callable。"""
         provider = self._r.lookup_provider(name)        # 未绑定 → TLB-802
@@ -709,159 +541,20 @@ class ToolExecutor:
                    advice="Provider 缺 handle(args, ctx) 且不可调用:"
                           "能力实现损坏或未激活")
 
-    async def _run_provider(self, defn: Any, args: dict, ctx: Any) -> Any:
-        """Provider 执行(runner):async handle 直接协程;同步 handle 经独立单工线程池。
+    async def _authorize_governance(self, ctx, call, **kwargs):
+        return await _authorize_governance(ctx, call, **kwargs)
 
-        同步函数用**每次调用独立**的 ``ThreadPoolExecutor(max_workers=1)`` 承载
-        (不阻塞事件循环,spec 关3);async handler 走事件循环协作(不占线程池,偏离 7)。
+    def _new_provider_pool(self, name):
+        return ThreadPoolExecutor(max_workers=1,
+            thread_name_prefix=f"tool:{str(name)[:16]}")
 
-        超时(外层 wait_for 掐断)/取消掐断 → 内部 await 抛 CancelledError → 本函数
-        以 ``shutdown(wait=False)`` **驱逐**该池(线程把副作用在后台跑完),并保留引用
-        防 GC 半途杀线程——该池绝不被复用于后续调用,消除"超时线程回池 + mark_idle
-        后并发重入 → 重叠副作用"(Python 无法安全 kill 运行中线程,只能不复用)。
-        正常完成则 ``shutdown(wait=True)`` 立即收口(线程已结束)。见偏离说明 13。
-        """
-        runtime = getattr(ctx, 'platform_runtime', None)
-        if runtime is not None:
-            async def original():
-                return await self._run_original_provider(defn, args, ctx)
-            return await runtime.execute(defn.name, args, ctx, original)
-        return await self._run_original_provider(defn, args, ctx)
 
-    async def _run_original_provider(self, defn: Any, args: dict, ctx: Any) -> Any:
-        handle = self._provider_handle(defn.name)
-        if inspect.iscoroutinefunction(handle):
-            return await handle(args, ctx)              # wait_for 在外层掐断
-        loop = asyncio.get_running_loop()
-        pool = ThreadPoolExecutor(max_workers=1,
-                                  thread_name_prefix=f"tool:{str(defn.name)[:16]}")
-        try:
-            result = await loop.run_in_executor(pool, handle, args, ctx)
-        except BaseException:                           # 超时/取消/异常:驱逐不复用
-            pool.shutdown(wait=False, cancel_futures=True)
-            self._zombie_pools.add(pool)
-            self._prune_zombies()
-            raise
-        else:
-            pool.shutdown(wait=True)                    # 正常完成:线程已结束
-            self._zombie_pools.discard(pool)
-            return result
+    # ------------------------------------------------------------ Provider 调用
 
-    def _prune_zombies(self) -> None:
-        """僵尸池裁剪:超时产生的池,线程跑完后自会空转结束;仅当僵尸池累积超过
-        上限时,丢弃其中线程已全部结束的池(仍在跑的保留引用,防 GC 半途回收)。"""
-        if len(self._zombie_pools) < _ZOMBIE_POOL_LIMIT:
-            return
-        keep: set[ThreadPoolExecutor] = set()
-        for pool in self._zombie_pools:
-            try:
-                threads = getattr(pool, "_threads", ())
-                alive = any(getattr(t, "is_alive", lambda: False)()
-                            for t in threads)
-            except Exception:                           # noqa: BLE001 线程查询异常:保守保留
-                alive = True
-            if alive:
-                keep.add(pool)
-        self._zombie_pools = keep
-
-    def _invoke(self, defn: Any, args: dict, ctx: Any) -> Any:
-        """spec 速览 _invoke:Provider 实际调用同步入口(to_thread 承载面)。
-
-        保留为可整体替换的薄层:替换 _run_provider 即可换执行策略;同步调用
-        经本函数时按 handle(args, ctx) 契约执行。
-        """
-        handle = self._provider_handle(defn.name)
-        return handle(args, ctx)
 
     # ------------------------------------------------------------ 取消(F025)
-    async def cancel_current(self) -> bool:
-        """取消在途 Provider 任务(协作式,F025):掐断 wait_for → execute 内
-        CancelledError 分支写 partial + re-raise(已发生副作用不假装回滚)。
-
-        无在途任务 → 返回 False(幂等)。partial 事件由 execute 的取消处理分支
-        落盘,本函数只负责触发取消(单事件循环单在途,阶段 1 agent-loop 串行)。
-        """
-        fut = self._active
-        if fut is None or fut.done() or fut.cancelling():
-            return False
-        fut.cancel()
-        return True
 
     # ------------------------------------------------------------ 关4 finalize
-    def _validate_output(self, defn: Any, raw: Any) -> None:
-        """输出契约单点校验(spec 速览表):output_schema 缺失 = 跳过;声明则
-        编译(缓存)+ model_validate。失败抛 ValidationError/ValueError,
-        _finalize 收口转 tool.error(TLB-803,"输出校验失败:")。
-        """
-        schema = getattr(defn, "output_schema", None)
-        if not schema:
-            return
-        model = self._out_models.get(id(defn))
-        if model is None:
-            try:
-                model = _registry_compile_model(
-                    f"{defn.name}__out", schema)        # 编译器同源(偏离 8)
-            except Exception as e:                      # noqa: BLE001 坏契约
-                raise ValueError(f"输出契约不可编译:{e}") from e
-            self._out_models[id(defn)] = model
-        model.model_validate(raw)                       # ValidationError 上抛
-
-    async def _spill_put(self, ctx: Any, text: str, kind: str) -> dict:
-        """ctx.storage.spill.put 封装:未接线 → PERS-221(结构化);异常收敛。"""
-        spill = getattr(getattr(ctx, "storage", None), "spill", None)
-        if spill is None:
-            raise_code("PERS-221",
-                       hint="storage.spill 未接线(能力未激活),超长输出无法归档")
-        r = spill.put(text, kind=kind)
-        if inspect.isawaitable(r):
-            r = await r
-        if not isinstance(r, dict):
-            raise_code("PERS-221", hint="storage.spill.put 返回非 dict(契约违约)")
-        return r
-
-    async def _finalize(self, ctx: Any, call: ToolCall, defn: Any, raw: Any, *,
-                        elapsed_ms: float = 0.0) -> ExecResult:
-        """关4 结果检查与落盘(spec 伪代码权威;偏离 4:spill_ref 全 dict)。
-
-        输出 schema 校验(声明才做;失败 → tool.error TLB-803)→ 超长转 spill
-        (F039,原文落私有区,上下文只留 ≤2KB 摘要)→ tool.result(ok/summary/
-        truncated/spill_ref,trace.parent=父 response)。spill 写失败/超限
-        (PERS-221/223)同样收敛为单条 tool.error——每调用恰一条终局事件。
-        """
-        if getattr(defn, "output_schema", None):
-            try:
-                self._validate_output(defn, raw)
-            except (ValidationError, ValueError) as e:
-                detail = summarize_validation(e) if isinstance(e, ValidationError) \
-                    else str(e)
-                return await self._on_error(ctx, call, "TLB-803",
-                                            f"输出校验失败:{detail}")
-        from pyharness.core.provider_result import ProviderOutcome
-        ok = bool(raw.get('ok')) if isinstance(raw, ProviderOutcome) else True
-        text = render_result_text(raw)
-        truncated, spill_ref = False, None
-        if len(text) > SPILL_THRESHOLD:
-            try:
-                sp = await self._spill_put(ctx, text, kind=call.name)
-            except PyHError as e:                       # PERS-221/223 → 回喂
-                return await self._on_error(ctx, call, e.code,
-                                            e.to_model_message())
-            truncated = True
-            spill_ref = sp                              # {ref,chars,lines,preview}
-            preview = str(sp.get("preview") or text[:500])[:500]
-            chars = int(sp.get("chars", len(text)))
-            lines = int(sp.get("lines", text.count("\n") + 1))
-            ref = sp.get("ref", "?")
-            summary = f"{preview}…(共{chars}字符/{lines}行,spill:{ref})"
-        else:
-            summary = summarize_text(text)
-        await self._append(ctx, "tool.result",
-                           {"name": call.name, "call_id": call.call_id,
-                            "ok": ok, "summary": summary,
-                            "truncated": truncated, "spill_ref": spill_ref},
-                           actor="tool", trace=self._trace(call))
-        return ExecResult(ok=ok, summary=summary, truncated=truncated,
-                          spill_ref=spill_ref, elapsed_ms=elapsed_ms)
 
 
 __all__ = [

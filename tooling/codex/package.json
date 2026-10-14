@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "Project-local supported Codex app-server; no global install changes",
+  "dependencies": {"@openai/codex": "0.162.1"}
+}

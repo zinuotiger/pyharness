@@ -25,6 +25,10 @@ class Budget(Model):
 
 
 class AgentDefinition(Model):
+    executor: Literal['engine', 'codex'] = 'engine'
+    codex_tools: Literal['harness','native'] = 'harness'
+    codex_model: str | None = Field(default=None, max_length=120)
+    codex_executable: str | None = Field(default=None, max_length=1000)
     review_mode: Literal['manual', 'automatic'] = 'manual'
     agent_id: str = ''
     name: str = Field(min_length=1, max_length=100)
@@ -69,6 +73,7 @@ class Run(Model):
     session_id: str
     task_id: str = ''
     name: str = ''
+    executor: Literal['engine','codex'] = 'engine'
     agent_id: str | None = None
     agent_version: int | None = None
     status: Literal['queued', 'running', 'waiting_approval', 'paused', 'retrying', 'completed', 'failed', 'cancelled'] = 'queued'
@@ -169,6 +174,7 @@ class ConnectionRecord(Model):
 
 
 class RunRequest(Model):
+    request_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_.:-]{1,160}$')
     text: str = Field(min_length=1,max_length=32000)
     session_id: str | None = None
     agent_id: str | None = None

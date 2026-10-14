@@ -9,13 +9,20 @@ import logging
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+from pyharness.application.message_projection import (log, _with_message_origin, _as_dict, _json_safe)
+from pyharness.application.session_access import (_session_module, _METADATA_HOSTS)
+
+if TYPE_CHECKING:
+    from pyharness.engine import EngineSpine
+    from pyharness.core.session import SessionLog
 
 from pyharness.application.models import SHELL_CAPABILITIES
 from pyharness.core.approval import ApprovalProvider
 from pyharness.core.channel import normalize_channel
 from pyharness.core.skill import SkillManager
 from pyharness.core.task_queue import TaskQueue, queue_kwargs_of
+from pyharness.core.task_runner import TaskRunner
 from pyharness.core.tenant_settings import (
     TenantSettingsStore,
     normalize_tenant_id,
@@ -28,77 +35,6 @@ from pyharness.errors import raise_code
 from pyharness.events import call_id_of
 from pyharness.events.vocab import validate_payload
 
-log = logging.getLogger("pyharness.application.service")
-
-
-def _with_message_origin(log_: Any, msgs: list[dict]) -> list[dict]:
-    """给派生消息附**来源标记**(只供 UI 判断消息来自谁,不参与 LLM 请求)。
-
-    定时任务到点触发时,Scheduler 会以 ``actor="user"`` 写一条 ``user.message``,
-    其 ``origin="schedule:<name>"``(schedule._fire)。``derive_messages`` 只投影
-    role/content,且**同时喂给 agent_loop 的 LLM 请求与 compaction 的 token 估算**,
-    故**不改其输出契约**;改在本层按 1:1 对应关系**复制**并附加键:
-
-      - ``session._fold_history`` 对每条 ``user.message`` 恰产出一条 ``role=user``
-        消息(``user.message_edited`` 是替换内容而非增删),故第 k 条 user 消息 ↔
-        第 k 条 user.message 事件;
-      - 复制字典,避免污染 ``derive_messages`` 的 history 缓存对象。
-
-    普通用户输入同样写 ``origin=None``(键恒在,便于前端统一判断)。
-    """
-    events = [e for e in log_.events_after(0) if e.type == 'user.message']
-    origins = [getattr(e, 'origin', None) for e in events]
-    answers = [e for e in log_.events_after(0) if e.type == 'agent.message']
-    j = 0
-    out: list[dict] = []
-    k = 0
-    for m in msgs:
-        row = dict(m)
-        if row.get("role") == "user":
-            row["origin"] = origins[k] if k < len(origins) else None
-            if k < len(events):
-                row['seq'] = events[k].seq
-                row['artifact_ids'] = (events[k].payload.get('meta') or {}).get('platform', {}).get('artifact_ids', [])
-            k += 1
-        elif row.get('role') == 'assistant' and row.get('content') and not row.get('tool_calls'):
-            if j < len(answers): row['seq'] = answers[j].seq
-            j += 1
-        out.append(row)
-    if k != len(origins):                  # 不变式破损:宁可少标记也不错标
-        log.warning("user.message 与派生 user 消息数不一致(events=%d msgs=%d)",
-                    len(origins), k)
-        for row in out:
-            row.pop("origin", None)
-            row.pop('seq', None)
-            row.pop('artifact_ids', None)
-    if j != len(answers):
-        for row in out:
-            if row.get('role') == 'assistant': row.pop('seq', None)
-    return out
-
-
-
-def _session_module():
-    """Application-owned session persistence surface."""
-    from pyharness.application import session_store as sessions
-    return sessions
-
-
-def _as_dict(value: Any) -> dict:
-    if is_dataclass(value):
-        return asdict(value)
-    if isinstance(value, dict):
-        return dict(value)
-    return dict(vars(value))
-
-
-def _json_safe(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
-
-
-_METADATA_HOSTS = frozenset({"169.254.169.254", "metadata.google.internal",
-                             "100.100.100.200"})
-
 
 from pyharness.core.url_policy import validate_service_url as _validate_registry_url
 
@@ -106,7 +42,13 @@ from pyharness.core.url_policy import validate_service_url as _validate_registry
 from pyharness.core.lifecycle import admitted, stop_admissions
 
 
-class ApplicationService:
+from pyharness.application.tenant_service import TenantService
+from pyharness.application.orchestration_service import OrchestrationService
+from pyharness.application.history_service import HistoryService
+from pyharness.application.interaction_service import InteractionService
+from pyharness.application.extension_service import ExtensionService
+
+class ApplicationService(TenantService, OrchestrationService, HistoryService, InteractionService, ExtensionService):
     """Session-scoped business facade independent from HTTP and UI frameworks."""
 
     def __init__(self, ctx: Any, *, channel: str = "desktop",
@@ -125,108 +67,18 @@ class ApplicationService:
         self.channel = str(st.name)
         self.tenant_id = normalize_tenant_id(tenant_id)
         self._surface: Any = None
-        self._logs: dict[str, Any] = {}
+        self._logs: dict[str, SessionLog] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_locks: dict[str, asyncio.Lock] = {}
         self._queues: dict[str, TaskQueue] = {}
         self._approvals: dict[str, ApprovalProvider] = {}
-        self._engines: dict[str, Any] = {}
+        self._engines: dict[str, EngineSpine] = {}
         self._settings_store = TenantSettingsStore(
             tenants_dir(self._storage_root()))     # R31-2:派生点收口到 tenants_dir
         register_tenant_store(self.tenant_id, self._settings_store)
         from pyharness.core.llm import LLMRuntime
         self.llm_runtime = LLMRuntime()
 
-    def _storage_root(self) -> Path:
-        cfg = _session_module()._cfg_of(self.ctx)
-        root = getattr(getattr(cfg, "storage", None), "root", None)
-        return Path(str(root or "~/.pyharness")).expanduser()
-
-    @property
-    def platform(self):
-        if not hasattr(self, '_platform'):
-            from pyharness.application.platform_service import PlatformService
-            self._platform = PlatformService(self)
-        return self._platform
-
-    def tenant_root(self) -> Path:
-        return self._storage_root() / "tenants" / self.tenant_id
-
-    def _tenant_sessions_dir(self, ctx: Any = None) -> Path:
-        """本租户的**会话目录**—— 唯一派生点(R24 收口)。
-
-        `default` 租户沿用装配 ctx 的 `storage.sessions_dir`(L1 锚点);其余租户落在
-        自己的租户根下,与 `effective_settings()` 里 `storage.db_path` 的租户分域
-        **配套**(索引库与会话目录同域,见 R14-8)。此前该分支在**三处**各写一遍
-        (三份相同且正确,但"同源规则多份实现"必然漂移 —— 见 R14-3 方法论)。
-        """
-        c = ctx if ctx is not None else self.ctx
-        if self.tenant_id == "default":
-            return _session_module()._sessions_dir_of(c)
-        return self.tenant_root() / "sessions"
-
-    def effective_settings(self) -> Any:
-        """Settings overridden by this tenant's active model profile **and storage scope**.
-
-        ``2026-09-21 R14-8``:非 ``default`` 租户的**会话目录**本就按租户分
-        （调用点一律用 ``tenant_root()/sessions``），但其**派生索引库**
-        （``storage.db_path``）仍是**全局**的 ⇒ 两个租户共用一个 FTS 库：
-        ① ``query`` 没有任何租户维度 ⇒ A 的 agent 能检索到 B 的会话内容
-           （实测：A 侧不带 ``session_id`` 查询直接命中 B 的条目，`session.fts_query`
-           的 ``session_id`` 又取自 LLM 自报参数）；
-        ② 同名 sid 跨租户在 ``fts_rows`` 主键 ``(session_id, seq)`` 上**碰撞**
-           ⇒ 后写者被 ``INSERT OR IGNORE`` 静默丢弃、其内容根本不入索引（实测）。
-        **派生视图必须与真源同域**：索引库随会话目录一起按租户分。
-        """
-        cfg = _session_module()._cfg_of(self.ctx)
-        profile = self._settings_store.active_profile(self.tenant_id)
-        scoped = self.tenant_id != "default"
-        if (profile is None and not scoped) or not hasattr(cfg, "model_dump"):
-            return copy.deepcopy(cfg)       # Runtime registration must not mutate caller settings.
-        raw = cfg.model_dump()
-        if scoped:                          # 索引库随会话目录同域（R14-8）
-            storage = dict(raw.get("storage") or {})
-            storage["db_path"] = str(self.tenant_root() / "index.db")
-            raw["storage"] = storage
-        if profile is not None:
-            llm = dict(raw.get("llm") or {})
-            llm.update({
-                "model": profile["model"],
-                "base_url": profile["base_url"],
-                "api_key": f"tenant:{self.tenant_id}:{profile['id']}",
-                "temperature": profile.get("temperature",
-                                           llm.get("temperature", 0.7)),
-                "max_tokens": profile.get("max_tokens",
-                                          llm.get("max_tokens", 4096)),
-                "fallback_models": list(profile.get("fallback_models") or []),
-            })
-            raw["llm"] = llm
-        from pyharness.config import Settings
-        return Settings.model_validate(raw)
-
-    def tenant_state(self) -> dict:
-        state = self._settings_store.state(self.tenant_id)
-        if self.tenant_id != 'default':
-            state['tenants'] = [self.tenant_id]
-        return state
-
-    def save_model_profile(self, body: dict) -> dict:
-        self._ensure_open()
-        result = self._settings_store.upsert_profile(self.tenant_id, body)
-        result["restart_required"] = bool(self._engines)
-        return result
-
-    def activate_model_profile(self, profile_id: str) -> dict:
-        self._ensure_open()
-        result = self._settings_store.activate_profile(self.tenant_id, profile_id)
-        result["restart_required"] = bool(self._engines)
-        return result
-
-    def delete_model_profile(self, profile_id: str) -> dict:
-        self._ensure_open()
-        result = self._settings_store.delete_profile(self.tenant_id, profile_id)
-        result["restart_required"] = bool(self._engines)
-        return result
 
     def _surface_ctx(self) -> Any:
         if self.tenant_id == "default":
@@ -298,42 +150,13 @@ class ApplicationService:
                     await _eng.activate_orchestration(spine, task_queue=q)
             return q
 
-    async def _engine_runner_for(self, sid: str, log_: Any) -> Any:
+    async def _engine_runner_for(self, sid: str, log_: SessionLog) -> TaskRunner:
         spine = self._engines.get(sid)
         from pyharness import engine as _eng
         from pyharness.engine import make_runner as _eng_make_runner
-        cfg = self.effective_settings()
-        from pyharness.application.platform_service import PlatformService
-        platform_binding = PlatformService.binding(log_)
-        platform_definition = None
-        if platform_binding:
-            from pyharness.application.platform_models import AgentDefinition
-            platform_definition = AgentDefinition.model_validate(platform_binding['definition'])
-            self.platform.validate_execution_policy(platform_definition)
-            cfg.loop.max_turns = platform_definition.max_rounds
-            cfg.budget.task.max_in_tokens = platform_definition.budget.input_tokens
-            cfg.budget.task.max_out_tokens = platform_definition.budget.output_tokens
-            cfg.budget.task.max_cost_yuan = platform_definition.budget.cost
-            cfg.security.policy.preset = platform_definition.permission_policy
-            cfg.plugins.enabled = []
-            cfg.plugins.mcp_servers = []
-            if platform_definition.mcp_connections:
-                from pyharness.config import McpServerCfg
-                configured=self.platform.connection_definitions()
-                for name in platform_definition.mcp_connections:
-                    connection=configured.get('mcp:'+name)
-                    if connection is None or not connection['config']['enabled']:
-                        raise_code('CFG-601',reason='agent_mcp_connection_disabled')
-                    cfg.plugins.mcp_servers.append(McpServerCfg.model_validate(connection['config']))
-            if platform_definition.model_connection:
-                profiles = self.tenant_state()['profiles']
-                profile = next((p for p in profiles if p['id'] == platform_definition.model_connection), None)
-                if profile is None:
-                    raise_code('CRED-701', reason='agent_model_connection_missing')
-                cfg.llm.model, cfg.llm.base_url = profile['model'], profile['base_url']
-                cfg.llm.api_key = f'tenant:{self.tenant_id}:{profile["id"]}'
-                cfg.llm.fallback_models = []
-        if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None:
+        from pyharness.application.execution_config import compile_execution
+        cfg, platform_definition = compile_execution(self, log_)
+        if self.tenant_id != 'default' and self._settings_store.active_profile(self.tenant_id) is None and not (platform_definition and platform_definition.executor == 'codex'):
             # Explicit borrowed test/local adapters do not resolve host credentials.
             models = [cfg.llm.model, *(cfg.llm.fallback_models or [])]
             if not all(self.llm_runtime.has_borrowed_adapter(model) for model in models):
@@ -347,7 +170,8 @@ class ApplicationService:
                 attach_persistence=False,
                 # GAP-11:桌面服务层即 human 通道 "desktop"(构造期声明)——
                 # 必须下沉到 spine,否则该会话的每次工具授权都 APR-503。
-                channel=self.channel, llm_runtime=self.llm_runtime)
+                channel=self.channel, llm_runtime=self.llm_runtime,
+                register_model=not (platform_definition and platform_definition.executor == 'codex'))
             try:
                 if platform_definition is not None:
                     from pyharness.application.platform_runtime import PlatformRuntime
@@ -364,6 +188,11 @@ class ApplicationService:
             if getattr(self.ctx, "guard", None) is None:
                 self.ctx.guard = spine.guard
                 self.ctx._guard_owner_sid = sid
+        if platform_definition is not None and platform_definition.executor == 'codex':
+            if spine.external_runner is None:
+                from pyharness.application.codex_runner import CodexRunner
+                spine.external_runner = CodexRunner(spine, spine.platform_runtime)
+            return spine.external_runner
         return _eng_make_runner(spine)
 
     def runner_seam(self) -> Any:
@@ -553,136 +382,6 @@ class ApplicationService:
                                                  "session_id": sid})
         return {"task_id": task_id, "user_seq": env.seq}
 
-    @admitted
-    async def list_jobs(self, sid: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        owner = self.owner_for(sid)
-        rows = [self._job_dict(await spine.jobs.status(job_id, by=owner))
-                for job_id in spine.jobs.list_owned(owner)]
-        return {"jobs": rows, "count": len(rows)}
-
-    @staticmethod
-    def _job_dict(status: Any) -> dict:
-        return _json_safe(_as_dict(status))
-
-    @admitted
-    async def start_job(self, sid: str, intent: str) -> str:
-        self._ensure_open()
-        intent = str(intent or "").strip()
-        if not intent:
-            raise_code("EVT-100", field="intent", advice="job intent 不能为空")
-        log_ = await self.require_session(sid)
-        await self.queue_for(sid, log_)
-        spine = self._engines[sid]
-        owner = self.owner_for(sid)
-        ctx = SimpleNamespace(owner=owner, owner_channel=self.channel,
-                              scope=getattr(spine, "scope", None),
-                              tools=getattr(spine, "tools", None), budget=None)
-        return await spine.jobs.start(intent, ctx)
-
-    @admitted
-    async def job_status(self, sid: str, job_id: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        return {"job": self._job_dict(
-            await spine.jobs.status(job_id, by=self.owner_for(sid)))}
-
-    @admitted
-    async def cancel_job(self, sid: str, job_id: str) -> bool:
-        _, spine = await self.public_spine_for(sid)
-        return bool(await spine.jobs.cancel(job_id, by=self.owner_for(sid)))
-
-    @admitted
-    async def list_schedules(self, sid: str) -> dict:
-        _, spine = await self.public_spine_for(sid)
-        rows = [_json_safe(_as_dict(j)) for j in await spine.schedule.list_jobs()]
-        return {"schedules": rows, "count": len(rows)}
-
-    @admitted
-    async def schedule_action(self, sid: str, action: str, *,
-                              name: str = "", kind: str = "cron",
-                              expr: str = "", intent: str = "",
-                              is_risky: Optional[bool] = None) -> dict:
-        self._ensure_open()
-        action = str(action or "").strip().lower()
-        name = str(name or "").strip()
-        log_ = await self.require_session(sid)
-        _, spine = await self.public_spine_for(sid)
-        ctx = SimpleNamespace(session=getattr(spine, "session", None),
-                              task_queue=getattr(spine, "task_queue", None))
-        if action == "add":
-            expr = str(expr or "").strip()
-            intent = str(intent or "").strip()
-            if not name or not expr or not intent:
-                raise_code("EVT-100", advice="schedule add 需要 name/expr/intent")
-            await self.queue_for(sid, log_)
-            await spine.schedule.register(
-                name, str(kind or "cron").strip().lower(), expr,
-                {"intent": intent}, is_risky=is_risky, ctx=ctx)
-        elif action == 'edit':
-            await spine.schedule.edit(name,kind,expr,intent,ctx=ctx)
-        elif action == 'run_now':
-            await spine.schedule.run_now(name,ctx=ctx)
-        elif action in {"pause", "resume", "remove"}:
-            if not name:
-                raise_code("EVT-100", field="name", advice=f"schedule {action} 需要 name")
-            await getattr(spine.schedule, action)(name, ctx=ctx)
-        else:
-            raise_code("EVT-100", field="action",
-                       advice="action 须为 add/pause/resume/remove")
-        return {"ok": True, "action": action, "name": name}
-
-    @admitted
-    async def list_subagents(self, sid: str) -> dict:
-        from pyharness.application.platform_projection import subtask_history
-        log_ = await self.require_session(sid)
-        spine = self._engines.get(sid)
-        status = (_json_safe(_as_dict(spine.subagent.status())) if spine is not None else
-                  {'running': 0, 'limit': 8, 'active_children': []})
-        history = subtask_history(sid, log_.events_after(0), status['active_children'])
-        waiting = {item['session_id'] for item in (await self.pending_approvals())['pending']}
-        for row in history:
-            if row['status'] == 'running' and row['session_id'] in waiting:
-                row['status'] = 'waiting_approval'
-            if row['error_code'] == 'runtime_interrupted':
-                # A silent child still owns durable terminal facts in its log.
-                # Do not construct an engine or replay work to recover history.
-                from pyharness.application.platform_projection import summary
-                child_log = await self.require_session(row['session_id'])
-                for event in child_log.events_after(0):
-                    if event.type in {'subagent.joined','subagent.failed'} and event.payload.get('sub_id') == row['session_id']:
-                        row.update(status='completed' if event.type=='subagent.joined' else 'failed',
-                            finished_at=event.ts,summary=summary(event.payload.get('summary','')),error_code=None)
-        return {"status": status, 'history': history}
-
-    @admitted
-    async def spawn_subagent(self, sid: str, task: str, *,
-                             tools_subset: Any = None,
-                             deny_extra: Any = None,
-                             budget_ratio: float = 0.25,
-                             notify: bool = True) -> str:
-        self._ensure_open()
-        from pyharness.core.subagent import SubagentSpec
-        task = str(task or "").strip()
-        if not task:
-            raise_code("EVT-100", field="task", advice="subagent task 不能为空")
-        log_ = await self.require_session(sid)
-        await self.queue_for(sid, log_)
-        spine = self._engines[sid]
-        spec = SubagentSpec(task=task, tools_subset=tools_subset,
-                            deny_extra=list(deny_extra or []),
-                            budget_ratio=float(budget_ratio), depth=1,
-                            notify=bool(notify))
-        ctx = SimpleNamespace(round_seq=int(log_.stats().get("seq", 1)),
-                              owner=self.owner_for(sid),
-                              scope=getattr(spine, "scope", None),
-                              tools=getattr(spine, "tools", None),
-                              bus=getattr(spine, "bus", None))
-        return await spine.subagent.spawn(spec, ctx)
-
-    @admitted
-    async def cancel_subagent(self, sid: str, sub_id: str) -> bool:
-        _, spine = await self.public_spine_for(sid)
-        return bool(await spine.subagent.cancel(sub_id, by=self.owner_for(sid)))
 
     def _ensure_open(self):
         if getattr(self, '_closing', False) and asyncio.current_task() not in getattr(self, '_admissions', {}):
@@ -703,6 +402,8 @@ class ApplicationService:
                 await fn(*args, **kw)
             except BaseException as exc:
                 errors.append(exc)
+        if hasattr(self, '_channels'):
+            await attempt(self._channels.close)
         if hasattr(self, '_platform'):
             await attempt(self._platform.stop_actions)
         spines = list(self._engines.values())
@@ -725,783 +426,21 @@ class ApplicationService:
             raise BaseExceptionGroup('application cleanup failed', errors)
 
     # ------------------------------------------------------------ read models
-    @admitted
-    async def list_sessions(self) -> dict:
-        lst = self.surface_mgr().list()
-        if callable(lst) or hasattr(lst, "__await__"):
-            lst = await _session_module()._await(lst)
 
-        def _title_of(sid: str) -> str:
-            log_ = self._logs.get(str(sid))
-            if log_ is None:
-                return ""
-            cache = self.__dict__.setdefault('_list_titles', {})
-            seq = log_.stats()['seq']
-            if sid in cache and cache[sid][0] == seq:
-                return cache[sid][1]
-            title = ""
-            for ev in log_.events_after(0):
-                if ev.type == "session.created":
-                    title = ev.payload.get("title") or title
-                elif ev.type == "session.renamed":
-                    title = ev.payload.get("new_title") or title
-            cache[sid] = (seq, str(title))
-            return str(title)
-
-        sessions: list[dict] = []
-        for item in (lst or []):
-            row = item if isinstance(item, dict) else {"sid": str(item)}
-            sid = str(row.get("sid") or item)
-            register_session_tenant(sid, self.tenant_id)
-            if not row.get("title"):
-                row["title"] = _title_of(sid)
-            sessions.append(row)
-        authorized = {row['sid'] for row in sessions}
-        for sid in set(self.__dict__.get('_list_titles', {}))-authorized:
-            self._list_titles.pop(sid, None)
-        return {"sessions": sessions, "count": len(sessions)}
-
-    @admitted
-    async def session_messages(self, sid: str, after_seq: int = 0) -> dict:
-        log_ = await self.require_session(sid)
-        msgs = log_.derive_messages()
-        stats_fn = getattr(log_, "stats", None)
-        to_seq = int((stats_fn().get("seq") or 0)) if callable(stats_fn) else 0
-        projected = _with_message_origin(log_, msgs)
-        records = {r['artifact_id']:r for r in (await self.platform.artifacts())['artifacts']
-                   if r['session_id'] == sid}
-        for row in projected:
-            row['attachments'] = [{k:records[i][k] for k in ('artifact_id','filename','media_type','size','preview_type')}
-                                  for i in row.pop('artifact_ids', []) if i in records]
-        return {"sid": sid, "after_seq": int(after_seq), "to_seq": to_seq,
-                "messages": projected}
-
-    @admitted
-    async def session_timeline(self, sid: str, after_seq: int = 0,
-                               kinds: str = "") -> dict:
-        log_ = await self.require_session(sid)
-        if isinstance(after_seq, bool) or not isinstance(after_seq, int):
-            raise_code("EVT-100", field="after_seq", value=after_seq,
-                       advice="after_seq 须 int(seq 游标)")
-        from pyharness.application.event_projection import derive_timeline
-        nodes = derive_timeline(
-            log_.events_after(after_seq=max(0, int(after_seq))),
-            kinds=str(kinds or ""))
-        return {"sid": sid, "base_seq": max(0, int(after_seq)),
-                "nodes": [asdict(n) for n in nodes]}
-
-    @admitted
-    async def event_detail(self, sid: str, seq: int) -> dict:
-        log_ = await self.require_session(sid)
-        if isinstance(seq, bool) or not isinstance(seq, int):
-            raise_code("EVT-100", field="seq", value=seq, advice="seq 须 int")
-        env = log_.get(int(seq))
-        if env is None:
-            raise_code("EVT-100", sid=sid, seq=seq,
-                       advice="seq 不存在(空洞/坏行隔离/越界)")
-        from pyharness.application.event_projection import envelope_dict
-        return {"event": envelope_dict(env)}
-
-    @admitted
-    async def telemetry_report(self, sid: str) -> dict:
-        """旧遥测面:按事件类型计数聚合(与治理因果无关,保留兼容)。"""
-        log_ = await self.require_session(sid)
-        from pyharness.core import telemetry as _tel
-        try:
-            return {"sid": str(sid), "ok": True,
-                    "audit": _tel.session_audit(log_)}
-        except Exception as e:                         # noqa: BLE001
-            return {"sid": str(sid), "ok": False,
-                    "error": f"{type(e).__name__}:{e}"[:200]}
 
     # ------------------------------------------------------------ 治理审计(GAP-7)
-    @admitted
-    async def governance_audit(self, sid: str, *, decision_id: str = "",
-                               since_seq: int = 0, reconcile: bool = False,
-                               limit: int = 100) -> dict:
-        """治理审计查询面:把 ``governance.audit.AuditSystem`` 接成**产品入口**。
-
-        GAP-7 修复点:此前 ``AuditSystem`` 已构造并注入 ``GovernanceContext``,但
-        ``causal_chain`` / ``denied_report`` / ``reconcile`` / ``legacy_session_audit``
-        在 ``pyharness/`` 内**零调用点** ⇒ 治理数据在盘上、查询面不可达,桌面
-        "审计"页只能用旧遥测(类型计数,无决策因果)顶上。
-
-        读侧纪律(**replay-only**):每条结论都由**重放会话日志**现算得出,不读
-        任何内存缓存、不订阅事件 ⇒ 重启后同一日志得同一结果(可复现)。
-
-        返回:``decisions``(最近 N 条 decision.issued,倒序)·
-        ``denied``(被拒清单,含 ``executed`` 证据位:该 call_id 是否有配对
-        tool.result)· ``findings``(``reconcile=True`` 时的三类一致性对账)·
-        ``chain``(给定 ``decision_id`` 的因果链还原)。
-        """
-        log_, spine = await self.public_spine_for(sid)
-        audit = getattr(getattr(spine, "governance", None), "audit", None)
-        if audit is None:
-            raise_code("CYC-999", module="application.service",
-                       field="governance.audit",
-                       why="治理审计面未接线(AuditSystem 未注入 GovernanceContext)")
-        from pyharness.governance import verify_receipt
-        events = list(log_.events_after(0))
-        decisions = []
-        tenant = getattr(log_, "tenant_id", None)
-        for e in events:
-            if e.type != "decision.issued":
-                continue
-            p = getattr(e, "payload", None) or {}
-            decisions.append({
-                "decision_id": str(p.get("decision_id") or ""),
-                "verdict": str(p.get("verdict") or ""),
-                "tool": str(p.get("tool") or ""),
-                "guard_ids": list(p.get("guard_ids") or []),
-                "policy_refs": list(p.get("policy_refs") or []),
-                "principal_kind": p.get("principal_kind"),
-                "principal_id": p.get("principal_id"),
-                "principal_channel": p.get("principal_channel"),
-                "approval_ref": p.get("approval_ref"),
-                "supersedes": p.get("supersedes"),
-                "seq": getattr(e, "seq", None),
-                "call_id": call_id_of(e),
-                # 租户归属(GAP-10):取自**事件信封**(框架侧落盘的事实),
-                # 不是从服务实例的 self.tenant_id 反推 —— 后者是"当前请求"的租户,
-                # 前者是"该事件属于谁"的事实。
-                "tenant_id": getattr(e, "tenant_id", None),
-            })
-        n = max(1, int(limit or 100))
-        # 凭证核验面(离线可验):README 曾自陈 ``verify_receipt`` "未接 CLI/HTTP
-        # /工具外壳"—— 库级可达而产品不可达。此处接上:**从事件日志重建**全部凭证
-        # (``rebuild_from_log``,INV-G2/R2:不依赖任何内存缓存,重启后同样成立),
-        # 逐条重算哈希(篡改任一受保护字段即 False),再校验 prev_hash 链单调。
-        from pyharness.governance import verify_chain
-        from pyharness.governance.receipt import rebuild_from_log
-        all_rec = rebuild_from_log(log_)
-        receipts: dict = {
-            "count": len(all_rec),
-            "verified": sum(1 for r in all_rec if verify_receipt(r)),
-            "chain_valid": verify_chain(all_rec) if all_rec else True,
-            "items": [{"receipt_id": r.receipt_id,
-                       "decision_id": r.decision_id, "kind": r.kind,
-                       "verified": verify_receipt(r),
-                       "approval_ref": r.approval_ref,
-                       "content_hash": r.content_hash,
-                       "prev_hash": r.prev_hash} for r in all_rec],
-        }
-        return {
-            "sid": str(sid), "ok": True,
-            "tenant_id": tenant,
-            "decisions": decisions[-n:][::-1],
-            "denied": audit.denied_report(since_seq=int(since_seq or 0)),
-            "findings": (await audit.reconcile()) if reconcile else [],
-            "chain": audit.causal_chain(str(decision_id)) if decision_id else None,
-            "receipts": receipts,
-        }
 
     # ------------------------------------------------------------ 治理证据(GAP-8)
-    @admitted
-    async def governance_evidence(self, sid: str, *, task_id: str = "") -> dict:
-        """证据查询面:按任务段聚合的治理证据工件。
-
-        GAP-8 修复点:此前 ``EvidenceCollector`` 只有订阅者、没有生产者
-        (``archive()`` 零调用) ⇒ ``evidence.archived`` 永不产生、索引恒空、
-        ``collect_for_task()`` 恒返回 ``()``。现由 ``engine.archive_task_evidence``
-        在任务段结束后按冻结规则产出。
-
-        **INV-E3 可核验**:回答**不取自订阅态内存索引**,而是由 ``from_log`` 从
-        append-only 日志**现场重建**——故重启后同一日志得同一答案。``indexed`` 与
-        ``rebuilt`` 两数并列展示,二者不一致即说明派生缓存与真源脱节(可观测)。
-        """
-        log_, spine = await self.public_spine_for(sid)
-        coll = getattr(getattr(spine, "governance", None), "evidence", None)
-        if coll is None:
-            raise_code("CYC-999", module="application.service",
-                       field="governance.evidence",
-                       why="证据面未接线(EvidenceCollector 未注入 GovernanceContext)")
-        from pyharness.governance import EvidenceCollector
-        rebuilt = await EvidenceCollector.from_log(log_)     # INV-E3:由日志重建
-        out: dict = {
-            "sid": str(sid), "ok": True, "task_id": str(task_id),
-            "indexed": coll.evidence_count(),
-            "rebuilt": rebuilt.evidence_count(),
-            "artifacts": [
-                {"evidence_id": str((getattr(e, "payload", None) or {})
-                                    .get("evidence_id") or ""),
-                 "claim": str((getattr(e, "payload", None) or {}).get("claim") or ""),
-                 "refs": list((getattr(e, "payload", None) or {}).get("refs") or []),
-                 "seq": getattr(e, "seq", None)}
-                for e in log_.events_after(0)
-                if getattr(e, "type", None) == "evidence.archived"],
-        }
-        if task_id:
-            out["for_task"] = [
-                {"evidence_id": ev.evidence_id, "claim": ev.claim,
-                 "refs": [{"kind": r.kind, "locator": r.locator}
-                          for r in ev.refs]}
-                for ev in rebuilt.collect_for_task(str(task_id))]
-        return out
 
     # ------------------------------------------------------------ edit / feedback
-    @staticmethod
-    def _last_env_of(log_: Any, type_: str):
-        for ev in reversed(list(log_.events_after(0))):
-            if ev.type == type_:
-                return ev
-        return None
 
-    @admitted
-    async def resend_text(self, log_: Any, sid: str, text: str) -> dict:
-        self._ensure_open()
-        text = str(text or "").strip()
-        if not text:
-            raise_code("EVT-100", advice="重发内容为空")
-        env = await log_.append("user.message", {"content": text},
-                                actor="user", origin=self.channel, sync=True)
-        queue = await self.queue_for(sid, log_)
-        task_id = await queue.submit(text, meta={"channel": self.channel,
-                                                 "session_id": sid})
-        return {"task_id": task_id, "user_seq": env.seq}
-
-    @admitted
-    async def edit_message(self, sid: str, seq: int, text: str,
-                           *, resend: bool = False) -> dict:
-        text = str(text or "").strip()
-        log_ = await self.require_session(sid)
-        from pyharness.core.message_edit import edit_user_message
-        env = await edit_user_message(log_, int(seq), text)
-        out: dict = {"ok": True, "edited_seq": env.seq, "target_seq": int(seq)}
-        if resend:
-            out["resend"] = await self.resend_text(log_, sid, text)
-        return out
-
-    @admitted
-    async def resend_message(self, sid: str, seq: int) -> dict:
-        log_ = await self.require_session(sid)
-        env = log_.get(int(seq))
-        if env is None or env.type != "user.message":
-            raise_code("EVT-101", seq=int(seq), hint="目标不是 user.message,无法重发")
-        return await self.resend_text(log_, sid, env.payload.get("content", ""))
-
-    @admitted
-    async def feedback(self, sid: str, seq: int, kind: str,
-                       note: str = "") -> dict:
-        kind = str(kind or "")
-        if kind not in ("up", "down", "flag"):
-            raise_code("EVT-100", field="kind", kind=kind,
-                       advice="kind 取值 up/down/flag")
-        log_ = await self.require_session(sid)
-        env = log_.get(int(seq))
-        if env is None or env.type != "agent.message":
-            raise_code("EVT-101", seq=int(seq), hint="反馈目标须是 agent.message")
-        await log_.append("user.feedback",
-                          {"target_seq": int(seq), "kind": kind,
-                           "note": str(note or "")[:500] or None},
-                          actor="user", sync=True)
-        return {"ok": True, "target_seq": int(seq), "kind": kind}
-
-    @admitted
-    async def edit_last_user(self, sid: str, text: str,
-                             *, resend: bool = False) -> dict:
-        log_ = await self.require_session(sid)
-        env = self._last_env_of(log_, "user.message")
-        if env is None:
-            raise_code("EVT-101", hint="会话里还没有可编辑的用户消息")
-        return await self.edit_message(sid, env.seq, text, resend=resend)
-
-    @admitted
-    async def resend_last_user(self, sid: str) -> dict:
-        log_ = await self.require_session(sid)
-        env = self._last_env_of(log_, "user.message")
-        if env is None:
-            raise_code("EVT-101", hint="会话里还没有可重发的用户消息")
-        return await self.resend_message(sid, env.seq)
-
-    @admitted
-    async def feedback_last_agent(self, sid: str, kind: str,
-                                  note: str = "") -> dict:
-        log_ = await self.require_session(sid)
-        env = self._last_env_of(log_, "agent.message")
-        if env is None:
-            raise_code("EVT-101", hint="会话里还没有 agent 回复可反馈")
-        return await self.feedback(sid, env.seq, kind, note)
 
     # ------------------------------------------------------------ approvals / asks
-    @admitted
-    async def pending_approvals(self) -> dict:
-        out: list[dict] = []
-        seen: set[tuple] = set()
-        for p in self.all_approval_providers():
-            pending = getattr(p, "_pending", None)
-            if not isinstance(pending, dict):
-                continue
-            for aid, req in pending.items():
-                identity = (getattr(req, 'session_id', ''), aid)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                out.append({"approval_id": aid,
-                            "tool": getattr(req, "tool", ""),
-                            "args_summary": getattr(req, "args_summary", ""),
-                            "risk": getattr(req, "danger", "high"),
-                            "ttl_ms": getattr(req, "ttl_ms", None),
-                            "session_id": getattr(req, "session_id", "")})
-        out.sort(key=lambda x: (str(x.get("session_id") or ""), x["approval_id"]))
-        return {"pending": out, "count": len(out)}
 
-    @staticmethod
-    def _approval_sid_of(provider: Any, aid: int) -> str:
-        pending = getattr(provider, "_pending", None)
-        req = pending.get(int(aid)) if isinstance(pending, dict) else None
-        return str(getattr(req, "session_id", "") or getattr(
-            getattr(req, "log", None), "sid", "") or "")
-
-    def provider_owning(self, aid: int, *, sid: Optional[str] = None) -> Any:
-        matches = []
-        for p in self.all_approval_providers():
-            pending = getattr(p, "_pending", None)
-            if isinstance(pending, dict) and int(aid) in pending:
-                psid = self._approval_sid_of(p, aid)
-                if sid is None or psid == sid:
-                    matches.append(p)
-            elif callable(getattr(p, "owns_initializing", None)):
-                if p.owns_initializing(aid, sid=sid):
-                    matches.append(p)
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise_code("EVT-101", approval_id=aid,
-                       hint="多个会话存在同 approval_id;请使用 /api/approvals/{sid}/{aid}")
-        if sid is not None:
-            raise_code("APR-503", approval_id=aid, session_id=sid,
-                       hint="该会话下不存在此 approval_id")
-        ctx_approval = getattr(self.ctx, "approval", None)
-        if ctx_approval is not None:
-            return ctx_approval
-        raise_code("APR-503", approval_id=aid,
-                   hint="未知/已裁决的 approval_id;同一审批至多一个结果(防重放)")
-
-    @admitted
-    async def decide_approval(self, aid: int, decision: str, *,
-                              sid: Optional[str] = None) -> dict:
-        if sid is not None:
-            sid = _session_module().validate_session_id(sid)
-        if isinstance(aid, bool) or not isinstance(aid, int):
-            raise_code("EVT-100", field="aid", aid=aid, advice="aid 须 int")
-        if decision not in {"approve", "deny"}:
-            raise_code("EVT-100", field="decision", decision=decision,
-                       advice="decision 取值 approve/deny")
-        provider = self.provider_owning(aid, sid=sid)
-        fn = (getattr(provider, f"{decision}_async", None)
-              or getattr(provider, decision, None))
-        if not callable(fn):
-            raise_code("CYC-999", hint="审批裁决入口未装配")
-        res = fn(int(aid), by=self.channel)
-        if inspect.isawaitable(res):
-            await res
-        return {"ok": True, "approval_id": int(aid)}
-
-    def ask_providers(self) -> list:
-        seen, out = set(), []
-        for spine in list(self._engines.values()):
-            runner = getattr(getattr(spine, 'subagent', None), '_runner', None)
-            for child_provider in getattr(runner, 'ask_providers', {}).values():
-                if id(child_provider) not in seen:
-                    seen.add(id(child_provider))
-                    out.append(child_provider)
-            p = getattr(spine, "ask", None)
-            if p is not None and id(p) not in seen:
-                seen.add(id(p))
-                out.append(p)
-        spine = getattr(self.ctx, "engine_spine", None)
-        p = getattr(spine, "ask", None)
-        if p is not None and id(p) not in seen:
-            out.append(p)
-        return out
-
-    def sid_of_ask(self, provider: Any) -> str:
-        for sid, spine in list(self._engines.items()):
-            if getattr(spine, "ask", None) is provider:
-                return str(sid)
-        return ""
-
-    @admitted
-    async def pending_asks(self) -> dict:
-        out: list[dict] = []
-        for p in self.ask_providers():
-            for item in (p.pending_list() if hasattr(p, "pending_list") else []):
-                item = dict(item)
-                item["session_id"] = self.sid_of_ask(p) or getattr(
-                    getattr(p, "_session", None), "sid", "")
-                out.append(item)
-        out.sort(key=lambda x: (str(x.get("session_id") or ""), x["ask_id"]))
-        return {"pending": out, "count": len(out)}
-
-    @admitted
-    async def answer_ask(self, ask_id: int, *, choice: Any = None,
-                         text: Any = None, sid: Optional[str] = None) -> dict:
-        if sid is not None:
-            sid = _session_module().validate_session_id(sid)
-        matches = []
-        for p in self.ask_providers():
-            pending = getattr(p, "_pending", None)
-            if isinstance(pending, dict) and int(ask_id) in pending:
-                psid = self.sid_of_ask(p) or getattr(
-                    getattr(p, "_session", None), "sid", "")
-                if sid is None or str(psid) == sid:
-                    matches.append(p)
-        if len(matches) > 1:
-            raise_code("EVT-101", ask_id=ask_id,
-                       hint="多个会话存在同 ask_id;请指定会话")
-        if len(matches) == 1:
-            provider = matches[0]
-            fn = getattr(provider, "answer_async", None) or provider.answer
-            res = fn(int(ask_id), choice=choice, text=text, by=self.channel)
-            ok = await res if inspect.isawaitable(res) else res
-            if ok:
-                return {"ok": True, "ask_id": int(ask_id), "session_id": sid}
-        raise_code("APR-503", approval_id=int(ask_id),
-                   hint="未知/已答复的 ask_id")
 
     # ------------------------------------------------------------ attachments / workflow / budget
-    @admitted
-    async def memory_action(self, body: dict) -> dict:
-        """Explicit team namespace backed by the existing SessionKV owner."""
-        import re
-        from pyharness.core.kv import SessionKV
-        if not isinstance(body,dict) or set(body)-{'op','key','value'}:
-            raise_code('EVT-100',field='memory')
-        op=body.get('op')
-        key=body.get('key')
-        value=body.get('value')
-        if op not in {'get','set','delete','keys'}:
-            raise_code('EVT-100',field='memory.op')
-        from pyharness.application.accounts import Accounts, current_actor
-        actor = current_actor.get()
-        if actor is not None and actor.get('tenant') != self.tenant_id:
-            raise_code('GRD-403', reason='memory_tenant_mismatch')
-        if Accounts.manages_tenant(self._storage_root(), self.tenant_id):
-            roles = Accounts(self._storage_root()).teams(actor['user_id']) if actor else []
-            role = next((r['role'] for r in roles if r['id']==self.tenant_id),None)
-            if role is None or (op in {'set','delete'} and role!='owner'):
-                raise_code('GRD-403', reason='team_memory_read_only')
-        if op!='keys' and (not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',key)):
-            raise_code('EVT-100',field='memory.key')
-        if op=='set' and (not isinstance(value,str) or len(value)>4096):
-            raise_code('EVT-100',field='memory.value')
-        if not hasattr(self,'_team_memory'):
-            self._team_memory=SessionKV(self.tenant_root()/'memory.kv.json',session_id='team:'+self.tenant_id)
-        kv=self._team_memory
-        if op=='set':
-            keys=kv.apply_op('keys')
-            names=[] if keys=='(空)' else keys.split('、')
-            if key not in names and len(names)>=100:
-                raise_code('EVT-100',field='memory.quota')
-        return {'scope':'team','result':kv.apply_op(op,key=key,value=value)}
 
-    @admitted
-    async def upload_attachment(self, sid: str, attachment: dict) -> dict:
-        self._ensure_open()
-        log_ = await self.require_session(sid)
-        for payload in self.attachment_payloads([attachment], sid=sid):
-            await log_.append("user.attachment.image", payload, actor="user")
-        return {"ok": True, "sid": str(sid)}
-
-    @admitted
-    async def run_workflow(self, sid: str, steps: list, *,
-                           name: str = "desktop",
-                           stop_on_fail: bool = False) -> dict:
-        self._ensure_open()
-        if not isinstance(steps, list):
-            raise_code("EVT-100", field="steps", advice="steps 须为非空字符串数组")
-        log_ = await self.require_session(sid)
-        queue = await self.queue_for(sid, log_)
-        from pyharness.core.workflow import WorkflowRunner, queue_submit_adapter
-        runner = WorkflowRunner(log_, queue_submit_adapter(log_, queue),
-                                name=str(name or self.channel))
-        results = await runner.run(steps, stop_on_fail=bool(stop_on_fail))
-        return {"ok": all(r["ok"] for r in results), "sid": sid,
-                "results": results}
-
-    @admitted
-    async def budget_dashboard(self, sid: str) -> dict:
-        log_ = await self.require_session(sid)
-        usages = [e for e in log_.events_after() if e.type == "llm.usage"]
-        used_in = sum(int(u.payload.get("in_tokens", 0)) for u in usages)
-        used_out = sum(int(u.payload.get("out_tokens", 0)) for u in usages)
-        base = {"sid": sid, "used_in_tokens": used_in,
-                "used_out_tokens": used_out,
-                "recent": [dict(u.payload) for u in usages[-20:]]}
-        budget = None
-        try:                                       # 优先本会话自己装配的预算门面
-            spine, _log2 = await self.public_spine_for(sid)
-            budget = getattr(spine, "budget", None)
-        except Exception:                          # noqa: BLE001 读面降级到 ctx
-            budget = None
-        if budget is None:
-            # 共享 ctx.budget 作 fallback:owner 为空(外部单会话注入)或确属本会话
-            # 才用;owner 指向别的会话(多会话最后装配者)→ 拒用,防串场。
-            owner = getattr(self.ctx, "_budget_owner_sid", None)
-            if owner is None or owner == sid:
-                budget = getattr(self.ctx, "budget", None)
-        snap = getattr(budget, "snapshot", None)
-        if not callable(snap):
-            return {**base, "disabled": True,
-                    "reason": "budget-gate-unassembled", "limit_cny": None,
-                    "used_cny": None, "warned": False, "ratio": 0.0}
-        st = snap(sid)
-        if inspect.isawaitable(st):
-            st = await st
-        limit = float(getattr(st, "limit_cny", 0) or 0)
-        used = float(getattr(st, "used_cny", 0) or 0)
-        ratio = (used / limit) if limit else 0.0
-        cfg = _session_module()._cfg_of(self.ctx)
-        warn = float(getattr(getattr(cfg, "budget", None), "warn_ratio", 0.8))
-        return {**base, "disabled": False, "limit_cny": limit, "used_cny": used,
-                "warned": ratio >= warn, "ratio": round(ratio, 4)}
 
     # ------------------------------------------------------------ plugins / preset
-    def plugin_roots(self) -> list[Path]:
-        roots = ([Path(__file__).resolve().parents[2] / "examples" / "plugins"]
-                 if self.tenant_id == "default" else [self.tenant_root() / "plugins"])
-        if self.tenant_id == "default":
-            cfg = _session_module()._cfg_of(self.ctx)
-            try:
-                extra = getattr(getattr(cfg, "plugins", None), "dir", None)
-                if extra:
-                    roots.append(Path(str(extra)).expanduser())
-            except Exception:                          # noqa: BLE001
-                pass
-        return roots
 
-    @staticmethod
-    def _plug_ctx_for(spine: Any) -> Any:
-        return SimpleNamespace(session=getattr(spine, "session", None),
-                               bus=getattr(spine, "bus", None))
 
-    @admitted
-    async def list_plugins(self) -> dict:
-        out: list[dict] = []
-        for sid, spine in self._engines.items():
-            mgr = getattr(spine, "plugins", None)
-            if mgr is None:
-                continue
-            for pid, rec in dict(getattr(spine, "plugin_state", {})).items():
-                spec = rec.get("spec")
-                out.append({
-                    "id": pid,
-                    "state": mgr.state(pid),
-                    "version": getattr(spec, "manifest", {}).get("version", "?"),
-                    "tools": list(rec.get("tool_names", ())),
-                    "session": str(sid),
-                })
-        return {"plugins": out, "count": len(out)}
-
-    @admitted
-    async def plugin_action(self, kind: str, body: dict) -> dict:
-        self._ensure_open()
-        pid = str((body or {}).get("id") or "")
-        if not pid:
-            return {"ok": False, "error": "缺插件 id"}
-        if not self._engines:
-            return {"ok": False, "error": "无活动会话(先新建/打开会话)"}
-        from pyharness.core import plugin_loader as _pl
-        from pyharness.application.session_store import _plugin_within
-        pdir = ((Path(__file__).resolve().parents[2] / "examples" / "plugins")
-                if self.tenant_id == "default" else (self.tenant_root() / "plugins")) / pid
-        results: list[dict] = []
-        for sid, spine in list(self._engines.items()):
-            if getattr(spine, 'platform_runtime', None) is not None:
-                results.append({'session': str(sid), 'ok': False,
-                                'error': 'Platform Agent 禁止宿主插件生命周期操作'})
-                continue
-            mgr = spine.plugins
-            try:
-                if kind == "load":
-                    d = Path(str(body.get("dir") or pdir)).expanduser().resolve()
-                    if not d.exists():
-                        return {"ok": False, "error": f"插件目录不存在:{d}"}
-                    if not any(_plugin_within(d, r) for r in self.plugin_roots()):
-                        return {"ok": False,
-                                "error": "插件目录必须在配置的插件根目录内"}
-                    spec = _pl.load_spec(d)
-                    await _pl.load_plugin(mgr, spec, self._plug_ctx_for(spine),
-                                          spine.tool_registry,
-                                          state=spine.plugin_state)
-                elif kind == "unload":
-                    rec = spine.plugin_state.get(pid)
-                    if rec is None:
-                        results.append({"session": str(sid), "ok": False,
-                                        "error": "未安装"})
-                        continue
-                    await _pl.unload_plugin(mgr, rec["spec"],
-                                            self._plug_ctx_for(spine),
-                                            spine.tool_registry,
-                                            state=spine.plugin_state)
-                elif kind == "reload":
-                    rec = spine.plugin_state.get(pid)
-                    if rec is None:
-                        results.append({"session": str(sid), "ok": False,
-                                        "error": "未安装"})
-                        continue
-                    await _pl.reload_plugin(
-                        mgr, rec["spec"], self._plug_ctx_for(spine),
-                        spine.tool_registry, state=spine.plugin_state,
-                        pkg_dir=Path(rec.get("path", "")).parent or pdir)
-                else:
-                    return {"ok": False, "error": f"未知操作:{kind}"}
-                results.append({"session": str(sid), "ok": True,
-                                "state": mgr.state(pid)})
-            except Exception as e:                     # noqa: BLE001
-                results.append({"session": str(sid), "ok": False,
-                                "error": f"{type(e).__name__}:{e}"[:200]})
-        ok_all = all(r.get("ok") for r in results) and bool(results)
-        return {"ok": ok_all, "results": results,
-                "hint": "新会话(重启程序)自动预载 examples/plugins/ 全部插件"}
-
-    @staticmethod
-    def _reset_preset_state(spine: Any) -> None:
-        from pyharness import engine as _eng
-        cfg, policy = _eng.compile_preset(spine, 'strict')
-        spine.settings.security = cfg.security
-        spine.scope.policy = policy
-
-    @admitted
-    async def set_preset(self, body: dict) -> dict:
-        self._ensure_open()
-        preset = str((body or {}).get('preset') or '')
-        valid = ('strict', 'standard', 'readonly', 'locked')
-        if preset not in valid:
-            return {'ok':False,'error':'invalid_preset','valid':list(valid)}
-        if not self._engines:
-            return {'ok':False,'error':'no_active_sessions'}
-        from pyharness import engine as _eng
-        # Validate every setter against detached copies first. A failed reset
-        # must never partially clear the live deny set or claim success.
-        try:
-            prepared=[(spine,*_eng.compile_preset(spine,preset)) for spine in self._engines.values()]
-        except Exception:
-            return {'ok':False,'error':'preset_configuration_failed'}
-        for spine,cfg,policy in prepared:
-            spine.settings.security=cfg.security
-            spine.scope.policy=policy
-        return {'ok':True,'preset':preset,'sessions':len(prepared),
-                'hint':'exec.* 等危险工具仍由治理与审批约束'}
-
-    def skill_installer(self) -> Any:
-        from pyharness.core.skill_registry import SkillInstaller
-        cfg = _session_module()._cfg_of(self.ctx)
-        sk = getattr(cfg, "skills", None)
-        root = (Path(str(getattr(sk, "dir", "~/.pyharness/skills"))).expanduser()
-                if self.tenant_id == "default"
-                else self.tenant_root() / "skills")
-        return SkillInstaller(
-            root,
-            max_package_bytes=int(getattr(sk, "max_package_bytes", 5 * 1024 * 1024)),
-            max_files=int(getattr(sk, "max_files", 200)))
-
-    @admitted
-    async def search_skills(self, query: str,
-                            registry_url: str = "") -> dict:
-        cfg = _session_module()._cfg_of(self.ctx)
-        url = str(registry_url or getattr(getattr(cfg, "skills", None),
-                                          "registry_url", "") or "").strip()
-        if not url:
-            raise_code("CFG-601", field="skills.registry_url",
-                       advice="未配置 Skill Registry URL")
-        url = _validate_registry_url(url)
-        rows = await self.skill_installer().search(query, url)
-        return {"registry_url": url, "skills": rows, "count": len(rows)}
-
-    @admitted
-    async def install_skill(self, sid: str, name: str, *, version: str = "",
-                            registry_url: str = "",
-                            approved_by: str = "user") -> dict:
-        self._ensure_open()
-        cfg = _session_module()._cfg_of(self.ctx)
-        url = str(registry_url or getattr(getattr(cfg, "skills", None),
-                                          "registry_url", "") or "").strip()
-        if not url:
-            raise_code("CFG-601", field="skills.registry_url",
-                       advice="未配置 Skill Registry URL")
-        url = _validate_registry_url(url)
-        result = await self.skill_installer().install(
-            name, registry_url=url, version=version or None,
-            approved_by=approved_by)
-        log_ = await self.require_session(sid)
-        await log_.append("skill.installed", {
-            "name": result["name"], "version": result["version"],
-            "sha256": result["sha256"], "source": result["source"],
-            "approved_by": approved_by}, actor="user", sync=True)
-        self.skills_mgr().scan()
-        return result
-
-    @admitted
-    async def remove_skill(self, sid: str, name: str, *,
-                           approved_by: str = "user") -> dict:
-        self._ensure_open()
-        result = self.skill_installer().remove(name, approved_by=approved_by)
-        if result.get("removed"):
-            log_ = await self.require_session(sid)
-            await log_.append("skill.removed", {
-                "name": name, "version": result.get("version", ""),
-                "approved_by": approved_by}, actor="user", sync=True)
-            self.skills_mgr().scan()
-        return result
-
-    @admitted
-    async def rollback_skill(self, sid: str, name: str, version: str, *,
-                             approved_by: str = "user") -> dict:
-        self._ensure_open()
-        result = self.skill_installer().rollback(
-            name, version, approved_by=approved_by)
-        log_ = await self.require_session(sid)
-        await log_.append("skill.rollback", {
-            "name": name, "from_version": result.get("from_version", ""),
-            "to_version": version, "approved_by": approved_by},
-            actor="user", sync=True)
-        self.skills_mgr().scan()
-        return result
-
-    def skill_versions(self, name: str) -> list[str]:
-        return self.skill_installer().versions(name)
-
-    def skills_mgr(self) -> SkillManager:
-        for spine in self._engines.values():
-            mgr = getattr(spine, "skills", None)
-            if mgr is not None:
-                return mgr
-        if self.tenant_id != "default":
-            return SkillManager([self.tenant_root() / "skills"])
-        roots = [Path(__file__).resolve().parents[2] / "skills"]
-        cfg = _session_module()._cfg_of(self.ctx)
-        try:
-            extra = getattr(getattr(cfg, "skills", None), "dir", None)
-            if extra:
-                roots.append(Path(str(extra)).expanduser())
-        except Exception:                              # noqa: BLE001
-            pass
-        return SkillManager(roots)
-
-    @admitted
-    async def list_skills(self) -> dict:
-        mgr = self.skills_mgr()
-        rows = mgr.list()
-        return {"skills": rows, "count": len(rows), "catalog": mgr.render_catalog()}
-
-    @admitted
-    async def skill_detail(self, name: str) -> dict:
-        data = self.skills_mgr().load(str(name))
-        return {"ok": True, "name": data["name"],
-                "description": data["description"], "dir": data["dir"],
-                "body": data["body"]}
-
-    @admitted
-    async def reload_skills(self) -> dict:
-        counts = []
-        for spine in self._engines.values():
-            mgr = getattr(spine, "skills", None)
-            if mgr is not None:
-                counts.append({"session": str(getattr(
-                    getattr(spine, "session", None), "sid", "?")),
-                    "count": mgr.scan()})
-        if not counts:
-            counts.append({"direct": True, "count": self.skills_mgr().scan()})
-        return {"ok": True, "results": counts,
-                "hint": "新技能立即可被 agent skill.load"}

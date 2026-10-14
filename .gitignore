@@ -46,3 +46,5 @@ skills/office/
 skills/coding/
 skills/make-skill/
 skills/.skills
+.tools/
+tooling/codex/runtime.json

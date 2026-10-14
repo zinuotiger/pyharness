@@ -199,8 +199,8 @@ async def test_old_run_trace_survives_new_activity_and_pages_without_loss(tmp_pa
             page = await platform.run(sid+'~old', limit=2, cursor=cursor)
             found.extend(page['trace'])
             cursor = page['trace_cursor']
-        assert len(found) == old['trace_total'] == 7
-        assert len({s['span_id'] for s in found}) == 7
+        assert len(found) == old['trace_total'] == 10  # Include three task lifecycle facts.
+        assert len({s['span_id'] for s in found}) == 10
         assert all(s['run_id'] == sid+'~old' for s in found)
         with pytest.raises(PyHError):
             await platform.run(sid+'~old', cursor=sid+'~99999')
@@ -209,7 +209,7 @@ async def test_old_run_trace_survives_new_activity_and_pages_without_loss(tmp_pa
     reopened = DesktopApp(cli.assemble_ctx(cfg))
     try:
         restored = await reopened.service.platform.run(sid+'~old')
-        assert restored['trace_total'] == 7
+        assert restored['trace_total'] == 10
         assert restored['status'] == 'completed'
     finally:
         await reopened.service.shutdown()

@@ -1,0 +1,254 @@
+{
+  "date": "2026-10-12",
+  "workspace": "D:\\zinuotiger-workspace\\feature-worktrees\\pyharness-platform-web-v1",
+  "branch": "feat/pyharness-platform-web-v1",
+  "status": "feature_and_six_assets_complete",
+  "applicable_AGENTS": "No AGENTS.md found in ancestors or modified subtrees.",
+  "existing_dirty_files_modified_by_this_task": [
+    "docs/user-guide/appearance.md",
+    "pyharness/ui/theme-kit/styles/theme.css",
+    "pyharness/ui/appearance.py",
+    "pyharness/ui/theme-kit/tokens/themes.js",
+    "pyharness/ui/host-adapters/platform.js",
+    "pyharness/ui/theme-kit/appearance/controller.js"
+  ],
+  "other_preexisting_files_changed": [],
+  "original_options": [
+    "light",
+    "dark",
+    "tech-blue-particle",
+    "starfield",
+    "sakura",
+    "aurora",
+    "gold",
+    "ocean"
+  ],
+  "original_scene_images": 6,
+  "original_default": "tech-blue-particle",
+  "legacy_reset_target": "light",
+  "options_before": 8,
+  "options_after": 14,
+  "all_original_scene_hashes_unchanged": true,
+  "all_reference_hashes_unchanged": true,
+  "modified_or_new_code_and_docs": [
+    "docs/user-guide/appearance.md",
+    "pyharness/ui/appearance.py",
+    "pyharness/ui/host-adapters/platform.js",
+    "pyharness/ui/theme-kit/appearance/controller.js",
+    "pyharness/ui/theme-kit/styles/theme.css",
+    "pyharness/ui/theme-kit/tokens/themes.js",
+    "pyharness/ui/theme-kit/appearance/background-library.js",
+    "pyharness/ui/theme-kit/tokens/backgrounds.js",
+    "scripts/platform_background_contract.py",
+    "tests/unit/test_background_library.py"
+  ],
+  "assets": [
+    {
+      "id": "particle-nebula-light",
+      "name": "星云粒子",
+      "reference": "references/01-nebula-reference.png",
+      "reference_sha256": "6f4dc99dfa869251eaef4811f63b580f1ba54d9dfb7d31caa304a53e5804c758",
+      "image": "pyharness/ui/theme-kit/scenes/particle-nebula-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2027560,
+      "sha256": "5057626328ba82803100e78622f0ee99e3456e7850d972671fb7877a24d4ae32",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-nebula-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 99491,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 淡蓝、淡紫、珍珠白柔雾星云，右上方柔和银河旋涡，多层蓬松云海，多个半透明淡色星球与细小星尘。重点是柔雾和球体空间层次。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    },
+    {
+      "id": "particle-ice-aurora-light",
+      "name": "冰湖极光粒子",
+      "reference": "references/02-ice-aurora-reference.png",
+      "reference_sha256": "6d997c92cb5e4b7e753903b65564dc58f2d073e59e4de0b532228944de9f5888",
+      "image": "pyharness/ui/theme-kit/scenes/particle-ice-aurora-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2206850,
+      "sha256": "2c2473e4d81ca6a1cf690b8cbc1246b907fd1376766ec29803416d7b8957e7a1",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-ice-aurora-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 107479,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 青绿色极光横贯冰蓝星空，雪山环绕通透冰湖，近景晶莹冰块与细碎冰层，青绿光倒映湖面。突出近景透明冰晶质感。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    },
+    {
+      "id": "particle-ocean-blue-light",
+      "name": "海蓝粒子",
+      "reference": "references/03-ocean-blue-reference.png",
+      "reference_sha256": "c226a54df3f7c2b8a74a2b206a8a3df5bbcdf0d7fd9357a217e0fe263d147e2f",
+      "image": "pyharness/ui/theme-kit/scenes/particle-ocean-blue-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2140191,
+      "sha256": "5477e4a3bfd9a92763037f2181cdab9e69b5f5e87b55d324de0050ab8f027188",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-ocean-blue-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 113287,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 清浅明亮的青蓝色海水，顶部透入柔和阳光，明亮沙底细密水纹，气泡，右侧一两只轻盈透明水母。中央平缓，重点是浅海沙底与水光。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    },
+    {
+      "id": "particle-starry-sky-light",
+      "name": "星空粒子",
+      "reference": "references/04-starry-sky-reference.png",
+      "reference_sha256": "44528fed864ed5828e06844d4680a8267c48a8dc23e69be07d79f4f58f911bf4",
+      "image": "pyharness/ui/theme-kit/scenes/particle-starry-sky-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2084262,
+      "sha256": "613d282ef8ecb8b664381bfa3868476427509951852b1ef1d668c7972320b137",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-starry-sky-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 98800,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 开阔清亮浅蓝白星空，右上方小巧银河旋涡，细长流星线，底部蓬松云朵。无大型前景星球，星点清亮且画面开阔，和多球体柔雾星云款明显不同。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    },
+    {
+      "id": "particle-aurora-light",
+      "name": "极光粒子",
+      "reference": "references/05-aurora-reference.png",
+      "reference_sha256": "04d469f9ad4e7816735078e1b67d21374feaa42dd3a334f0ea55c0562ec55cac",
+      "image": "pyharness/ui/theme-kit/scenes/particle-aurora-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2057303,
+      "sha256": "44f76bf1ecef50610fff1aeb22a25267d1429c50b7b8000e3044f7f75f3a17cf",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-aurora-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 95353,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 薄荷青、淡紫和轻粉渐变极光，远处冰蓝雪山，沿岸深青针叶树林，平静湖面清晰倒影。突出多色极光与树林湖面，不要前景大片冰块。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    },
+    {
+      "id": "particle-ocean-light",
+      "name": "海洋粒子",
+      "reference": "references/06-ocean-reference.png",
+      "reference_sha256": "6734989c7d25fcfa661ff215dd6569543efb9ac2e2c2d8683b7a99f5646c8d18",
+      "image": "pyharness/ui/theme-kit/scenes/particle-ocean-light.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2193169,
+      "sha256": "49c054b3826e59cc5384f0694fcd8dc72fe0a36603e84d8b7b076a12f86cb87c",
+      "thumbnail": "pyharness/ui/theme-kit/scenes/thumbnails/particle-ocean-light.png",
+      "thumbnail_width": 320,
+      "thumbnail_height": 180,
+      "thumbnail_bytes": 117716,
+      "prompt": "Use case: stylized-concept. Asset type: production desktop wallpaper, one single full-bleed landscape image, approximately 16:9. Input image: design reference only for background scenery, color palette, and atmosphere. Reconstruct ONLY the natural scenery behind the mock interface across the ENTIRE canvas. 亮蓝水下空间，多只透明水母，左前景一只较大水母，右上水母，大小不同气泡与星尘粒子，前景珊瑚，柔和水下光束和丰富纵深。整体通透亮蓝，不能黑暗深海。 Match the reference's luminous light blue/cyan/lavender atmosphere, slightly softened for readable desktop content. Rebuild the areas obscured by the UI as continuous natural scenery. Do not crop out most of the picture, do not blur away the UI into a rectangular patch. Calm central content area; focal scenery at edges. Absolutely NO text of any language, numbers, lettering, slogans, My Workspace, windows, panels, cards, borders, buttons, icons, input boxes, watermark, frame or collage anywhere. No interface, no mockup, no poster. Deliver one pure background scene only.",
+      "visual_review": "Pure scenery; no mock window, text, cards or controls. Reviewed separately against its reference."
+    }
+  ],
+  "resource_additions": "6 full PNGs; 14 real PNG thumbnails (8 original choices, 6 new choices); light-particles-provenance.json",
+  "entry": "设置 → 外观 → 更多背景；经典 Web 页面同一区域亦可用",
+  "persistence": "Same pyharness.appearance.v1 key / existing WebView FilePreferences; added nullable backgroundId independently of themeId; preview stays in memory.",
+  "tests": [
+    {
+      "command": "python -B -m pytest tests/unit/test_appearance.py tests/unit/test_background_library.py --no-cov",
+      "result": "25 passed; includes native lifecycle and FilePreferences roundtrips"
+    },
+    {
+      "command": "node --check <each of 5 changed/new JS modules>",
+      "result": "passed"
+    },
+    {
+      "command": "python -B scripts/platform_background_contract.py --output-dir <external delivery-source>",
+      "result": {
+        "status": "passed",
+        "package": "D:\\zinuotiger-workspace\\feature-worktrees\\pyharness-platform-web-v1\\pyharness",
+        "checks": [
+          "all 8 original IDs and 6 original scene images remain usable",
+          "filters, real thumbnails/current badge, preview, cancel, close, Esc, focus restoration; thumbnails only",
+          "apply, reload, page navigation, draft retention, background-only default/reset, original immediate shortcuts",
+          "all six independent static backgrounds apply/reload/navigate; light/dark mode unchanged; no animation",
+          "last selection wins; late image after close cannot reapply or persist",
+          "image failure preserves usable background, retry works, storage failure rolls back with clear feedback",
+          "unknown IDs and corrupt preferences fall back safely",
+          "390px and desktop layout, native dialog keyboard focus containment",
+          "asynchronous WebView preference saves stay ordered; last selection persists"
+        ],
+        "page_errors": [],
+        "image_404": [],
+        "external_requests": [],
+        "original_options": 8,
+        "original_scene_images": 6,
+        "new_materials_ready": 6,
+        "new_materials_pending": 0,
+        "real_model_requests": false
+      }
+    },
+    {
+      "command": "python -B scripts/platform_background_contract.py --package-root <extracted final wheel> --output-dir <external delivery-wheel>",
+      "result": {
+        "status": "passed",
+        "package": "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pyharness-more-backgrounds-20261012\\wheel-delivery\\pyharness",
+        "checks": [
+          "all 8 original IDs and 6 original scene images remain usable",
+          "filters, real thumbnails/current badge, preview, cancel, close, Esc, focus restoration; thumbnails only",
+          "apply, reload, page navigation, draft retention, background-only default/reset, original immediate shortcuts",
+          "all six independent static backgrounds apply/reload/navigate; light/dark mode unchanged; no animation",
+          "last selection wins; late image after close cannot reapply or persist",
+          "image failure preserves usable background, retry works, storage failure rolls back with clear feedback",
+          "unknown IDs and corrupt preferences fall back safely",
+          "390px and desktop layout, native dialog keyboard focus containment",
+          "asynchronous WebView preference saves stay ordered; last selection persists"
+        ],
+        "page_errors": [],
+        "image_404": [],
+        "external_requests": [],
+        "original_options": 8,
+        "original_scene_images": 6,
+        "new_materials_ready": 6,
+        "new_materials_pending": 0,
+        "real_model_requests": false
+      }
+    },
+    {
+      "command": "python -B scripts/platform_scene_smoke.py --output-dir <external legacy-final> --representative",
+      "result": "passed: original starfield animation, low/off, reduced motion, visibility, host pause, draft, reload, 390/1280/1440 widths"
+    },
+    {
+      "command": "uv build --offline --out-dir <external dist-delivery>",
+      "result": "wheel + sdist built successfully"
+    },
+    {
+      "command": "git diff --check -- <six edited existing files>",
+      "result": "passed"
+    }
+  ],
+  "package": {
+    "wheel": "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pyharness-more-backgrounds-20261012\\dist-delivery\\pyharness-0.1.0-py3-none-any.whl",
+    "sha256": "3cb2c86ee5fa3a93bfd3d1278f64c08a2a8e8ab87de67711893e220a21b548bb",
+    "ui_files_matched": 45,
+    "design_references_in_wheel": false
+  },
+  "screenshots": [
+    "reports/more-backgrounds/screenshots/more-backgrounds-dialog.png",
+    "reports/more-backgrounds/screenshots/more-backgrounds-narrow.png",
+    "reports/more-backgrounds/screenshots/more-backgrounds-preview.png",
+    "reports/more-backgrounds/screenshots/original-ocean-chat.png",
+    "reports/more-backgrounds/screenshots/particle-aurora-light-chat.png",
+    "reports/more-backgrounds/screenshots/particle-backgrounds-library.png",
+    "reports/more-backgrounds/screenshots/particle-dark-mode-preview.png",
+    "reports/more-backgrounds/screenshots/particle-ice-aurora-light-chat.png",
+    "reports/more-backgrounds/screenshots/particle-nebula-light-chat.png",
+    "reports/more-backgrounds/screenshots/particle-ocean-blue-light-chat.png",
+    "reports/more-backgrounds/screenshots/particle-ocean-light-chat.png",
+    "reports/more-backgrounds/screenshots/particle-starry-sky-light-chat.png"
+  ],
+  "startup": "Double-click start-web-admin.cmd; existing Python 3.13, data directory and loopback port 60460 retained; auto-opens administrator page. Or python -B -m pyharness.web --data-dir <explicit external data dir> --port 60460 --open-browser",
+  "remaining_feature_work": [],
+  "verification_limits": [
+    "No full-repository test suite run; background-specific suite and original scene representative run only.",
+    "No standalone lint/type-check config exists for this native JS/Python change; JS syntax and relevant Python tests passed.",
+    "No new PyInstaller executable built or physical WebView device manually tested; wheel resources and existing file-preference adapter verified.",
+    "No push, merge, publish, branch change or real model request."
+  ]
+}

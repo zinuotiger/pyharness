@@ -1,0 +1,131 @@
+{
+  "STATUS": "DONE",
+  "timestamp": "2026-10-14T07:21:39.554052+00:00",
+  "SUMMARY": "Shared built-in dynamic trajectory integrated into classic Agent, platform chat/task center and Workflow; synchronized to the designated daily checkout and verified against its running app.",
+  "FILES CHANGED": [
+    "pyharness/application/trajectory.py",
+    "pyharness/application/platform_service.py",
+    "pyharness/application/platform_workflow.py",
+    "pyharness/application/service.py",
+    "pyharness/core/workflow.py",
+    "pyharness/desktop/platform_api.py",
+    "pyharness/events/payload.py",
+    "pyharness/ui/index.html",
+    "pyharness/ui/platform.html",
+    "pyharness/ui/host-adapters/run-trace.js",
+    "pyharness/ui/theme-kit/styles/run-trace.css",
+    "tests/unit/test_trajectory.py",
+    "tests/browser/run-trace.test.cjs",
+    "tests/browser/trajectory-ui.cjs",
+    "tests/browser/trajectory_server.py",
+    "docs/architecture/platform-web-v1.md",
+    "docs/EVENT-SCHEMA.md",
+    "docs/specs/events.py.md"
+  ],
+  "ARCHITECTURE IMPACT": "Additive authenticated public projection and optional workflow.step.task_id; existing SessionLog, queue, SSE, approval and artifact owners reused. No new frontend runtime.",
+  "BOUNDARIES": "Read-only viewer and replay. Only explicitly recorded identities form joins. Existing timeline and public structured detail remain available.",
+  "CONSTRAINTS": "No raw model request/response bodies, tool arguments or private reasoning. Authenticate session before reading cache; tenant isolation checked. No real provider called by browser fixtures.",
+  "FAILURES": [
+    "Initial four path-guard failures were caused by placing pytest basetemp inside the workspace; all guard tests passed with an external temporary directory.",
+    "Browser acceptance caught display redaction corrupting public artifact identifiers. Fixed by preserving public resource IDs and added a regression test.",
+    "Browser harness assumptions about native preview containers and same-hash navigation were corrected; final browser run has no uncaught errors."
+  ],
+  "TESTS": [
+    "Full pytest regression with external basetemp and isolated Hypothesis dependency directory",
+    "11 trajectory API/projection/workflow/tenant tests",
+    "5 Node semantic tests",
+    "Integrated Chrome browser acceptance with real local HTTP and synthetic persisted facts",
+    "Read-only smoke against daily app using existing persisted data",
+    "Conflict-checked file-by-file sync and SHA256 comparison"
+  ],
+  "TEST RESULTS": {
+    "pytest_passed": 2808,
+    "pytest_skipped": 41,
+    "pytest_failures": 0,
+    "pytest_errors": 0,
+    "browser_checks": 31,
+    "browser_errors": 0,
+    "daily_browser_checks": 31,
+    "node_tests": 5,
+    "daily_scope": "existing persistent task",
+    "daily_mutating_requests": 0,
+    "synchronized_files": 18
+  },
+  "EVIDENCE": [
+    "release-suite.xml",
+    "release-suite.log",
+    "release-coverage.json",
+    "focused-final.log",
+    "browser-results.json",
+    "daily-browser-results.json",
+    "daily-results.json",
+    "sync-results.json",
+    "screenshots/09-daily-app.png",
+    "routing-results.json",
+    "routing-isolation-audit.json",
+    "screenshots/10-existing-approval-center.png"
+  ],
+  "CONVERGENCE": "Required regression, renderer, negative authorization, workflow restart binding, pagination and daily entry checks passed. Target files match verified source hashes; unrelated target files preserved.",
+  "KNOWN LIMITATIONS": [
+    "Large selected-session projections recompute when their watermark changes; no large-data throughput claim.",
+    "Legacy records without causal/workflow task identities or closed timestamps retain unknown relationships/durations.",
+    "Browser scenarios use synthetic facts; real external model/provider execution was not exercised.",
+    "Classic artifact entry routes to the existing artifact center; platform task entry opens the exact preview.",
+    "Supplemental isolated test records retained after automatic review rejected recursive cleanup; owned fixture services are stopped and no live test approval remains. Daily records were neither created by the tests nor deleted."
+  ],
+  "REMAINING WORK": [],
+  "daily_url": "http://127.0.0.1:60460",
+  "source": "C:\\Users\\LENOVO\\.codex\\worktrees\\a767\\pyharness-platform-web-v1",
+  "target": "D:\\zinuotiger-workspace\\feature-worktrees\\pyharness-platform-web-v1",
+  "baseline": "7b1bdeab76cff23a040c94002d2bfb33b0291a06",
+  "SUPPLEMENTAL VERIFICATION": {
+    "timestamp": "2026-10-14T07:17:31.673Z",
+    "mode": "Isolated test data only; real live ApprovalProvider, real integrated pages and HTTP; synthetic tool call with no executor or model",
+    "checks": 4,
+    "passed": [
+      "platform chat inspector opens same-session dynamic trajectory",
+      "approval locator navigates to existing platform approval center and closes viewer",
+      "classic approval locator reveals existing native approval dialog",
+      "routing has no uncaught errors, execution submissions or approval decisions"
+    ],
+    "errors": [],
+    "execution_or_decision_requests": 0,
+    "native_initialization_requests": [
+      {
+        "method": "POST",
+        "path": "/api/v1/chat/execution-readiness"
+      },
+      {
+        "method": "POST",
+        "path": "/api/v1/chat/execution-readiness"
+      },
+      {
+        "method": "POST",
+        "path": "/api/sessions"
+      }
+    ]
+  },
+  "ISOLATION AUDIT": {
+    "timestamp": "2026-10-14T07:18:33.246685+00:00",
+    "routing_test_url": "http://127.0.0.1:60472",
+    "routing_data_dir": "C:\\Users\\LENOVO\\.codex\\worktrees\\a767\\pyharness-platform-web-v1\\tmp\\trajectory-routing-9539bb12",
+    "routing_initial_sessions": 1,
+    "routing_current_sessions": 4,
+    "routing_native_empty_sessions_added": 3,
+    "routing_request_responses": "Not captured in early attempts; resulting empty synthetic sessions confirmed from isolated session list.",
+    "routing_live_pending_requests_created": 1,
+    "routing_has_executor_or_model": false,
+    "daily_url": "http://127.0.0.1:60460",
+    "daily_data_dir": "D:\\zinuotiger-workspace\\temporary-runtimes\\pyharness-ui-20261003-manual\\data",
+    "daily_session_count": 6,
+    "daily_prior_smoke_session_count": 6,
+    "daily_pending_count": 0,
+    "daily_smoke_mutating_requests": 0,
+    "daily_cleanup_performed": false,
+    "cleanup": "Owned test services stopped via their execution sessions. Temporary isolated records and metadata retained because automatic review rejected the combined recursive-cleanup command. No daily records deleted.",
+    "cleanup_timestamp": "2026-10-14T07:21:39.382093+00:00",
+    "isolated_records_removed": false,
+    "live_test_services": 0,
+    "live_test_pending_requests": 0
+  }
+}

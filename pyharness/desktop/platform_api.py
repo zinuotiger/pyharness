@@ -86,6 +86,11 @@ def mount_platform(desktop):
     async def runs(cursor:str | None=None, limit:int | None=None):
         return await service().runs(cursor=cursor,limit=limit)
 
+    @router.get('/sessions/{sid}/trajectory')
+    async def trajectory(sid: str, after_seq: int=0, limit: int=200,
+                         run_id: str | None=None, workflow: str | None=None):
+        return await service().trajectory(sid,after_seq=after_seq,limit=limit,run_id=run_id,workflow=workflow)
+
     @router.get('/chat/readiness')
     async def chat_readiness(session_id: str | None = None, agent_id: str | None = None, agent_version: int | None = None):
         return await service().chat_readiness({'session_id':session_id, 'agent_id':agent_id, 'agent_version':agent_version})

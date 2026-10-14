@@ -1,0 +1,89 @@
+PyHarness 运行观测台 · 首轮设计交付
+日期：2026年10月13日（Asia/Shanghai）
+状态：可审阅原型；设计验收待用户决定；未接入现有页面。
+
+打开方式
+双击 PyHarness-Trace-Lab.html，用 Chrome 或 Edge 打开即可。
+这是包含全部样式、交互和匿名历史快照的单文件，离线可用。
+index.html 是相同界面的拆分源文件入口，需要与 style.css、app.js、history.js 放在一起。
+
+建议体验顺序
+1. 默认石墨紫＋横向流程：点击模型/工具节点，看右侧详情与事件列表联动。
+2. 拖动节点、拖动空白平移、缩放、适应画布、专注模式。
+3. 回放、暂停、拖动进度、改变速度。回放不执行任务。
+4. 点击待审批或失败样例，观察节点颜色、状态与错误代码。
+5. 切换耗时瀑布，比较并行调用与瓶颈。未知时长明确保留为未知。
+6. 比较纸白紫、深海蓝，以及纵向依赖树。配色和布局保存在浏览器。
+7. 切换本机历史快照，查看匿名任务；统计覆盖全部成功投影记录，列表仅展示最近40项。
+
+已有项目研究
+当前基准 HEAD：7b1bdeab76cff23a040c94002d2bfb33b0291a06。
+当前 worktree：C:\Users\LENOVO\.codex\worktrees\a767\pyharness-platform-web-v1。
+pyharness/ui/platform.html 中 run-detail 调用 showJSON，现有结构化 Trace 入口为 JSON 详情。
+pyharness/application/platform_models.py 中 Run、RunStep、TraceSpan 已定义任务与轨迹字段。
+pyharness/application/platform_projection.py 使用 trace.parent_seq 投影父关联，用 call_id 配对工具调用与结果并计算工具耗时。
+主模型事件并不普遍拥有闭合的 TraceSpan；RunStep 有请求/响应配对，不应把每条事件间隔伪装为调用耗时。
+现有 API：GET /api/v1/runs；GET /api/v1/runs/{ident}；GET /api/v1/runs/{ident}/trace。
+Trace API 支持 cursor/limit/truncated，接入时必须处理分页，不能假定一次获取即完整。
+正式接入仍须沿用当前身份验证和公共字段投影，不能从 UI 直接读本机日志。
+
+GitHub 与官方参考（2026-10-13 核对）
+xyflow/xyflow：https://github.com/xyflow/xyflow
+MIT；节点 UI 库，React/Svelte 生态。参考可拖动节点、父子连线、缩放和详情选择。
+官方动态边示例：https://reactflow.dev/examples/edges/animating-edges
+判断：正式扩展复杂图编辑/大图交互时优先评估；现有页面为原生 HTML/JS，引入 React 需要明确构建与隔离策略。
+
+FlowiseAI/Flowise：https://github.com/FlowiseAI/Flowise
+Apache-2.0；可视化 AI 工作流平台。官方文档包括 Visual Builder、Tracing & Analytics、Human in the Loop。
+官方说明：https://docs.flowiseai.com/
+参考模型、工具、审批的节点分类与流程可读性。PyHarness 的执行与治理继续使用已有运行时，无需搬入整个 Flowise 后端。
+
+jaegertracing/jaeger-ui：https://github.com/jaegertracing/jaeger-ui
+Apache-2.0；分布式追踪 UI。参考轨迹搜索、调用详情和时间线思想。
+官方配置：https://www.jaegertracing.io/docs/2.6/deployment/frontend-ui/
+判断：节点关系图解释依赖，瀑布图解释重叠与耗时，应联动使用；目前不意味着 PyHarness 已实现 OTLP/Jaeger 接入。
+
+gridstack/gridstack.js：https://github.com/gridstack/gridstack.js
+MIT；支持拖拽与响应式多列面板，官方强调多框架绑定。
+判断：后续需要自定义观测面板大小和排列时评估。本轮提供专注模式和响应式布局，尚未实现任意面板拖拽缩放。
+
+andududu/jeview：https://github.com/andududu/jeview
+MIT；面向 Jev/TypeSafe 的非官方本地调用可视化网关，通过明确的触发事件关联形成实时地图。
+核对时仓库约61 stars、15次提交；可参考交互，不把它与成熟通用节点库视为同等成熟度。
+没有安装或运行该网关，不改 PyHarness 的模型请求路径。
+
+本轮实现选择
+原生 HTML/CSS/JS＋SVG，未引入以上项目源码、依赖或 CDN。
+目的是让用户直接比较设计方向；正式库选型待设计与规模要求明确后决定。
+已提供3种配色、2种布局、节点图/耗时瀑布、回放、搜索筛选、状态详情、专注模式、低动效。
+没有公开部署，没有修改 pyharness/ 下的生产文件，没有操作其他 checkout，没有进行多渠道接入工作。
+
+真实数据边界
+只读扫描用户本机 .pyharness 下 sessions/*.jsonl，调用已有 project() 投影；未打开运行时或启动执行。
+扫描100份日志，成功处理95份，共1489条事件，得到78个任务：42完成、36失败。
+5份日志因文件读取权限不足（PermissionError）未读取，原因类别记在 history.js 的 skip_reasons。成功率42/(42+36)=53.8%，仅针对成功纳入快照的记录，并非完整系统成功率。
+历史任务名和ID匿名化；原始消息、提示、工具参数、输出与私有推理均未复制。
+快照未绑定 live_tasks，未闭合任务会按现有投影标记 runtime_interrupted；不能据此判断原运行实例此刻是否存活。
+任务列表最近40项；每任务最多500节点。超过部分必须在未来分页版本中提供明确继续读取入口。
+图连线仅使用存在的父字段；缺失父节点明确显示未记录或快照外。未人为把相邻事件串成因果链。
+历史事件没有 duration_ms/finished_at 时显示未知。没有用相邻时间差填补。
+
+验证
+verify.cjs 启动独立无头 Chrome，离线打开 index.html；不操作用户已有浏览器会话。
+25项交互断言通过，0未捕获 JavaScript 错误，桌面1600×1080与窄屏390×844无页面横向溢出。
+截图共7张，保存在 screenshots/，覆盖默认流程、瀑布、失败、浅色树、蓝色流程、历史、窄屏。
+verification.json 记录实际验证结果；单文件交付另验证2段内嵌脚本语法通过、无外部样式与脚本依赖。
+应用内浏览器安全策略不允许 file: 协议，自动打开单文件被拒绝；未绕过该策略。用户可在本机Chrome/Edge手动打开交付HTML。
+没有跑全量后端测试：生产代码没有改动，此次验证范围为独立原型。
+
+已知限制与下一步
+这是一次性历史快照和演示回放；没有实时订阅、重试或审批写操作。
+纵向树以更高画布改善可读性；大规模独立事件仍需虚拟化、聚类、折叠与更成熟布局算法。
+指标卡只展示已说明口径的数值，未使用装饰小柱伪装历史趋势。
+键盘支持节点选择和常规控件；尚未完成屏幕阅读器与整套无障碍审计。
+建议优先讨论石墨紫横向流程与纸白紫纵向树，确认信息密度、节点颜色和详情位置。
+用户确认设计后，再单独接入现有页面的认证 API、游标分页、运行中更新和错误/未知状态映射。
+
+调研环境说明
+已阅读并遵循 agent-reach 的 GitHub CLI 路由；gh 检索成功，并用公开网页工具核对官方仓库/文档。
+agent-reach 可执行文件不在当前 PATH，doctor 和 check-update 无法执行；未安装或更新它。

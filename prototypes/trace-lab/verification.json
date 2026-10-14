@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-10-13T10:53:24.476Z",
+  "checks": 25,
+  "passed": [
+    "initial graph 8 nodes",
+    "causal edges 7",
+    "initial running node and animated incoming edge",
+    "no desktop horizontal overflow",
+    "node inspector selection",
+    "node dragging updates position",
+    "zoom",
+    "waterfall view switch",
+    "waterfall links inspector",
+    "reset all future nodes",
+    "playback advances and pauses",
+    "scrub end updates states",
+    "task status filtering",
+    "failure scenario",
+    "empty search",
+    "approval scenario",
+    "vertical layout and theme",
+    "preferences persist",
+    "history metrics actual snapshot",
+    "historical causal edges only",
+    "unknown duration explicitly shown",
+    "focus layout",
+    "motion control",
+    "mobile no horizontal overflow",
+    "no uncaught JS errors"
+  ],
+  "errors": [],
+  "viewport": [
+    1600,
+    1080
+  ],
+  "mobile": [
+    390,
+    844
+  ],
+  "mode": "offline file URL; Chromium; no application runtime started"
+}

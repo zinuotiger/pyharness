@@ -1,0 +1,33 @@
+{
+  "status": "INTEGRATED_VERIFIED_AND_SYNCED",
+  "user_authority": "User approved continued integrated implementation and safe synchronization to the designated daily checkout. Earlier entry-clarification pause is superseded.",
+  "baseline": "7b1bdeab76cff23a040c94002d2bfb33b0291a06",
+  "worktree": "C:\\Users\\LENOVO\\.codex\\worktrees\\a767\\pyharness-platform-web-v1",
+  "daily_checkout": "D:\\zinuotiger-workspace\\feature-worktrees\\pyharness-platform-web-v1",
+  "entries": [
+    "/classic Agent session trajectory",
+    "platform chat session trajectory",
+    "/#runs task details",
+    "/#workflows Workflow trajectory"
+  ],
+  "evidence": "reports/trajectory-integration/delivery-report.json",
+  "verification": {
+    "pytest_passed": 2808,
+    "pytest_skipped": 41,
+    "pytest_failures": 0,
+    "pytest_errors": 0,
+    "browser_checks": 31,
+    "browser_errors": 0,
+    "daily_browser_checks": 31,
+    "node_tests": 5,
+    "daily_scope": "existing persistent task",
+    "daily_mutating_requests": 0,
+    "synchronized_files": 18
+  },
+  "limits": [
+    "Large selected-session projections recompute when their watermark changes; no large-data throughput claim.",
+    "Legacy records without causal/workflow task identities or closed timestamps retain unknown relationships/durations.",
+    "Browser scenarios use synthetic facts; real external model/provider execution was not exercised.",
+    "Classic artifact entry routes to the existing artifact center; platform task entry opens the exact preview."
+  ]
+}

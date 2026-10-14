@@ -6,7 +6,7 @@ import json
 import uuid
 from pyharness.application.platform_projection import summary
 from pyharness.core.sandbox import fail
-from pyharness.core.workflow import WorkflowRunner
+from pyharness.core.workflow import WorkflowRunner, record_workflow_task
 
 
 class PlatformWorkflows:
@@ -75,11 +75,14 @@ class PlatformWorkflows:
                 'meta':{'workflow':record}},actor='user',sync=True)
             self.logs[ident] = log
 
-            async def submit(intent):
+            async def submit(intent, *, workflow_step=None):
                 from pyharness.core.lifecycle import admitted
                 @admitted
                 async def enqueue(owner):
-                    return await self.platform.start_run({'session_id':sid,'text':intent})
+                    run = await self.platform.start_run({'session_id':sid,'text':intent})
+                    if workflow_step is not None:
+                        await record_workflow_task(log, workflow_step, run['task_id'])
+                    return run
                 admission = asyncio.create_task(enqueue(self.platform.service))
                 try:
                     run = await asyncio.shield(admission)
@@ -91,11 +94,11 @@ class PlatformWorkflows:
                     await queue.cancel(run['task_id'])
                     await queue.wait_for(run['task_id'])
                     raise
-                return result.ok, '完成' if result.ok else '步骤失败'
+                return result.ok, '完成' if result.ok else '步骤失败', run['task_id']
 
             async def execute():
                 try:
-                    await WorkflowRunner(log,submit,name=ident).run(steps,stop_on_fail=True)
+                    await WorkflowRunner(log,submit,name=ident,bind_steps=True).run(steps,stop_on_fail=True)
                 except asyncio.CancelledError:
                     await log.append('system.cancelled',{'what':ident,'reason':'workflow_cancelled'},
                                      actor='system',sync=True)

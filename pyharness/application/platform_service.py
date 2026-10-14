@@ -49,6 +49,7 @@ class PlatformService:
         from pyharness.application.projection_cache import ProjectionCache
         self.projection_cache = ProjectionCache()
         self.artifact_cache = ProjectionCache()
+        self.trajectory_cache = ProjectionCache()
         from pyharness.application.list_index import ListIndex
         self.list_index = ListIndex(self.root / 'lists-v1.db')
         from pyharness.application.platform_workflow import PlatformWorkflows
@@ -195,6 +196,30 @@ class PlatformService:
         return {**item, 'steps':[s for s in view['steps'] if s['run_id'] == ident],
                 'trace':page, 'trace_total':len(trace), 'trace_truncated':more,
                 'trace_cursor':page[-1]['span_id'] if more else None}
+
+    async def trajectory(self, sid, *, after_seq=0, limit=200, run_id=None, workflow=None):
+        """Authorize one session, then read bounded public operation updates."""
+        if type(after_seq) is not int or after_seq < 0 or type(limit) is not int or not 1 <= limit <= 500:
+            fail('invalid_trace_cursor')
+        if run_id is not None and workflow is not None:
+            fail('invalid_trace_scope')
+        log = await self.service.require_session(sid)
+        queue = self.service._queues.get(sid)
+        status = queue.status() if queue else None
+        live = [status.running, *status.waiting] if status else []
+        spine = self.service._engines.get(sid)
+        children = spine.subagent.status().active_children if spine is not None else []
+        events = list(log.events_after(0))
+        from pyharness.application.trajectory import project_trajectory, trajectory_page
+        workflows=[ident for ident,task in self.workflows.tasks.items() if not task.done()]
+        child_state=[(c['sub_id'],c.get('state')) for c in children]
+        stamp=(log.stats()['seq'],repr(live),repr(child_state),repr(workflows))
+        view=self.trajectory_cache.read(sid,stamp,lambda:project_trajectory(sid,events,live,children,workflows))
+        if run_id is not None and not any(r['run_id']==run_id for r in view['runs']):
+            fail('run_not_found')
+        if workflow is not None and workflow not in view['workflows']:
+            fail('workflow_not_found')
+        return trajectory_page(sid,events,view,after_seq=after_seq,limit=limit,run_id=run_id,workflow=workflow)
 
     @staticmethod
     def binding(log):

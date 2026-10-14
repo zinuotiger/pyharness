@@ -471,6 +471,7 @@ class WorkflowStepPayload(_PayloadBase):
     step_idx: int = Field(ge=0)
     action: str = Field(min_length=1)
     state: Optional[str] = None
+    task_id: Optional[str] = Field(default=None, min_length=1, max_length=200)
 
 
 class QueueSuspendedPayload(_PayloadBase):

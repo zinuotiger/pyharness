@@ -270,7 +270,7 @@ def check_seq_gap(events: list[int], declared: list[tuple[int, int]]) -> list[in
 | E 编排 | schedule.trigger | job、cron、fired_at |
 | E 编排 | job.started/completed/failed | job_id、elapsed_ms、reason |
 | E 编排 | subagent.spawned/joined/failed | sub_id、parent_seq、task/summary |
-| E 编排 | workflow.step | wf_name、step_idx、action、state |
+| E 编排 | workflow.step | wf_name、step_idx、action、state、task_id（可选，实际队列任务关联） |
 | E 编排 | queue.suspended/resumed | reason、by |
 | E 系统 | fork.created | new_session_id、base_seq(强同步) |
 | E 系统 | context.compacted | ranges[[lo,hi]]、summary、tokens_before/after(强同步) |

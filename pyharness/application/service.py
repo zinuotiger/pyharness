@@ -1214,7 +1214,7 @@ class ApplicationService:
         queue = await self.queue_for(sid, log_)
         from pyharness.core.workflow import WorkflowRunner, queue_submit_adapter
         runner = WorkflowRunner(log_, queue_submit_adapter(log_, queue),
-                                name=str(name or self.channel))
+                                name=str(name or self.channel), bind_steps=True)
         results = await runner.run(steps, stop_on_fail=bool(stop_on_fail))
         return {"ok": all(r["ok"] for r in results), "sid": sid,
                 "results": results}

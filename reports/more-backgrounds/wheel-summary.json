@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "package": "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pyharness-more-backgrounds-20261012\\wheel-delivery\\pyharness",
+  "checks": [
+    "all 8 original IDs and 6 original scene images remain usable",
+    "filters, real thumbnails/current badge, preview, cancel, close, Esc, focus restoration; thumbnails only",
+    "apply, reload, page navigation, draft retention, background-only default/reset, original immediate shortcuts",
+    "all six independent static backgrounds apply/reload/navigate; light/dark mode unchanged; no animation",
+    "last selection wins; late image after close cannot reapply or persist",
+    "image failure preserves usable background, retry works, storage failure rolls back with clear feedback",
+    "unknown IDs and corrupt preferences fall back safely",
+    "390px and desktop layout, native dialog keyboard focus containment",
+    "asynchronous WebView preference saves stay ordered; last selection persists"
+  ],
+  "page_errors": [],
+  "image_404": [],
+  "external_requests": [],
+  "original_options": 8,
+  "original_scene_images": 6,
+  "new_materials_ready": 6,
+  "new_materials_pending": 0,
+  "real_model_requests": false
+}

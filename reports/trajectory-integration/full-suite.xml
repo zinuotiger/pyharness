@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="1" time="14.535" timestamp="2026-10-13T22:26:32.997032+08:00" hostname="LAPTOP-VJVRVMET"><testcase classname="" name="tests.unit.test_remediation_properties" time="0.000"><error message="collection failure">ImportError while importing test module 'C:\Users\LENOVO\.codex\worktrees\a767\pyharness-platform-web-v1\tests\unit\test_remediation_properties.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python313\Lib\importlib\__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests\unit\test_remediation_properties.py:11: in &lt;module&gt;
+    from hypothesis import example, given, settings, strategies as st
+E   ModuleNotFoundError: No module named 'hypothesis'</error></testcase></testsuite></testsuites>

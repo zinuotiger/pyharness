@@ -24,10 +24,11 @@ from pyharness.application.platform_templates import (TEMPLATES)
 from pyharness.application.platform_agents import PlatformAgents
 from pyharness.application.platform_history import PlatformHistory
 from pyharness.application.platform_runs import PlatformRuns
+from pyharness.application.platform_trajectory import PlatformTrajectory
 from pyharness.application.platform_artifacts import PlatformArtifacts
 from pyharness.application.platform_knowledge import PlatformKnowledge
 
-class PlatformService(PlatformAgents, PlatformHistory, PlatformRuns, PlatformArtifacts, PlatformKnowledge):
+class PlatformService(PlatformAgents, PlatformHistory, PlatformRuns, PlatformTrajectory, PlatformArtifacts, PlatformKnowledge):
     def __init__(self, service):
         self.service = service
         self.root = service.tenant_root() / 'platform'
@@ -45,6 +46,7 @@ class PlatformService(PlatformAgents, PlatformHistory, PlatformRuns, PlatformArt
         from pyharness.application.projection_cache import ProjectionCache
         self.projection_cache = ProjectionCache()
         self.artifact_cache = ProjectionCache()
+        self.trajectory_cache = ProjectionCache()
         from pyharness.application.list_index import ListIndex
         self.list_index = ListIndex(self.root / 'lists-v1.db')
         from pyharness.application.platform_workflow import PlatformWorkflows

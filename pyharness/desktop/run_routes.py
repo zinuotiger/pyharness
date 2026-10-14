@@ -36,6 +36,12 @@ def mount_runs(router, desktop, service):
     async def activity(sid:str):
         return await service().activity(sid)
 
+    @router.get('/sessions/{sid}/trajectory')
+    async def trajectory(sid: str, after_seq: int = 0, limit: int = 200,
+                         run_id: str | None = None, workflow: str | None = None):
+        return await service().trajectory(sid, after_seq=after_seq, limit=limit,
+                                          run_id=run_id, workflow=workflow)
+
     @router.post('/sessions/{sid}/subagents/{ident}/cancel')
     async def cancel_subagent(sid:str,ident:str):
         return {'ok':await desktop.service.cancel_subagent(sid,ident)}

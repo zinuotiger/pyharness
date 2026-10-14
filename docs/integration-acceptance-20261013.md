@@ -6,7 +6,7 @@
 
 来源与隔离目录最初 HEAD 都是 `7b1bdeab76cff23a040c94002d2bfb33b0291a06`。588 个已跟踪/未忽略未跟踪文件逐个核对，无实质差异；136 个仅换行符不同。保存了完整源码快照、Git bundle、原未跟踪文件和 SHA256 清单。
 
-证据根目录：`C:\Users\LENOVO\Documents\Codex\2026-10-13\pyharness-five-scope`。源码只修改本次隔离目录，未覆盖来源、主仓库、稳定 RC、旧聊天成果或 portfolio；未推送、发布或合并。
+证据根目录：`%USERPROFILE%\Documents\Codex\2026-10-13\pyharness-five-scope`。源码只修改本次隔离目录，未覆盖来源、主仓库、稳定 RC、旧聊天成果或 portfolio；未推送、发布或合并。
 
 ## 逐项验收矩阵
 

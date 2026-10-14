@@ -4,7 +4,7 @@
 
 ## 可恢复基线
 
-两个目录 HEAD 均为 `7b1bdeab76cff23a040c94002d2bfb33b0291a06`。588 个已跟踪及未忽略未跟踪文件逐个比较：内容无差异，136 个文件只有 CRLF/LF 差异。完整来源快照、Git bundle、未跟踪文件备份、SHA256 清单位于 `C:\Users\LENOVO\Documents\Codex\2026-10-13\pyharness-five-scope`。未修改来源、稳定 RC、portfolio 或旧聊天工作区。
+两个目录 HEAD 均为 `7b1bdeab76cff23a040c94002d2bfb33b0291a06`。588 个已跟踪及未忽略未跟踪文件逐个比较：内容无差异，136 个文件只有 CRLF/LF 差异。完整来源快照、Git bundle、未跟踪文件备份、SHA256 清单位于 `%USERPROFILE%\Documents\Codex\2026-10-13\pyharness-five-scope`。未修改来源、稳定 RC、portfolio 或旧聊天工作区。
 
 ## 契约与验收矩阵（持续更新）
 

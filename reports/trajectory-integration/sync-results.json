@@ -1,0 +1,28 @@
+{
+  "source": "C:\\Users\\LENOVO\\.codex\\worktrees\\a767\\pyharness-platform-web-v1",
+  "target": "D:\\zinuotiger-workspace\\feature-worktrees\\pyharness-platform-web-v1",
+  "baseline": "7b1bdeab76cff23a040c94002d2bfb33b0291a06",
+  "files": 18,
+  "conflicts": [],
+  "applied": true,
+  "sha256": {
+    "pyharness/application/trajectory.py": "8f67ac04faca7600042b22d01bfcee93771f1df477a2240ed291ec9dfe79003d",
+    "pyharness/application/platform_service.py": "c14abcce43d50aeffb2351ce7f4c2987ac5d29d8e7f24808136fb85038b34a85",
+    "pyharness/application/platform_workflow.py": "7c166d635e68f2fd91bf6d7bf0b67231ac4c1a89a1a2814af2048ed658602bbb",
+    "pyharness/application/service.py": "1adfa04a2d43be80b2109998a7bf2c6280409280c775a4f8965f67c204cbd5bf",
+    "pyharness/core/workflow.py": "ebac33b82feb96561bf505e4333898f6d0d09c7c93ab9317a0bd55158d2336cf",
+    "pyharness/desktop/platform_api.py": "72f975c44c60512f54cf308269d7cc1be2cdf8355b1d338995d8ecc842bb1de9",
+    "pyharness/events/payload.py": "0c21a7600c7996066611c4fcf12190dac75aa674e0d4eb5f27f0ebef4cec93fa",
+    "pyharness/ui/index.html": "cdd754a96d698cd2ba005f26357feaa9311de55789bba27de968c428d2060953",
+    "pyharness/ui/platform.html": "e4b804544b73d49a5a834f8b4540802a34d9c8031bd236faffcc57f708554f21",
+    "pyharness/ui/host-adapters/run-trace.js": "220042848d2e6bfa68dc677cc78c0a31eccd5707e838124723d442f4395b191d",
+    "pyharness/ui/theme-kit/styles/run-trace.css": "4a405ba8047a68931952011231d6e9fad0757e2bd57831093d613f9b728e78bd",
+    "tests/unit/test_trajectory.py": "995565f325094533608d94107d6734e74cac4cd341f2337f161e83d0df429d95",
+    "tests/browser/run-trace.test.cjs": "ba030a4f2bd8cb3ef0928186d1392c9777c388112d700df134b816ef96417500",
+    "tests/browser/trajectory-ui.cjs": "35a84ba9e5e02a2173072716853f5c1b0d884a245edd0da163494ab604316b7f",
+    "tests/browser/trajectory_server.py": "063ae74c21f4c9d6886c2a6e526a99df59184125f7c26aa73d32136874c22b6f",
+    "docs/architecture/platform-web-v1.md": "9b4d415eb010393345f830db310f6200d55060b6455133974c61738f07307b7a",
+    "docs/EVENT-SCHEMA.md": "432a2bf38a85efde4c714cd497b54f61a7d3e8449e4d012c1e360039823ad30a",
+    "docs/specs/events.py.md": "e29c3af1260904f4ac04a5ceb41a88003149c000c29ead25d3101b30cbca1f19"
+  }
+}

@@ -114,10 +114,10 @@ flowchart LR
 执行目录为本隔离工作树。最终回归命令：
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests --no-cov -q --tb=short --junitxml="C:/Users/LENOVO/Documents/Codex/2026-10-14/pyharness-decoupling/final-regression.xml"
+.venv/Scripts/python.exe -m pytest tests --no-cov -q --tb=short --junitxml="%USERPROFILE%/Documents/Codex/2026-10-14/pyharness-decoupling/final-regression.xml"
 uvx ruff check pyharness --select F821,F822 --output-format concise
-.venv/Scripts/python.exe "C:/Users/LENOVO/Documents/Codex/2026-10-14/pyharness-decoupling/audit_dependencies.py"
-.venv/Scripts/python.exe "C:/Users/LENOVO/Documents/Codex/2026-10-14/pyharness-decoupling/audit_surface.py" . surface-after.json
+.venv/Scripts/python.exe "%USERPROFILE%/Documents/Codex/2026-10-14/pyharness-decoupling/audit_dependencies.py"
+.venv/Scripts/python.exe "%USERPROFILE%/Documents/Codex/2026-10-14/pyharness-decoupling/audit_surface.py" . surface-after.json
 ```
 
 最小物理行数复核，不依赖专用脚本：
@@ -131,7 +131,7 @@ print("over_limit:", [(n, p) for n, p in rows if n > 600])
 '@ | .venv/Scripts/python.exe -
 ```
 
-验收目录：`C:/Users/LENOVO/Documents/Codex/2026-10-14/pyharness-decoupling`。
+验收目录：`%USERPROFILE%/Documents/Codex/2026-10-14/pyharness-decoupling`。
 
 * `final-regression.log/.xml`：最终全量回归；`five-fixes.xml`：最后五项兼容回归均通过。
 * `production-before.json`、`before.patch`：本轮开始时生产源码和既有差异；`production-after.zip`：最终生产代码及本轮文档快照。

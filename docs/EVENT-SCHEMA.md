@@ -440,7 +440,7 @@
 | `job.started` | `job_id`str | 后台 job;completed/failed 前必有 started | 普通 |
 | `job.completed` | `job_id`str;`elapsed_ms`int— | 消费:job 管理器/UI;取消归一化为 failed(cancelled)(F025) | 普通 |
 | `job.failed` | `job_id`str;`elapsed_ms`int—;`reason`str— | 超预算直接 kill → reason=budget(F032);超时只标该 job(F017) | 普通 |
-| `workflow.step` | `wf_name`str;`step_idx`int;`action`str;`state`str— | wf_name 已注册;消费:workflow 断点续跑/UI 进度。触发者:`agent` | 普通 |
+| `workflow.step` | `wf_name`str;`step_idx`int;`action`str;`state`str—;`task_id`str— | wf_name 已注册;消费:workflow 断点续跑/UI 进度。新记录在实际入队后附加 task_id；旧日志缺失时不推断任务关联。触发者:`agent`/`system` | 普通 |
 | `queue.suspended` | `reason`str=审批等待/预算暂停;`by`str— | 先 suspended 后 resumed,重复挂起合并;消费:队列泵(F043)、预算(F032) | 普通 |
 | `queue.resumed` | `reason`str=裁决返回/预算恢复 | 同上 | 普通 |
 

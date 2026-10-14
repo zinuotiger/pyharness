@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PyHarness · 运行观测台原型</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<aside class="rail"><div class="brandmark">P<span>⌁</span></div><div class="rail-label">PYHARNESS</div><div class="rail-icon active" title="运行观测">⌘</div><div class="rail-bottom">LAB<br>01</div></aside>
+<main>
+<header><div class="brand">PyHarness <span>/</span> 工作区 <span>/</span> 运行观测</div><div class="header-right"><span class="prototype">设计原型 · 待验收</span><span class="avatar">PH</span></div></header>
+<section class="page-head"><div><div class="eyebrow">EXECUTION OBSERVATORY</div><h1>让每一次运行，都有迹可循<span>。</span></h1><p>从任务全貌，到每一次调用。沿着连线定位过程，沿着时间找到瓶颈。</p></div><div class="appearance"><label>配色<select id="theme" aria-label="配色"><option value="dark">石墨紫</option><option value="light">纸白紫</option><option value="blue">深海蓝</option></select></label><label>布局<select id="layout" aria-label="布局"><option value="horizontal">横向流程</option><option value="vertical">纵向依赖树</option></select></label></div></section>
+<div class="sourcebar"><div class="segmented"><button id="demo" class="selected">演示场景</button><button id="history">本机历史快照</button></div><span id="sourceNote"></span><button id="motion" class="quiet" aria-pressed="true">动效：开启</button></div>
+<section id="metrics" class="metrics" aria-label="任务统计"></section>
+<div class="workspace">
+<aside class="panel tasks"><div class="panel-heading"><h2>任务队列</h2><span id="taskCount" class="counter"></span></div><div class="filters"><label><input id="search" type="search" placeholder="搜索任务名称" aria-label="搜索任务"></label><select id="statusFilter" aria-label="任务状态筛选"><option value="all">全部状态</option><option value="running">运行中</option><option value="waiting_approval">待审批</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div><div id="taskList"></div><div class="task-foot">点击任务查看调用关系<br>历史快照不会启动或重试任务</div></aside>
+<section class="panel flow"><div class="panel-heading"><div><h2 id="runName"></h2><p id="runMeta"></p></div><span id="runStatus"></span></div><div class="graph-toolbar"><div class="segmented"><button id="graphTab" class="selected">节点流程</button><button id="waterfallTab">耗时瀑布</button></div><div class="graph-actions"><button id="fit">适应画布</button><button id="zoomOut" aria-label="缩小画布">−</button><span id="zoomText">100%</span><button id="zoomIn" aria-label="放大画布">＋</button><button id="expand" aria-pressed="false">专注</button></div></div>
+<div id="canvas" class="canvas" aria-label="调用关系画布"><svg id="graph" role="img" aria-label="运行节点与调用关系" viewBox="0 0 1100 430"></svg><div class="canvas-hint">拖动节点调整位置 · 点击查看详情 · 拖动空白平移</div><div class="graph-key"><span class="green">● 完成</span><span class="purple">● 运行</span><span class="amber">● 审批</span><span class="red">● 失败</span></div></div>
+<div id="waterfall" class="waterfall" hidden></div>
+<div class="playback"><button id="play" class="primary">▶ 回放</button><button id="reset" aria-label="重置回放">↺</button><label class="scrubber"><span>运行回放</span><input id="scrub" type="range" min="0" max="1000" value="640" aria-label="运行回放进度"></label><span id="playTime" class="mono"></span><select id="speed" aria-label="回放速度"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></div>
+<div class="event-head"><h3>事件轨迹 <small id="eventCount"></small></h3><span>与画布同步选择</span></div><div id="events" class="events"></div></section>
+<aside class="panel inspector"><div class="panel-heading"><h2>节点详情</h2><span class="counter">INSPECT</span></div><div id="details"></div><div class="inspector-note">连线只来自父节点字段。没有关联的事件独立展示，缺失耗时保持未知。</div></aside>
+</div><footer>PyHarness Trace Lab <span>本地原型 / 2026.10.13</span><span>设计确认后接入现有页面</span></footer>
+</main><div id="toast" role="status" aria-live="polite"></div>
+<script src="history.js"></script><script src="app.js"></script></body></html>

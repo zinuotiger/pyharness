@@ -85,7 +85,7 @@ Python 使用 `-I -B -X utf8`，PYTHONPATH 为空且被隔离模式忽略。实�
 
 ```powershell
 $c = 'D:\zinuotiger-workspace\repositories\pyharness\.work\release-candidate\local-trial-20260924T053750'
-& "$c\install.ps1" -PythonPath 'C:\Users\LENOVO\AppData\Local\Programs\Python\Python313\python.exe' -UvPath 'C:\Users\LENOVO\AppData\Local\hermes\bin\uv.exe'
+& "$c\install.ps1" -PythonPath '%USERPROFILE%\AppData\Local\Programs\Python\Python313\python.exe' -UvPath '%USERPROFILE%\AppData\Local\hermes\bin\uv.exe'
 & "$c\start.ps1"
 ```
 
@@ -136,7 +136,7 @@ FAILURES：开发环境没有 build 模块的首次构建失败，改用现有 u
 - 仅本机 Windows、Python 3.13.13、固定依赖、单信任域。其他机器/平台、GUI/Qt/WebView、生产或并发用户未验证；入口是交互终端。
 - 超时、断开、任务取消不保证远端已停止或副作用撤销，不保证恰好一次。写入结果未知时先查再决定，不盲目重试。正常 quit 清理通过，强杀终端/断电未验收；同步工具强制停止限制保持不变。
 - 故障检查出现可选本地 session.fts_query 未注册提示；四项指定 MCP 工具正常，未把该可选本地能力算作本轮通过功能。
-- **缓存边界偏差**：定位 uv 路径时，一次直接 uv pip install 诊断没有设置 UV_CACHE_DIR，输出 Prepared 1 package；默认位置经只读 uv cache dir 确认为 `C:\Users\LENOVO\AppData\Local\uv\cache`。可能使用/新增默认缓存，不能声称所有临时写入均在 D 盘。没有扫描或删除外部共享缓存，以免影响其他任务。正式安装器和最终安装均显式指向 D 盘各自 runtime/cache、tmp，安装环境和证据均在本仓库。
+- **缓存边界偏差**：定位 uv 路径时，一次直接 uv pip install 诊断没有设置 UV_CACHE_DIR，输出 Prepared 1 package；默认位置经只读 uv cache dir 确认为 `%USERPROFILE%\AppData\Local\uv\cache`。可能使用/新增默认缓存，不能声称所有临时写入均在 D 盘。没有扫描或删除外部共享缓存，以免影响其他任务。正式安装器和最终安装均显式指向 D 盘各自 runtime/cache、tmp，安装环境和证据均在本仓库。
 - 除上述缓存偏差，没有修改其他仓库、工作台根目录、系统设置、全局 Git 配置；本轮直接复用本仓库已核实的 R1 包，没有再读取 evleven 源码；没有加入 rag-engine。
 
 CONVERGENCE：交付/独立安装/交互缺口已补齐，最终包对应实际被测版本。REMAINING WORK：真实模型、其他机器和生产级保证未验证；本轮停止新增功能，不自动进入下一轮加固。

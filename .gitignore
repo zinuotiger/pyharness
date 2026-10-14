@@ -1,4 +1,7 @@
 .venv/
+.work/verification/
+.work/integration-evleven/
+.work/release-candidate/
 __pycache__/
 *.pyc
 .env

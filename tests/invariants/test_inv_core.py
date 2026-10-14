@@ -262,6 +262,7 @@ def test_inv01_append_only_predicate_detects_rewrite(tmp_path):
 # 白名单为**文件级**(不锁行号 ⇒ 不因文件上方增删而误报),且**双向校验**:
 # 既查"有写站点但未登记",也查"已登记但已无写站点"(防白名单过期)。
 _WRITE_ALLOWLIST = {
+    "core/pty.py": "已禁用 PTY 的遗留 fd 写入是终端管道，非会话历史",
     "persistence.py": "SessionStore 追加句柄(open 'a')+ repair 专用原子截断重写"
                       "(_rewrite_without_tail:临时文件+fsync+rename,逐字节保留全部完整行)",
     "repair.py": "隔离坏行(quarantine:坏行副本追加/重写),不改主日志的完好行",
@@ -303,6 +304,9 @@ def _write_sites(root: pathlib.Path) -> dict:
                 continue
             name = f.attr if isinstance(f, ast.Attribute) else f.id
             if name in ("write_text", "write_bytes"):
+                hits.append(n.lineno)
+                continue
+            if name == "write" and isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id == "os":
                 hits.append(n.lineno)
                 continue
             if name != "open":
@@ -356,7 +360,9 @@ def test_inv01_write_scan_detects_rogue_writer(tmp_path):
         "    with open(p, 'r', encoding='utf-8') as fh:\n"
         "        return fh.read()\n", encoding="utf-8")
 
+    (pkg / "core" / "fd_writer.py").write_text("import os\nos.write(1, b\"message\")\n", encoding="utf-8")
     sites = _write_sites(pkg)
+    assert "core/fd_writer.py" in sites
     assert "core/rogue.py" in sites, "扫描器漏检第二条持久化写路径(假阴性)"
     assert "core/reader.py" not in sites, "只读打开被误判为写站点(假阳性;防简单 grep 误报)"
 
@@ -1514,6 +1520,7 @@ async def test_f34_T4b_apr501_executor_emits_tool_error(tmp_path):
 
 
 # ===================== 会话收尾:后台子进程必须随会话终止(F052/F053 生命周期)
+@pytest.mark.controlled_process
 async def test_session_close_ends_background_procs(e2e_factory):
     """``proc.start`` 起的进程树**必须**随会话收尾一起终止。
 

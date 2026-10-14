@@ -23,16 +23,20 @@ from .projection import (
     redact_args,
     render_timeline_node,
 )
-from .net import (
-    pick_free_port,
-    run_uvicorn,
-    wait_listening_async,
-    wait_until_listening,
-)
 from .sessions import DesktopSessionManager
-from .app import DesktopApp
-from .bridge import DesktopBridge
-from .launcher import assemble_desktop_ctx, main, run_desktop
+
+
+def __getattr__(name):
+    """Web extras are loaded only by Web entry points, never by native/base."""
+    from importlib import import_module
+    modules = {'DesktopApp': 'app', 'DesktopBridge': 'bridge',
+               'assemble_desktop_ctx':'launcher', 'main':'launcher', 'run_desktop':'launcher',
+               'pick_free_port':'net', 'run_uvicorn':'net',
+               'wait_listening_async':'net', 'wait_until_listening':'net'}
+    if name not in modules: raise AttributeError(name)
+    value = getattr(import_module(f'{__name__}.{modules[name]}'), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "WINDOW_TITLE", "WINDOW_WIDTH", "WINDOW_HEIGHT", "HOST",

@@ -63,7 +63,8 @@ class ProcSession:
         return int(self.proc.pid or 0)
 
     def status(self) -> dict:
-        rc = self.proc.poll()
+        owner = getattr(self, 'owner', None)
+        rc = owner.poll() if owner is not None else self.proc.poll()
         return {
             "pid": self.pid,
             "token": self.token,
@@ -105,32 +106,46 @@ def start_session(sid: str, sandbox: Path, command: str, *,
         argv = ["cmd", "/d", "/s", "/c", command]
     else:
         argv = ["/bin/sh", "-c", command]
-    try:
-        popen_kw: dict[str, Any] = {}
-        if os.name == "nt":
-            popen_kw["creationflags"] = _PROCESS_CREATION_NO_WINDOW
-        else:
-            popen_kw["start_new_session"] = True
-        proc = subprocess.Popen(
-            argv, cwd=str(sandbox), env=sandbox_env(sandbox),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", bufsize=1, **popen_kw)
-    except OSError as e:
-        raise_code("TLB-805", module="exec", reason=type(e).__name__,
-                   hint=f"子进程拉起失败:{e}")
+    from pyharness.core.process_owner import ProcessOwner
+    owner = ProcessOwner(argv, cwd=sandbox, env=sandbox_env(sandbox),
+                         text=True, merge_stderr=True, input_open=True)
+    proc = owner.proc
     tail: deque = deque(maxlen=MAX_TAIL_LINES)
     sess = ProcSession(token=f"{sid}-{proc.pid}", proc=proc, tail=tail,
                        reader=None)
     reader = threading.Thread(target=_pump, args=(proc, tail, sess),
                               daemon=True, name=f"proc-{sid}-{proc.pid}")
+    sess.owner = owner
     sess.reader = reader
     timer = threading.Timer(max(1, int(timeout_total_s)), _kill_tree, args=(sess,))
     timer.daemon = True
     sess.timer = timer
-    reader.start()
-    _table().setdefault(sid, {})[sess.token] = sess
-    timer.start()
+    def reap():
+        try:
+            owner.wait_exit()
+            owner.terminate()
+        except BaseException as exc:
+            sess.cleanup_error = exc
+    watcher = threading.Thread(target=reap, daemon=True, name=f"proc-owner-{sid}")
+    sess.watcher = watcher
+    started = []
+    try:
+        for worker in (reader, timer, watcher):
+            worker.start()
+            started.append(worker)
+        _table().setdefault(sid, {})[sess.token] = sess
+    except BaseException as primary:
+        timer.cancel()
+        try: owner.terminate()
+        except BaseException as exc: primary.add_note(f'process cleanup: {type(exc).__name__}')
+        for worker in started:
+            try: worker.join(timeout=5)
+            except BaseException as exc: primary.add_note(f'thread cleanup: {type(exc).__name__}')
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try: stream.close()
+                except BaseException as exc: primary.add_note(f'pipe cleanup: {type(exc).__name__}')
+        raise
     return sess
 
 
@@ -178,10 +193,6 @@ def kill_session(sid: str, token_or_pid: Any) -> dict:
     """结束进程(树级:Windows taskkill /T 兜底;POSIX 组)。"""
     sess = find_session(sid, token_or_pid)
     _kill_tree(sess)
-    try:
-        sess.proc.wait(timeout=10)
-    except Exception:                             # noqa: BLE001 结束失败返回真实状态
-        log.warning("proc wait after kill failed pid=%s", sess.pid, exc_info=True)
     return sess.status()
 
 
@@ -189,126 +200,80 @@ def _kill_tree(sess: ProcSession) -> None:
     """结束父进程及其子进程;失败再退化到父进程 kill。"""
     if sess.timer is not None:
         sess.timer.cancel()
-    try:
-        _kill_pid_tree(sess.pid)
-    except Exception:                             # noqa: BLE001 结束失败不吞
-        try:
-            sess.proc.kill()
-        except OSError:
-            pass
+    owner = getattr(sess, "owner", None)
+    if owner is not None:
+        owner.terminate()
+    elif sess.proc.poll() is None:
+        # Legacy injected process without a tree capability: only its live handle.
+        sess.proc.kill()
+        sess.proc.wait(timeout=5)
 
 
 def _kill_pid_tree(pid: int) -> None:
-    """按 PID 结束整棵进程树;POSIX 依赖调用方建立独立 session/group。"""
-    if pid <= 0:
-        return
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True, timeout=10)
-    else:
-        try:
-            os.killpg(os.getpgid(pid), 9)
-        except (ProcessLookupError, PermissionError):
-            os.kill(pid, 9)
+    """Retained PID is not a capability. Call the ProcessOwner instead."""
+    raise RuntimeError('PID-only tree termination is disabled; an owned process handle is required')
 
 
 def close_session(sid: str) -> int:
     """会话收尾:结束全部子进程,清登记(agent close 时调用)。返回清理数。"""
-    table = _table().pop(sid, {})
+    table = _table().get(sid, {})
     n = 0
-    for sess in table.values():
+    errors = []
+    for token, sess in list(table.items()):
         n += 1
+        item_errors = []
         if sess.timer is not None:
             sess.timer.cancel()
-        _kill_tree(sess)
+        try: _kill_tree(sess)
+        except BaseException as exc: item_errors.append(exc)
+        for worker in (sess.reader, sess.timer, getattr(sess, 'watcher', None)):
+            if worker is not None and worker is not threading.current_thread():
+                try:
+                    worker.join(timeout=5)
+                    if worker.is_alive(): raise RuntimeError('owned process worker did not stop')
+                except BaseException as exc: item_errors.append(exc)
+        if not item_errors: table.pop(token, None)
+        errors.extend(item_errors)
+    if not table: _table().pop(sid, None)
+    if errors: raise BaseExceptionGroup('process session cleanup failed', errors)
     return n
 
 
-def wait_result(sandbox: Path, command: str, *,
-                timeout_s: int, python: bool = False) -> dict:
-    """一次性执行(exec.shell_run/python_run 用;非会话式,配额内取全文)。"""
-    sandbox.mkdir(parents=True, exist_ok=True)
+def _argv(command: str, python: bool):
     if python:
-        code = command
-        argv = [sys_executable(), "-c", code]
-    elif os.name == "nt":
-        argv = ["cmd", "/d", "/s", "/c", command]
-    else:
-        argv = ["/bin/sh", "-c", command]
-    try:
-        run_kw: dict[str, Any] = {}
-        if os.name == "nt":
-            run_kw["creationflags"] = _PROCESS_CREATION_NO_WINDOW
-        else:
-            run_kw["start_new_session"] = True
-        r = subprocess.run(
-            argv, cwd=str(sandbox), env=sandbox_env(sandbox),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=max(1, int(timeout_s)), **run_kw)
-    except subprocess.TimeoutExpired as e:
-        pid = int(getattr(e, "pid", 0) or 0)
-        try:
-            _kill_pid_tree(pid)
-        except Exception:                         # noqa: BLE001 尽力清理子孙进程
-            log.warning("exec timeout tree cleanup failed pid=%s", pid, exc_info=True)
-        return {"ok": False, "timeout": True,
-                "summary": f"执行超时(>{timeout_s}s,已终止)"}
-    except OSError as e:
-        raise_code("TLB-805", module="exec", reason=type(e).__name__,
-                   hint=f"子进程拉起失败:{e}")
-    out = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
-    if len(out) > 200_000:
-        out = out[:200_000] + "\n…(输出截断)"
-    return {"ok": r.returncode == 0, "exit_code": r.returncode,
-            "summary": out.strip() or f"(无输出,exit={r.returncode})"}
-
-
-async def wait_result_async(sandbox: Path, command: str, *,
-                            timeout_s: int, python: bool = False) -> dict:
-    """异步一次性执行:通信不阻塞事件循环,超时按独立进程组清理。"""
-    sandbox.mkdir(parents=True, exist_ok=True)
-    if python:
-        argv = [sys_executable(), "-c", command]
-    elif os.name == "nt":
-        argv = ["cmd", "/d", "/s", "/c", command]
-    else:
-        argv = ["/bin/sh", "-c", command]
-    proc_kw: dict[str, Any] = {}
+        return [sys_executable(), "-I", "-B", "-c", command]
     if os.name == "nt":
-        proc_kw["creationflags"] = _PROCESS_CREATION_NO_WINDOW
-    else:
-        proc_kw["start_new_session"] = True
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", command]
+    return ["/bin/sh", "-c", command]
+
+
+def wait_result(sandbox: Path, command: str, *, timeout_s: int, python: bool = False) -> dict:
+    """Synchronous owned execution with bounded output and tree cleanup."""
+    from pyharness.core.process_owner import ProcessOwner
+    sandbox.mkdir(parents=True, exist_ok=True)
+    owner = ProcessOwner(_argv(command, python), cwd=sandbox, env=sandbox_env(sandbox))
+    return owner.collect(timeout_s)
+
+
+async def wait_result_async(sandbox: Path, command: str, *, timeout_s: int, python: bool = False) -> dict:
+    """Cancellation stops and reaps this owned tree before propagating cancellation."""
+    from pyharness.core.process_owner import ProcessOwner
+    sandbox.mkdir(parents=True, exist_ok=True)
+    owner = ProcessOwner(_argv(command, python), cwd=sandbox, env=sandbox_env(sandbox))
+    collector = asyncio.create_task(asyncio.to_thread(owner.collect, timeout_s))
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(sandbox), env=sandbox_env(sandbox),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            **proc_kw)
-    except OSError as e:
-        raise_code("TLB-805", module="exec", reason=type(e).__name__,
-                   hint=f"子进程拉起失败:{e}")
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=max(1, int(timeout_s)))
-    except asyncio.TimeoutError:
-        try:
-            await asyncio.to_thread(_kill_pid_tree, proc.pid)
-        except Exception:                         # noqa: BLE001 进程可能已自行退出
-            log.warning("async exec timeout tree cleanup failed pid=%s",
-                        proc.pid, exc_info=True)
-        finally:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=5)
-        return {"ok": False, "timeout": True,
-                "summary": f"执行超时(>{timeout_s}s,已终止)"}
-    out = (stdout or b"").decode("utf-8", errors="replace")
-    err = (stderr or b"").decode("utf-8", errors="replace")
-    if err:
-        out = out + ("\n" if out else "") + err
-    if len(out) > 200_000:
-        out = out[:200_000] + "\n…(输出截断)"
-    return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
-            "summary": out.strip() or f"(无输出,exit={proc.returncode})"}
+        return await asyncio.shield(collector)
+    except BaseException as primary:
+        async def cleanup():
+            try: await asyncio.to_thread(owner.terminate)
+            except BaseException as exc: primary.add_note(f'process cleanup: {type(exc).__name__}')
+            try: await collector
+            except BaseException as exc: primary.add_note(f'collector cleanup: {type(exc).__name__}')
+        cleanup_task = asyncio.create_task(cleanup())
+        while not cleanup_task.done():
+            try: await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError: continue
+        raise
 
 
 def sys_executable() -> str:

@@ -68,6 +68,8 @@ F049 的 LLM 可见摘要经 spawn 工具的 tool.result 路径回喂,见偏离 
 """
 from __future__ import annotations
 
+from pyharness.core.lifecycle import admitted, stop_admissions
+
 import asyncio
 import inspect
 import itertools
@@ -322,8 +324,9 @@ class SubagentManager:
         return self._session
 
     def _default_sub_id(self) -> str:
-        """子会话 id:s-subxxxx 单调(s-sub0001…;≥8 字符满足 Envelope 校验)。"""
-        return f"{CHILD_PREFIX}{next(self._sub_seq):04d}"
+        """子会话 ID 跨父会话和重启唯一；不复用旧子日志。"""
+        import uuid
+        return f"{CHILD_PREFIX}{uuid.uuid4().hex}"
 
     def _default_session(self, sub_id: str) -> SessionLog:
         """默认子会话工厂:独立内存 SessionLog(自带 JSONL 由装配注 persistence)。"""
@@ -449,6 +452,7 @@ class SubagentManager:
             return
         bus = self._bus if ctx is None else (getattr(ctx, "bus", None)
                                              or self._bus)
+        self._closing = False
         if bus is not None:
             self._register_bus_types(bus)
         self._entered = True
@@ -583,12 +587,13 @@ class SubagentManager:
         """
         if not self._entered and not self._announced and not self._children:
             return                             # 幂等:无装载无在途 → 无事可做
+        await stop_admissions(self)
+        cleanup_errors = []
         # ① child-first:先杀孩子(取消传播 F025 + 终态事件 + 等全部真正退出)
         try:
             await self._cancel_all_children(reason="parent-detach")
-        except PyHError as e:
-            log.warning("subagent detach child-first 失败 code=%s(broken 告警)",
-                        e.code)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
         ctx = ctx or self._announce_ctx
         bus = self._bus if ctx is None else (getattr(ctx, "bus", None)
                                              or self._bus)
@@ -634,7 +639,9 @@ class SubagentManager:
         self._entered = False
         self._children.clear()
         if broken:
-            log.warning("subagent detach 部分失败(broken 标记): %s", broken)
+            cleanup_errors.append(RuntimeError("subagent detach incomplete: " + ",".join(broken)))
+        if cleanup_errors:
+            raise BaseExceptionGroup("subagent detach failed", cleanup_errors)
 
     def _mount(self, ctx: Any, key: str) -> bool:
         """locator.mount:把本 manager 挂到 ctx.agent 命名空间的 subagent 键。
@@ -744,6 +751,7 @@ class SubagentManager:
         if self._active > 0:
             self._active -= 1
 
+    @admitted
     async def spawn(self, spec: SubagentSpec, ctx: Any = None) -> str:
         """F049 核心入口:四道约束闸(深度/工具子集在册/并发/预算)全过 → 建独立
         子会话 → 父会话落 subagent.spawned → 登记 ChildHandle 并起 _run_child;
@@ -783,6 +791,7 @@ class SubagentManager:
                                    float(spec.budget_ratio))
         # ③ 并发闸(满 → BUSY;随后任何失败路径都释放,零残留)
         await self._acquire_slot()
+        sub_id = None
         try:
             sub_id = self._child_id_factory()
             child = self._session_factory(sub_id)
@@ -815,8 +824,17 @@ class SubagentManager:
             log.info("subagent spawned sub=%s parent=%s depth=%d task=%.60s",
                      sub_id, self._session.sid, spec.depth, spec.task)
             return sub_id
-        except BaseException:
-            self._release_slot()                # 派发失败:闸归还(零残留)
+        except BaseException as primary:
+            self._release_slot()
+            if sub_id is not None:
+                self._children.pop(sub_id, None)
+                cleanup = getattr(self._runner, 'close_child', None)
+                if callable(cleanup):
+                    try:
+                        result = cleanup(sub_id)
+                        if inspect.isawaitable(result): await result
+                    except BaseException as secondary:
+                        primary.add_note(f'child rollback failed: {secondary!r}')
             raise
 
     # ============================================================ 子任务执行回收
@@ -967,30 +985,36 @@ class SubagentManager:
         终态事件 + 释放闸);摘净后才交还调用方(结构上杜绝"父已终态、子还在跑/
         回写 EVT-104")。
         """
+        await stop_admissions(self)
         hs = list(self._children.values())
         if not hs:
             return
+        errors = []
+        for h in hs:
+            if h.state not in _TERMINAL and h.task is not None and not h.task.done():
+                h.task.cancel()
         for h in hs:
             if h.state in _TERMINAL:
                 continue
-            if h.task is not None and not h.task.done():
-                h.task.cancel()                 # ① 杀孩子(取消传播 F025)
-            await self._write_event(            # 终态审计(声明式取消;swallow104)
-                "system.cancelled",
-                {"what": f"subagent:{h.sub_id}", "reason": reason},
-                actor="system")
-        await asyncio.gather(*(h.task for h in hs if h.task is not None),
-                             return_exceptions=True)      # ② 等全部真正退出
-        for h in list(self._children.values()): # ③ 补漏:每条非终态都有终态声明
-            if h.state not in _TERMINAL:
-                await self._write_event(
-                    "subagent.failed",
-                    {"sub_id": h.sub_id,
-                     "summary": f"[parent-closed] 父会话关闭,子任务终止({reason})"},
-                    actor="agent",
-                    trace={"parent_seq": h.parent_seq})
-                h.state = "cancelled"
-            self._finalize(h)                   # ④ 释放闸 + 摘净后才交还
+            try:
+                await self._write_event('system.cancelled',
+                    {'what': f'subagent:{h.sub_id}', 'reason': reason}, actor='system')
+            except BaseException as exc:
+                errors.append(exc)
+        await asyncio.gather(*(h.task for h in hs if h.task is not None), return_exceptions=True)
+        for h in hs:
+            try:
+                if h.state not in _TERMINAL:
+                    await self._write_event('subagent.failed',
+                        {'sub_id':h.sub_id, 'summary':f'parent closed ({reason})'},
+                        actor='agent', trace={'parent_seq':h.parent_seq})
+                    h.state = 'cancelled'
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                self._finalize(h)
+        if errors:
+            raise BaseExceptionGroup('child cancellation audit failed', errors)
 
     async def _on_session_closing(self, type_: str,
                                   payload: Any = None) -> None:

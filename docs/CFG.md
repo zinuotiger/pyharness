@@ -49,7 +49,7 @@
 
 ## 1.4 只读与热更新边界
 
-Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类键(deny/沙箱/预算/guard)运行中漂移破坏 guard 单调与可审计性(SECURITY §4 L0)→一律重启;仅 §6 观测键可热更。改环境变量需重启;秘密 TTL≤5min 例外(轮换)。
+Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类键(deny/沙箱/预算/guard)运行中漂移破坏 guard 单调与可审计性(SECURITY §4 L0)→一律重启;仅 §6 观测键可热更。改环境变量需重启；秘密缓存 TTL 当前未生效，不承诺五分钟内自动轮换。租户凭据修改与旧绑定失效按§9处理。
 
 ---
 
@@ -96,20 +96,7 @@ Settings 加载后不可变,`ctx.config` 只读,运行期禁改写。策略类�
 > `storage.spill.max_per_session_mb`(N3) · `plugins.ctx_lazy`(DIS-SEAM §3.3) ·
 > `plugins.pre_activate`(DIS-SEAM §3.4) · `plugins.priority` · `plugins.deadletter_samples`(F005)
 >
-> 另有 **`shell.web.host` / `shell.web.port`**（§3.8）同样零读取者：Web 壳绑模块常量
-> `127.0.0.1` 并用 `pick_free_port()` 动态取口 ⇒ 设 `PH_WEB_PORT` 得到的是随机口。
-> **接线 host 等于允许绑 `0.0.0.0`，与"仅绑 127.0.0.1"的安全姿态冲突 ⇒ 须先裁定**
-> （接线 / 移除，二选一，见 L-23）。
->
-> **R1-R6 已接线 7 键**（原亦为死配置）：`loop.max_arg_failures_per_round`（F026 阈值）、
-> `llm.probe.interval_s`（F033 探针周期）、`plugins.backpressure_limit`（F005 总线背压）、
-> `loop.task_queue_max`（F043 队深）、`security.attachment.max_per_message` / `max_bytes` /
-> `mime_whitelist`（F061 附件校验 —— 随 R6-5 按 PRD 实现一并接线）——**这 7 个现在可调且生效**。
->
-> 权威清单与理由见 `LIMITATIONS.md` **L-20 / L-23**；防线由
-> `tests/invariants/test_inv_config_reachability.py`（AST 级"声明键必须有真实读取点"
-> + `KNOWN_UNIMPLEMENTED` 显式登记，新死配置立即变红；已接线者必须移出登记表）固化。
-> **接线前不得在运维文档中把这些当作可用旋钮。**
+> `shell.web.host/port` 已由 desktop.net.resolve_bind 使用；仅支持回环，端口被占用时选择新空闲端口。
 
 ## 3.1 模型域(F012/F013/F028/F029/F030/F033)
 
@@ -262,16 +249,16 @@ Skill 安装流程:`search → download → SHA-256 → quarantine → safe extr
 
 | 键 | 类型 | 默认值 | 取值范围 | 说明 | 覆盖 |
 |---|---|---|---|---|---|
-| `shell.web.host` | str | `127.0.0.1` | IP/主机名 | 默认仅回环(F065);绑非回环须已配 token,否则 CFG-601(结构缺失)拒启 | L2+ |
+| `shell.web.host` | str | `127.0.0.1` | IP/主机名 | 仅允许回环；非回环始终 CFG-601，token 不改变此限制 | L2+ |
 | `shell.web.port` | int | `8000` | 1-65535 | Web 端口 | L2+ |
-| `shell.web.token` | secret-ref | 空 | `env:NAME`/`file:PATH` | 远程访问 token(F065);失败→401 | L2 |
+| `shell.web.token` | secret-ref | 空 | `env:NAME`/`file:PATH` | 回环 Web 访问令牌；鉴权失败→401，不允许借此开放非回环绑定 | L2 |
 | `shell.acp.enabled` | bool | `false` | true/false | ACP 桥(F066)监听 stdio,一次一请求串行 | L2+ |
 
 **headless 默认拒绝固定(R8)**:CLI 管道/后台 job 无审批通道→danger≥high 直接 denied(F064/F051);由 stdin 是否 tty 判定,**无配置开关**。
 
 ## 3.9 固定常量(不提供配置项)
 
-事件 payload≤64KB(N3);seq 单调、ts 框架 UTC;事件类型只增不改(PRD §3.8);granted 重入链、approval_id=请求 seq 防重放、critical 不可审批;danger 枚举不可自定义(F008);schedule 最小 1 分钟、深夜 23-7 禁危险模板(F048);subagent 深度≤3/并发≤8/无父级担保(F049);jobs 并发≤4、结果 7 天清理(F051);PTY 单会话≤1(F053);工具输出 stdout 32KB/stderr 8KB 截断(F052);todo≤20(F040);env 前缀 `PH_` 固定。
+事件 payload≤64KB(N3);seq 单调、ts 框架 UTC;事件类型只增不改(PRD §3.8);granted 重入链、approval_id=请求 seq 防重放、critical 不可审批;danger 枚举不可自定义(F008);schedule 最小 1 分钟、深夜 23-7 禁危险模板(F048);subagent 深度≤3/并发≤8/无父级担保(F049);jobs 并发≤4、结果 7 天清理(F051);PTY 当前禁用(TLB-807);工具输出 stdout 32KB/stderr 8KB 截断(F052);todo≤20(F040);env 前缀 `PH_` 固定。
 
 ---
 
@@ -303,7 +290,7 @@ Skill 安装流程:`search → download → SHA-256 → quarantine → safe extr
 | `PH_BUDGET_MONTHLY_LIMIT_YUAN`/`_ALERT_RATIO` | `budget.monthly.*` |
 | `PH_STORAGE_ROOT`/`PH_STORAGE_SESSIONS_DIR`/`PH_STORAGE_DB_PATH` | `storage.*` 对应键 |
 | `PH_PLUGINS_ENABLED`/`PH_PLUGINS_DIR` | `plugins.enabled`/`plugins.dir` |
-| `PH_WEB_HOST`/`PH_WEB_PORT` | `shell.web.host`/`shell.web.port`(非回环需 token) |
+| `PH_WEB_HOST`/`PH_WEB_PORT` | `shell.web.host`/`shell.web.port`(仅允许回环) |
 | `PH_ACP_ENABLED` | `shell.acp.enabled` |
 
 ## 4.4 解析规则
@@ -320,7 +307,7 @@ bool:`1/0/true/false/yes/no`;int/float 严格解析,失败→**CFG-601(env_parse
 
 ## 5.1 校验管线(加载时顺序执行)
 
-①YAML 语法与 `PH_*` 值解析(§4.4);②类型/范围/枚举(pydantic 逐键);③结构约束(时间档序、guard disabled ⊆ 五内置、非回环须 token);④秘密语法(`env:`/`file:` 前缀);⑤安全单调越权(guard 全关/关未注册名/danger 调低/deny 空/通配过宽);⑥未知键收集。①-⑤失败一律 **CFG-601 启动中止**(ctx.fields 列字段,ctx.reason 区分 file_parse/env_parse/type_range/structural/secret_literal/越权);⑥→CFG-607 警告不中止。输出"码+字段+建议"(ADR-011);`config validate` 离线预检。
+①YAML 语法与 `PH_*` 值解析(§4.4);②类型/范围/枚举(pydantic 逐键);③结构约束(时间档序、guard disabled ⊆ 五内置、非回环始终拒绝);④秘密语法(`env:`/`file:` 前缀);⑤安全单调越权(guard 全关/关未注册名/danger 调低/deny 空/通配过宽);⑥未知键收集。①-⑤失败一律 **CFG-601 启动中止**(ctx.fields 列字段,ctx.reason 区分 file_parse/env_parse/type_range/structural/secret_literal/越权);⑥→CFG-607 警告不中止。输出"码+字段+建议"(ADR-011);`config validate` 离线预检。
 
 ## 5.2 CFG-6xx 错误码(601-603 与 ERR.md 已登记一致;607/608 为本文提议新登记,编号取 ERR §1 预留空洞,落地同步 ERR)
 
@@ -355,7 +342,7 @@ bool:`1/0/true/false/yes/no`;int/float 严格解析,失败→**CFG-601(env_parse
 | `llm.model`/温度/`max_tokens`/超时/重试/降级 | ❌ 重启 | — | 客户端单点构造(F012) |
 | `loop.max_turns`/窗口/收敛/`budget.task.*` | ❌ 重启 | — | 三闸/预算可变=绕过审计(F007/F032) |
 | `security.*`(沙箱/deny/danger/guard/审批/信任名单) | ❌ 重启 | — | 单调 L0 防漂移(SEC §4);下调走会话内确认 |
-| secret-ref 秘密 | ❌ 重启 | 例外:TTL≤5min 轮换 | SECURITY §6 |
+| secret-ref 秘密 | ❌ 重启 | 宿主引用变更需重启；租户凭据更新契约见§9 | SECURITY §6 |
 | `plugins.*` | ❌ 重启 | 运行期走 install/uninstall API | 装载序确定性(DIS-SEAM §4.6) |
 | `storage.*`/`shell.*` | ❌ 重启 | — | 启动期固定 |
 
@@ -474,7 +461,7 @@ shell:
 ```text
 ~/.pyharness/tenants/<tenant>/
 ├── models.json          # provider/model/base_url/temperature/max_tokens,不含明文 Key
-├── model-secrets.bin    # Windows DPAPI 加密；其他平台 0600 文件
+├── model-secrets-<generation>.bin # models.json 指向已提交代；旧 model-secrets.bin 只兼容读取
 └── token                # 该租户的 API 令牌（R31-2 鉴权用；仅非 `default` 租户）
 ```
 
@@ -496,9 +483,13 @@ shell:
   `http://127.0.0.1:<port>/?token=<该文件内容>`。已配置 `shell.web.token` 时**不落盘**（用户已知该值）。
 - 每个租户使用独立 `sessions/`、`skills/`、`plugins/` 目录。
 - `llm.api_key` 使用内部引用 `tenant:<tenant>:<profile>`；适配器在请求发送前才解密。
-- Key 为只写字段，查询接口只返回 `has_api_key`，不回显明文。
+- Key 为只写字段，查询接口返回 `has_api_key` 和来源类别 `api_key_source`，不返回明文或宿主秘密引用。
 - 同一进程内同名模型会生成带哈希的独立适配器键，避免租户间复用凭据。
 - **边界（2026-09-21 升级）**：租户是**经凭证绑定的访问边界**，而非"声明即可用"的逻辑分区。
-  但该边界**止于文件系统**：服务仅绑 `127.0.0.1`，且同一 Windows 用户**能读文件**的进程
+  但该边界**止于文件系统**：服务只允许绑定回环地址 `127.0.0.1`、`localhost` 或 `::1`，且同一 Windows 用户**能读文件**的进程
   本来就可直接读取 `~/.pyharness/tenants/<t>/`（含 `token`）⇒ 本机制**不防**此类进程，
   只挡"能连回环端口但读不到该用户文件"者（见 ADR-023 §威胁模型）。
+
+### 当前凭据更新契约（2026-09-24）
+
+普通租户不得引用宿主 env:/file:；无活动档案时不能继承宿主真实模型配置。default 操作者仍可显式使用这些引用。字段缺失或空值保留；直接值或允许的引用替换；clear_api_key=true 显式清除。端点变化须同时指定凭据选择。元数据以代际提交关联秘密，cleanup_pending 表示旧代清理未完成。旧绑定在 HTTP 发送前被拒绝，已发请求无法撤回。Windows 使用 DPAPI 与目录 ACL；POSIX 写入前以 0600 创建。租户令牌不防同一 OS 用户读取文件或控制进程。

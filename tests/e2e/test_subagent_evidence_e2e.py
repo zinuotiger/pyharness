@@ -81,12 +81,17 @@ async def _drive_subagent(e2e_factory, sid: str, *, preset=None):
     saved = dict(llm_mod.adapters)
     s = await e2e_factory(None, sid=sid)          # 先建会话以获得 cfg/model
     llm_mod.adapters.clear()
-    llm_mod.adapters[s.ctx.settings.llm.model] = _ChildAwareAdapter(
+    s.ctx.engine_spine.llm_runtime.registry[s.ctx.settings.llm.model] = _ChildAwareAdapter(
         s.ctx.settings.llm.model, sid)
     try:
         await s.boot()
         assert (await s.run("spawn a subagent")).ok
-        await asyncio.sleep(0.6)                  # 等子会话收尾写出
+        manager = s.ctx.engine_spine.subagent
+        tasks = [h.task for h in manager._children.values() if h.task is not None]
+        assert s.of("subagent.spawned"), "真实子任务已经派发"
+        if not tasks:
+            assert s.of("subagent.joined") or s.of("subagent.failed"), "已摘除的任务必须有终态"
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
         sessions_dir = s.tmp / "sessions"
         children = [f for f in sessions_dir.glob("*.jsonl") if f.stem != sid]
         stats = {}
@@ -184,7 +189,8 @@ async def test_child_tool_call_actually_succeeds_in_child_workspace(e2e_factory)
     assert child_root.is_dir(), f"子 workspace 根应先被创建:{child_root}"
 
 
-# ================================================== C · 父侧可追溯(M5-4 验收点)async def test_parent_can_trace_child_result_via_joined(e2e_factory):
+# ================================================== C · 父侧可追溯(M5-4 验收点)
+async def test_parent_can_trace_child_result_via_joined(e2e_factory):
     """父会话经 ``subagent.joined`` 获得对子会话结果的**可追踪摘要**。
 
     这是 M5-4 明列的验收点:子会话产出证据之外,父侧必须有一条可读的回收事实。

@@ -230,6 +230,7 @@ class ApprovalProvider:
         self._suspended: bool = False           # 队列挂起水位(F043;重复挂起合并)
         self._suspend_log: Any = None           # 挂起事件落点(恢复事件同落点)
         self._detached: bool = False            # detach 幂等标记
+        self._subscription_owner = f'approval:{id(self)}'
         self._tasks: set = set()                # fire-and-forget 任务登记(防 GC)
         self._grant_slots: dict[str, str] = {}  # call_id → granted 绑定指纹(executor
         # 重入校验用;call_id 每次调用唯一,单 slot 无生命周期问题)
@@ -241,7 +242,7 @@ class ApprovalProvider:
         if self._bus is not None:
             for t in ("approval.granted", "approval.denied", "approval.timeout"):
                 try:
-                    self._bus.subscribe(t, self.on_verdict, owner="approval")
+                    self._bus.subscribe(t, self.on_verdict, owner=self._subscription_owner)
                 except Exception as exc:         # noqa: BLE001 订阅失败不阻断构造
                     logger.warning("approval 订阅 %s 失败: %s", t, exc)
         # TTL / 合并窗配置编译(config 键面 security.approval.ttl_ms / merge_window_s)
@@ -850,13 +851,18 @@ class ApprovalProvider:
         self.cancel_all(reason="detach")
         if self._bus is not None:
             try:
-                self._bus.unsubscribe_all("approval")
+                self._bus.unsubscribe_all(self._subscription_owner)
             except Exception as exc:             # noqa: BLE001 摘除失败不扩散
                 logger.warning("approval 摘订阅失败: %s", exc)
         self._trust.clear()                      # 会话级信任随会话关闭失效
         self._enabled = False
         self._detached = True
         logger.info("approval detach: 未决全置 denied,订阅已摘(幂等)")
+
+    async def aclose(self):
+        self.detach()
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
     # ================================================== 查询与公共只读
     def pending_count(self) -> int:

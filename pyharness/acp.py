@@ -361,6 +361,14 @@ async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
     原语搬到 ACP chat 前,使 initialize → chat 也能走真实 AgentLoop。
     """
     cfg = getattr(ctx, "settings", None) or getattr(ctx, "config", None)
+    runtimes = getattr(ctx, '_acp_runtimes', None)
+    if runtimes is None:
+        runtimes = ctx._acp_runtimes = {}
+    if sid in runtimes:
+        runtime = runtimes[sid]
+        for name in ('engine_spine', 'task_queue', 'approval', 'guard', 'scope', 'llm', 'tools', 'governance'):
+            setattr(ctx, name, getattr(runtime, name))
+        return runtime.task_queue
     q = getattr(ctx, "task_queue", None)
     if q is not None and (not hasattr(q, "_session")
                           or getattr(q, "_session", None) is log_):
@@ -376,17 +384,56 @@ async def _ensure_engine_queue(ctx: Any, log_: Any, sid: str) -> Any:
             sessions_dir = cfg.storage.sessions_dir
         except Exception:                    # noqa: BLE001 配置缺键:不装配
             return q
-    await _eng.attach_engine_to_ctx(
-        ctx, cfg, log_=log_,
-        sessions_dir=Path(str(sessions_dir)).expanduser(),
-        bus=getattr(ctx, "bus", None),
-        store=getattr(log_, "_persistence", None),
-        # GAP-11:ACP 桥即人类通道。``_set_channel`` 已在 bootstrap 期写入
-        # ``ctx.channel = "acp:<client_id>"``;此处把它**声明给引擎**(spine →
-        # agent ctx),否则治理决策会 APR-503 fail-closed。字段缺失时传 None =
-        # 显式"无人类通道"语义(与"从未声明"是两件事)。
-        channel=getattr(ctx, "channel", None))
-    return getattr(ctx, "task_queue", None)
+    import copy
+    runtime = copy.copy(ctx)
+    runtime.session = log_
+    runtime.engine_spine = None
+    runtime.task_queue = None
+    if getattr(ctx, 'llm_runtime', None) is None:
+        from pyharness.core.llm import LLMRuntime
+        ctx.llm_runtime = LLMRuntime()
+        ctx._acp_owns_llm = True
+    runtime.llm_runtime = ctx.llm_runtime
+    runtimes[sid] = runtime
+    session_cfg = cfg.model_copy(deep=True) if hasattr(cfg, 'model_copy') else cfg
+    try:
+        await _eng.attach_engine_to_ctx(
+            runtime, session_cfg, log_=log_,
+            sessions_dir=Path(str(sessions_dir)).expanduser(),
+            bus=getattr(ctx, "bus", None),
+            store=getattr(log_, "_persistence", None),
+            # GAP-11:ACP 桥即人类通道。``_set_channel`` 已在 bootstrap 期写入
+            # ``ctx.channel = "acp:<client_id>"``;此处把它**声明给引擎**(spine →
+            # agent ctx),否则治理决策会 APR-503 fail-closed。字段缺失时传 None =
+            # 显式"无人类通道"语义(与"从未声明"是两件事)。
+            channel=getattr(ctx, "channel", None))
+    except BaseException as primary:
+        try:
+            if runtime.engine_spine is not None: await runtime.engine_spine.close()
+            runtimes.pop(sid, None)
+        except BaseException as secondary:
+            primary.add_note(f'ACP initialization cleanup failed: {type(secondary).__name__}')
+        raise
+    for name in ('engine_spine', 'task_queue', 'approval', 'guard', 'scope', 'llm', 'tools', 'governance'):
+        setattr(ctx, name, getattr(runtime, name))
+    return runtime.task_queue
+
+
+async def close_owned_runtimes(ctx):
+    runtimes = getattr(ctx, '_acp_runtimes', {})
+    errors = []
+    for sid, runtime in list(runtimes.items()):
+        try:
+            await runtime.engine_spine.close()
+        except BaseException as exc:
+            errors.append(exc)
+        else:
+            runtimes.pop(sid, None)
+    if getattr(ctx, '_acp_owns_llm', False):
+        try: await ctx.llm_runtime.aclose()
+        except BaseException as exc: errors.append(exc)
+    if errors:
+        raise BaseExceptionGroup('ACP runtime cleanup failed', errors)
 
 
 def _chat_summary(log_: Any, task_id: str, enq_seq: Optional[int],
@@ -492,7 +539,14 @@ async def cmd_approve(ctx: Any, st: AcpState, params: dict) -> dict:
     # 冒充人类裁决通道,绕过审批者白名单(P2 收紧)。审计身份不可由对端指定。
     by = f"acp:{st.client_id}"
     provider = getattr(ctx, "approval", None)
-    fn = getattr(provider, decision, None)    # approve/deny 同构入口
+    runtimes = getattr(ctx, '_acp_runtimes', {})
+    if runtimes:
+        sid = params.get('sessionId') or st.session_id
+        runtime = runtimes.get(sid)
+        if runtime is None:
+            raise_code('APR-503', reason='approval_session_not_bound')
+        provider = runtime.approval
+    fn = getattr(provider, decision + '_async', None) or getattr(provider, decision, None)
     if not callable(fn):
         raise_code("CYC-999", hint="桥未装配审批裁决入口(ctx.approval.approve/deny)")
     await _maybe_await(fn(aid, by=by))        # APR-503/GRD-403 等同步上抛
@@ -649,6 +703,15 @@ async def serve(ctx: Any, *, client_id: Optional[str] = None,
     except OSError as e:
         log.error("acp stdin/stdout 断(OSError): %s", e)
         return 1
+    finally:
+        errors = []
+        try: await close_owned_runtimes(ctx)
+        except BaseException as exc: errors.append(exc)
+        shutdown = getattr(getattr(ctx, 'session', None), 'shutdown_all', None)
+        if callable(shutdown):
+            try: await _maybe_await(shutdown())
+            except BaseException as exc: errors.append(exc)
+        if errors: raise BaseExceptionGroup('ACP shutdown failed', errors)
 
 
 class AcpBridge:

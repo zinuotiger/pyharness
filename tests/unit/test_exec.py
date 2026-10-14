@@ -66,24 +66,28 @@ def sandbox_ctx(tmp_path) -> _Ctx:
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_shell_run_ok(sandbox_ctx):
     out = await exec_shell({"command": "echo pyharness-ok"}, sandbox_ctx)
-    assert "pyharness-ok" in out
+    assert out["ok"] and "pyharness-ok" in out["stdout"], out
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_shell_run_fail_exit_code(sandbox_ctx):
     out = await exec_shell({"command": "exit 3"}, sandbox_ctx)
-    assert "exit=3" in out or "exit_code" in out
+    assert out["ok"] is False and out["exit_code"] == 3
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_python_run(sandbox_ctx):
     out = await exec_python({"code": "print(6*7)"}, sandbox_ctx)
-    assert "42" in out
+    assert out["ok"] and "42" in out["stdout"], out
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_exec_python_does_not_block_event_loop(sandbox_ctx):
     """异步 exec 运行期间,事件循环仍能执行其他协程。"""
     task = asyncio.create_task(exec_python(
@@ -95,7 +99,7 @@ async def test_exec_python_does_not_block_event_loop(sandbox_ctx):
 
     assert await asyncio.wait_for(tick(), timeout=0.3) == "tick"
     assert not task.done()
-    assert "done" in await task
+    assert "done" in (await task)["stdout"]
 
 
 @pytest.mark.asyncio
@@ -131,18 +135,16 @@ def test_sandbox_env_strips_secrets(tmp_path):
     assert env["TMP"] == str((tmp_path / "sb" / "tmp").resolve())
 
 
-def test_posix_kill_uses_process_group(monkeypatch):
-    """POSIX 子进程启动于独立 session 后,kill 必须按进程组执行。"""
-    calls: list[tuple] = []
-    monkeypatch.setattr(proc.os, "name", "posix")
-    monkeypatch.setattr(proc.os, "getpgid", lambda pid: 777, raising=False)
-    monkeypatch.setattr(proc.os, "killpg",
-                        lambda pgid, sig: calls.append((pgid, sig)), raising=False)
-    proc._kill_pid_tree(123)
-    assert calls == [(777, 9)]
+def test_pid_only_tree_kill_is_rejected(monkeypatch):
+    calls = []
+    monkeypatch.setattr(proc.os, 'kill', lambda *args: calls.append(args))
+    with pytest.raises(RuntimeError, match='owned process handle'):
+        proc._kill_pid_tree(123)
+    assert calls == []
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_proc_lifecycle(sandbox_ctx):
     await proc_start({"command": "echo hello-proc"}, sandbox_ctx)
     # 直接经模块层断言(工具面 pid 参数化)
@@ -163,10 +165,13 @@ async def test_proc_lifecycle(sandbox_ctx):
     assert "pid=" in out
     # kill(幂等路径)
     await proc_kill({"pid": st["pid"]}, sandbox_ctx)
-    assert proc.close_session("s-exec-000001") == 0 or True  # 已退出清理幂等
+    assert proc.close_session("s-exec-000001") == 1
+    assert proc.close_session("s-exec-000001") == 0
+    assert "s-exec-000001" not in proc._table()
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_proc_kill_running(sandbox_ctx):
     await proc_start({"command": "cmd /c ping -n 30 127.0.0.1 >nul"}, sandbox_ctx)
     table = proc._table().get("s-exec-000001") or {}

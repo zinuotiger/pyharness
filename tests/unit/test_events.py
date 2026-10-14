@@ -131,10 +131,11 @@ def test_register_duplicate_rejected():
     assert dict(V) == before, "EVT-102 后注册表不得变化"
 
 
-def test_register_plugin_type_and_validate():
+def test_register_plugin_type_and_validate(request):
     """插件运行时注册 plugin.<id>.<name>:注册→查询→payload 校验→重复拒。"""
-    # 注意:本测试向运行期注册表追加一个合成类型(只增不改,无注销 API)
+    # 生产注册表只增不改；测试合成类型须清理，避免污染后续规模/文档门禁。
     type_ = "plugin:echo.ping"
+    request.addfinalizer(lambda: EVENT_TYPES.pop(type_, None))
     with pytest.raises(PyHError) as ei:
         validate_payload(type_, {})
     assert ei.value.code == "EVT-102"

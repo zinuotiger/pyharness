@@ -333,6 +333,7 @@ def test_valb1_py_token_resolves_to_project_interpreter():
     assert exe and (exe in resolved), f"{exe!r} not in {resolved!r}"
 
 
+@pytest.mark.controlled_process
 def test_valb1_py_token_actually_executes(runs):
     """`{PY}` 解析后的命令**真实执行**并产生输出(非静默空跑)。"""
     resolved = A._resolve_cmd("{PY} -m pytest --version")

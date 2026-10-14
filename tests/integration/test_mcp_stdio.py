@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.asyncio
+@pytest.mark.controlled_process
 async def test_mcp_stdio_real_process_chain():
     server = ROOT / "scripts" / "mcp_echo_server.py"
     client = McpClient("echo", StdioTransport(

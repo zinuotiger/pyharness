@@ -369,6 +369,11 @@ class SessionLog:
         if is_transient(type_):
             raise_code("EVT-100", type_=type_, hint="瞬时事件禁止 append 入日志:"
                        "llm.chunk/registry.updated 仅经总线分发")
+        # 暂停的存储会拒收新事件，但总线会隔离订阅者异常。
+        # 在分配 seq/写内存前拒绝，避免后续 flush 只恢复旧行却向新消息报成功。
+        check_writable = getattr(self._persistence, "ensure_writable", None)
+        if callable(check_writable):
+            check_writable()
         # 3) finished 单次:置位防并发双写(终态不可逆;EVT-104 由第 1 步接住重复)。
         #    第 1 步至此全为同步段(无 await),同一次事件循环回合内不可能插入第二条
         #    finished,故置位仍具并发防护力。

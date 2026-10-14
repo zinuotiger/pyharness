@@ -31,9 +31,18 @@ class ApplicationServiceRegistry:
         return list(self._services.values())
 
     async def close_all(self) -> None:
-        for service in list(self._services.values()):
-            await service.shutdown()
-        self._services.clear()
+        errors = []
+        for tenant, service in list(self._services.items()):
+            try:
+                await service.shutdown()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                self._services.pop(tenant, None)
+        if errors:
+            for error in errors[1:]:
+                errors[0].add_note(f'additional tenant shutdown failure: {type(error).__name__}')
+            raise errors[0]
 
 
 __all__ = ["ApplicationServiceRegistry"]

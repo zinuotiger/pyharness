@@ -83,6 +83,7 @@ class _WinPtySession:
         self._closed = False
 
     def start(self) -> None:
+        _unavailable()
         try:
             from winpty import PtyProcess           # 可选依赖 extra `pty`
         except ImportError as e:
@@ -173,7 +174,7 @@ class _WinPtySession:
             return None
         st = getattr(self._p, "exitstatus", None)
         if st is None:                               # EOF 收尸尚未落定:不阻塞调用方
-            return 0
+            return None
         return int(st)
 
     def wait(self, timeout: float) -> Optional[int]:
@@ -223,6 +224,7 @@ class _PosixPty:
         self._closed = False
 
     def start(self) -> None:
+        _unavailable()
         import pty
         master, slave = pty.openpty()
         try:
@@ -320,19 +322,20 @@ class _PosixPty:
 
 # ------------------------------------------------------------------ 门面
 def pty_supported() -> bool:
-    """当前平台是否具备真 PTY(Windows 需 pywinpty;POSIX 需 stdlib pty)。"""
-    if os.name == "nt":
-        try:
-            import winpty                            # noqa: F401
-            return True
-        except Exception:                            # noqa: BLE001
-            return False
-    return hasattr(os, "openpty")
+    """PTY execution is gated until it has the same owned-tree contract as exec."""
+    return False
+
+
+def _unavailable():
+    raise_code('TLB-807', module='pty',
+               hint='PTY execution is disabled: process-tree ownership is not established',
+               advice='Use exec.shell_run or exec.python_run; installing a PTY extra does not enable this path')
 
 
 def open_pty(command: Union[str, list], *, cwd: Path, env: Optional[dict] = None,
              cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS) -> Any:
     """开一个真 PTY 会话(两平台同接口);不支持 → TLB-807。"""
+    _unavailable()
     if not pty_supported():
         raise_code("TLB-807", module="pty",
                    hint=("pywinpty 未安装(Windows 真 PTY 后端缺失)"

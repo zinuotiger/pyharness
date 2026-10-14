@@ -224,7 +224,7 @@ async def test_task_id_binding_is_serial_and_never_bleeds(e2e_factory):
             return 0.01
 
     llm_mod.adapters.clear()
-    llm_mod.adapters[model] = _Gated()
+    s.ctx.engine_spine.llm_runtime.registry[model] = _Gated()
     try:
         await s.boot()
         run_task = _aio.create_task(s.run("hold"))
@@ -280,11 +280,11 @@ async def test_persistence_owner_is_tenant_scoped_on_shared_bus(tmp_path):
             f"两租户同名 sid 的落盘属主必须可区分,实际 {sorted(owners)}"
 
         before_b = sum(1 for lst in bus._by_type.values() for s in lst
-                       if s.owner.endswith(sid) and "beta" in s.owner)
+                       if s.owner == b._owners[sid])
         # 关 A(不删文件):不得摘掉 B 的订阅
         await a.shutdown_all()
         after_b = sum(1 for lst in bus._by_type.values() for s in lst
-                      if s.owner.endswith(sid) and "beta" in s.owner)
+                      if s.owner == b._owners[sid])
         assert after_b == before_b and after_b > 0, "关闭 A 摘掉了 B 的落盘订阅"
     finally:
         await b.shutdown_all()

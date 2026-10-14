@@ -468,12 +468,24 @@ class JobManager:
         self._authorize(j, by)
         if j.terminal:
             return False                          # 终态幂等(防重放)
-        await self._session.append("system.cancelled",
-                                   {"what": j.task_id, "reason": "user-cancel"},
-                                   actor="system", task_id=j.task_id)
         j._cancel_pending = True                  # 早到取消统一旗标(入口自查兜底)
         if j.task is not None and not j.task.done() and j._begun:
             j.task.cancel()                       # 任务已开始执行 → 沿 await 链传播
+        primary = None
+        try:
+            await self._session.append('system.cancelled',
+                {'what': j.task_id, 'reason':'user-cancel'}, actor='system', task_id=j.task_id)
+        except BaseException as exc:
+            primary = exc
+        try:
+            if j.task is not None:
+                results = await asyncio.shield(asyncio.gather(j.task, return_exceptions=True))
+                for error in results:
+                    if isinstance(error, BaseException) and not isinstance(error, asyncio.CancelledError): raise error
+        except BaseException as exc:
+            if primary is None: raise
+            primary.add_note(f'job cleanup failed: {type(exc).__name__}')
+        if primary is not None: raise primary
         return True
 
     # ============================================================ 列表/清理
@@ -510,23 +522,25 @@ class JobManager:
         live = [j for j in self._running.values() if j.state in _ACTIVE_STATES]
         if not live:
             return
-        for j in live:                            # ① 全部取消(先审计后 cancel)
+        errors = []
+        for j in live:
             j._cancel_reason = "session-closed"
-            j._cancel_pending = True              # 未开始者由入口自查兜底
+            j._cancel_pending = True
+            if j.task is not None and not j.task.done() and j._begun:
+                j.task.cancel()
+        for j in live:
             try:
                 await self._session.append("system.cancelled",
-                                           {"what": j.task_id,
-                                            "reason": "session-closed"},
-                                           actor="system", task_id=j.task_id)
-            except PyHError as e:                 # EVT-104 竞态兜底:仅记日志
-                log.error("session-closing audit failed code=%s job=%s",
-                          e.code, j.id)
-            if j.task is not None and not j.task.done() and j._begun:
-                j.task.cancel()                   # 已开始执行 → 沿 await 链传播
+                    {"what": j.task_id, "reason": "session-closed"},
+                    actor="system", task_id=j.task_id)
+            except BaseException as exc:
+                errors.append(exc)
         tasks = [j.task for j in live if j.task is not None]
         if tasks:
-            await asyncio.gather(*tasks,          # ② 等 _run 各自落 failed 终态
-                                 return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            errors.extend(e for e in results if isinstance(e, BaseException)
+                          and not isinstance(e, asyncio.CancelledError))
+        if errors: raise BaseExceptionGroup('job shutdown failed', errors)
 
     # ============================================================ 完成通知
     async def _notify(self, j: Job) -> None:

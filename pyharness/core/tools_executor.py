@@ -256,6 +256,11 @@ def _approval_binding(call: Any, args: dict) -> str:
 
 
 # ================================================================ ToolExecutor
+async def _authorize_governance(ctx, call, **kwargs):
+    """Single governance funnel, including approval re-entry."""
+    return await ctx.governance.authorize(call, ctx, **kwargs)
+
+
 class ToolExecutor:
     """工具执行管道总闸(统一 Consumer;DIS-SEAM §2.3)。
 
@@ -485,7 +490,7 @@ class ToolExecutor:
         # 故由执行侧计算后经 `authorize(inputs_digest=...)` 传入——与 `chain_factory`
         # 注入先例同型(装配/执行侧适配,治理层只持有)。全流程只算一次。
         digest = _approval_binding(call, args)
-        d = await ctx.governance.authorize(call, ctx, inputs_digest=digest)
+        d = await _authorize_governance(ctx, call, inputs_digest=digest)
         if d == "reject":                               # 终局拒(含 scope-hidden)
             self._rejected.add(call.call_id)            # 广义防重放(偏离 11)
             return ExecResult(ok=False, summary="guard 拒绝,未执行")
@@ -502,25 +507,27 @@ class ToolExecutor:
         try:
             self._r.mark_running(call.name)             # registry 注销闸联动
             t0 = time.perf_counter()
-            fut = asyncio.wait_for(
-                self._run_provider(defn, args, ctx), timeout=timeout)
+            fut = asyncio.create_task(asyncio.wait_for(
+                self._run_provider(defn, args, ctx), timeout=timeout))
             self._active = fut
             started = True                          # Provider 已进入 await 点
             try:
                 raw = await fut
             finally:
-                self._active = None
+                if self._active is fut:
+                    self._active = None
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
         except asyncio.TimeoutError:                    # 掐断;进程类杀树归
             return await self._on_error(                # Provider(TO-301),见 docstring
-                ctx, call, "TLB-805", f"执行超时({timeout}s)")
+                ctx, call, "TLB-805", f"执行超时({timeout}s):已停止等待;"
+                "工具可能仍在运行,已发生副作用未撤销")
         except asyncio.CancelledError:                  # F025:取消不吞
             if started:                                 # 已发生副作用如实写 partial
                 await self._append(ctx, "tool.result",
                                    {"name": call.name, "call_id": call.call_id,
                                     "ok": False, "truncated": True,
-                                    "summary": "已取消:执行被中断,"
-                                               "已发生副作用如实记录(partial)"},
+                                    "summary": "已取消等待:工具可能仍在运行,"
+                                               "已发生副作用未撤销(partial)"},
                                    actor="tool", trace=self._trace(call))
             raise                                       # 按取消协议 re-raise
         except PyHError as e:                           # Provider 结构化错误
@@ -631,7 +638,7 @@ class ToolExecutor:
         # 属正确语义——见 INV-APPROVAL-REF(S4-P1-2 冻结口径)。
         get_ref = getattr(ap, "approval_ref_of", None)
         approval_ref = get_ref(call.call_id) if get_ref is not None else None
-        d2 = await ctx.governance.authorize(call, ctx, prior=prior,
+        d2 = await _authorize_governance(ctx, call, prior=prior,
                                             inputs_digest=binding,
                                             approval_ref=approval_ref)
         if d2 == "reject":                              # 批准时策略收紧 → 作废
@@ -721,7 +728,7 @@ class ToolExecutor:
         pool = ThreadPoolExecutor(max_workers=1,
                                   thread_name_prefix=f"tool:{str(defn.name)[:16]}")
         try:
-            return await loop.run_in_executor(pool, handle, args, ctx)
+            result = await loop.run_in_executor(pool, handle, args, ctx)
         except BaseException:                           # 超时/取消/异常:驱逐不复用
             pool.shutdown(wait=False, cancel_futures=True)
             self._zombie_pools.add(pool)
@@ -730,6 +737,7 @@ class ToolExecutor:
         else:
             pool.shutdown(wait=True)                    # 正常完成:线程已结束
             self._zombie_pools.discard(pool)
+            return result
 
     def _prune_zombies(self) -> None:
         """僵尸池裁剪:超时产生的池,线程跑完后自会空转结束;仅当僵尸池累积超过
@@ -766,7 +774,7 @@ class ToolExecutor:
         落盘,本函数只负责触发取消(单事件循环单在途,阶段 1 agent-loop 串行)。
         """
         fut = self._active
-        if fut is None or fut.done():
+        if fut is None or fut.done() or fut.cancelling():
             return False
         fut.cancel()
         return True
@@ -820,6 +828,8 @@ class ToolExecutor:
                     else str(e)
                 return await self._on_error(ctx, call, "TLB-803",
                                             f"输出校验失败:{detail}")
+        from pyharness.core.provider_result import ProviderOutcome
+        ok = bool(raw.get('ok')) if isinstance(raw, ProviderOutcome) else True
         text = render_result_text(raw)
         truncated, spill_ref = False, None
         if len(text) > SPILL_THRESHOLD:
@@ -839,10 +849,10 @@ class ToolExecutor:
             summary = summarize_text(text)
         await self._append(ctx, "tool.result",
                            {"name": call.name, "call_id": call.call_id,
-                            "ok": True, "summary": summary,
+                            "ok": ok, "summary": summary,
                             "truncated": truncated, "spill_ref": spill_ref},
                            actor="tool", trace=self._trace(call))
-        return ExecResult(ok=True, summary=summary, truncated=truncated,
+        return ExecResult(ok=ok, summary=summary, truncated=truncated,
                           spill_ref=spill_ref, elapsed_ms=elapsed_ms)
 
 

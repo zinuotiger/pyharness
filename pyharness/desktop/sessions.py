@@ -155,11 +155,18 @@ class DesktopSessionManager:
         # 若属主只含 sid,则两租户同属主 → 关闭/删除其一即摘掉**另一租户**的落盘订阅
         # (其会话从此静默不落盘)。同 R8-4(原生壳固定属主)的同类:属主必须含**全部**
         # 隔离维度。
-        owner = f"persistence:{getattr(self, 'tenant_id', None) or ''}:{sid}"
+        owner = f"persistence:{getattr(self, 'tenant_id', None) or ''}:{sid}:{id(self)}"
         record = session_recorder(store, sid)
 
-        for t in EVENT_TYPES:               # 词表逐精确类型订阅(段通配防重复,见偏离 4)
-            self.bus.subscribe(t, record, owner=owner)
+        try:
+            for t in EVENT_TYPES:
+                self.bus.subscribe(t, record, owner=owner)
+        except BaseException as primary:
+            try:
+                self.bus.unsubscribe_all(owner)
+            except BaseException as secondary:
+                primary.add_note(f'subscription rollback failed: {type(secondary).__name__}')
+            raise
         log_._bus = self.bus                # append → 分发 → 落盘闭环
         self._owners[sid] = owner
 
@@ -168,11 +175,14 @@ class DesktopSessionManager:
         """新建会话:sid → store → open_session → 总线落盘订阅 → session.created 首事件。"""
         sid = f"s-{uuid.uuid4().hex[:12]}"  # Envelope.session_id min_length=8
         store = await self._open_store(sid)
-        log_ = await open_session(sid, store,
-                                  tenant_id=self.tenant_id)   # GAP-10
-        self._attach_persistence(log_, store, sid)
-        await log_.append("session.created", {"title": "", "model": self._default_model()},
-                          actor="system", sync=True)
+        try:
+            log_ = await open_session(sid, store, tenant_id=self.tenant_id)
+            self._attach_persistence(log_, store, sid)
+            await log_.append("session.created", {"title": "", "model": self._default_model()},
+                              actor="system", sync=True)
+        except BaseException as primary:
+            self._rollback_open(sid, store, primary)
+            raise
         self._logs[sid] = log_
         self._stores[sid] = store
         return sid
@@ -182,6 +192,17 @@ class DesktopSessionManager:
         llm = getattr(cfg, "llm", None)
         model = getattr(llm, "model", None)
         return str(model) if model else "unknown"
+
+    def _rollback_open(self, sid, store, primary):
+        owner = self._owners.pop(sid, None)
+        cleanups = [store.close]
+        if owner is not None and self.bus is not None:
+            cleanups.insert(0, lambda: self.bus.unsubscribe_all(owner))
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except BaseException as secondary:
+                primary.add_note(f'session initialization cleanup failed: {type(secondary).__name__}')
 
     async def open_session(self, sid: str) -> SessionLog:
         """打开既有会话(重放重建 + 落盘订阅);文件不存在 → EVT-106。"""
@@ -194,9 +215,12 @@ class DesktopSessionManager:
                            hint="会话不存在(日志缺失);先 `session list` 确认 sid 或新建会话")
             await self._ensure_repaired(sid)    # 损坏先修再 open(F060;未装配跳过)
             store = await self._open_store(sid)
-            log_ = await open_session(sid, store,
-                                      tenant_id=self.tenant_id)   # GAP-10
-            self._attach_persistence(log_, store, sid)
+            try:
+                log_ = await open_session(sid, store, tenant_id=self.tenant_id)
+                self._attach_persistence(log_, store, sid)
+            except BaseException as primary:
+                self._rollback_open(sid, store, primary)
+                raise
             self._logs[sid] = log_
             self._stores[sid] = store
             return log_
@@ -378,26 +402,21 @@ class DesktopSessionManager:
 
     async def shutdown_all(self) -> None:
         """收尾:全量 flush + 关句柄 + 摘落盘订阅(幂等;正常路径强同步事件已落盘)。"""
-        for sid, store in self._stores.items():
-            try:
-                await _await(store.flush())
-            except Exception:               # noqa: BLE001 收尾刷盘失败不掩盖退出
-                log.warning("desktop flush sid=%s 失败", sid, exc_info=True)
-            try:
-                store.close()
-            except Exception:               # noqa: BLE001
-                log.warning("desktop close store sid=%s failed", sid,
-                            exc_info=True)
+        errors = []
+        for sid, store in list(self._stores.items()):
+            try: await _await(store.flush())
+            except BaseException as exc: errors.append(exc)
+            try: store.close()
+            except BaseException as exc: errors.append(exc)
         if self.bus is not None:
             for owner in set(self._owners.values()):
-                try:
-                    self.bus.unsubscribe_all(owner)
-                except Exception:           # noqa: BLE001
-                    log.warning("desktop unsubscribe owner=%s failed", owner,
-                                exc_info=True)
+                try: self.bus.unsubscribe_all(owner)
+                except BaseException as exc: errors.append(exc)
         self._stores.clear()
         self._owners.clear()
         self._logs.clear()
+        if errors: raise BaseExceptionGroup('session manager cleanup failed', errors)
+
 
 
 def _summarize_log(log_: Any) -> dict:

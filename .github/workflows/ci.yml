@@ -43,7 +43,7 @@ jobs:
       - name: 环境自检(可选依赖是否在位,必须可见)
         run: |
           python -c "import PySide6, sys; print('PySide6', PySide6.__version__)"
-          python -c "import pywinpty; print('pywinpty ok')"
+          python -c "import winpty; print('pywinpty (winpty) ok')"
 
       - name: 全量测试(无 --ignore)
         env:
@@ -118,26 +118,7 @@ jobs:
           # 治理写侧唯一入口纪律:authorize() 只允许在 tools_executor 被调用。
           # 用 **AST** 判定而非 grep —— docstring/注释里提到该符号不算调用点
           # (本仓库已实际踩过这个坑,见 tests/conftest.py::authorize_call_sites)。
-          python - <<'PY'
-          import ast, pathlib, sys
-          base = pathlib.Path("pyharness")
-          hits = set()
-          for p in sorted(base.rglob("*.py")):
-              tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
-              for n in ast.walk(tree):
-                  if not isinstance(n, ast.Call):
-                      continue
-                  f = n.func
-                  if (isinstance(f, ast.Attribute) and f.attr == "authorize"
-                          and isinstance(f.value, ast.Attribute)
-                          and f.value.attr == "governance"):
-                      hits.add(str(p).replace("\\", "/"))
-          expected = {"pyharness/core/tools_executor.py"}
-          if hits != expected:
-              print(f"::error::governance.authorize() 调用点漂移: {sorted(hits)}")
-              sys.exit(1)
-          print("authorize() 调用点恰好 1 处(工具执行关 2)", hits)
-          PY
+          python -B scripts/check_authorization.py
           # 治理读侧(AuditSystem / Evidence)必须有生产调用点,否则又是"库级可达、
           # 产品不可达"——这正是 GAP-7 / GAP-8 的原始形态。
           for sym in "governance.audit" "archive_task_evidence" "governance_audit("; do

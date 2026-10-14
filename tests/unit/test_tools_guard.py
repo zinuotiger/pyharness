@@ -606,6 +606,7 @@ async def test_g3_dotdot_escape_polfs2(tmp_path):
     assert d == "allow" and policy is None
 
 
+@pytest.mark.controlled_process
 async def test_g3_junction_escape_polfs3(tmp_path):
     """POL-FS-3:junction 终解析越界(词法在界内,真实在界外)→ reject。
     Windows junction 免管理员权限;创建失败则跳过(环境无该能力)。"""
@@ -615,7 +616,7 @@ async def test_g3_junction_escape_polfs3(tmp_path):
     outside.mkdir()
     link = ws / "escape"
     rc = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(outside)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
     if rc != 0:
         pytest.skip("环境不支持创建 junction(无 mklink 权限)")

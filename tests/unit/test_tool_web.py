@@ -803,6 +803,7 @@ def test_validate_args_fetch_contract():
 
 
 # ============================================== SyntaxWarning 回归锚点
+@pytest.mark.controlled_process
 def test_module_compiles_without_syntax_warning():
     r"""回归:docstring 的 \s 转义曾触发 SyntaxWarning(改 r-string 修复)。
 

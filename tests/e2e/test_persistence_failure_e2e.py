@@ -21,7 +21,10 @@ class _Env:
 
     def __init__(self, seq: int, text: str) -> None:
         self.seq = seq
-        self._text = text
+        from pyharness.events.envelope import Envelope
+        self._text = Envelope(seq=seq, ts="2026-09-24T00:00:00.000000Z",
+            type="user.message", session_id="s-pers-fail-0001", actor="user",
+            payload={"content": text}).model_dump_json()
 
     def model_dump_json(self) -> str:
         return self._text
@@ -35,6 +38,9 @@ class _BrokenFH:
         self._fail_after = fail_after
         self.writes = 0
         self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
     def write(self, line: str) -> int:
         self.writes += 1
@@ -61,11 +67,10 @@ def broken_store(tmp_path):
     try:
         yield store, seen, store._fh
     finally:
-        try:
-            store._fh = real
-            store.close()
-        except Exception:                       # noqa: BLE001 收尾尽力
-            pass
+        store._fh = real
+        store.close()
+        assert real.closed
+        assert store._lock_path is None
 
 
 def _collector(seen):
@@ -117,7 +122,7 @@ async def test_public_flush_path_is_bounded(broken_store):
     """``flush()`` 此前只累加计数、不判阈值(GAP-2)⇒ 现同样进入失败状态。"""
     store, seen, _fh = broken_store
     for i in range(1, _FAIL_STREAK_LIMIT + 1):
-        store._pending.append((i, f'{{"seq":{i}}}'))   # 攒批(非 sync 入队)
+        store._pending.append((i, _Env(i, str(i)).model_dump_json()))   # 攒批(非 sync 入队)
         with pytest.raises(PyHError) as ei:
             await store.flush()
         assert ei.value.code == "PERS-202"
@@ -159,4 +164,8 @@ async def test_close_after_failure_state_does_not_hang(tmp_path):
         with pytest.raises(PyHError):
             await store.append(_Env(i, f'{{"seq":{i}}}'), sync=True)
     assert store._suspended is True
-    await asyncio.wait_for(asyncio.to_thread(store.close), timeout=5.0)
+    fh = store._fh
+    with pytest.raises(OSError, match="simulated disk failure"):
+        await asyncio.wait_for(asyncio.to_thread(store.close), timeout=5.0)
+    assert fh.closed
+    assert store._lock_path is None

@@ -220,6 +220,8 @@ class AdapterTriple:
     base_url: str        # 裸域或 /v1 结尾(禁写 /chat/completions)
     api_key_ref: str     # env:NAME / file:PATH 秘密引用(F016 单口)
     model: str
+    credential_store: Any = field(default=None, repr=False, compare=False)
+    credential_binding: Any = field(default=None, repr=False, compare=False)
 
 
 # ================================================================ 传输层异常
@@ -609,6 +611,7 @@ class OpenAICompatAdapter(LLMAdapter):
         self._triple = triple
         self._cfg = cfg
         self._transport = transport
+        self._closed = False
         self._counters = counters if counters is not None else UsageCounters()
         self._counters_injected: bool = counters is not None
         self._deg: Optional[str] = None            # 降级来源(fallback 切链后置位 F013)
@@ -625,6 +628,11 @@ class OpenAICompatAdapter(LLMAdapter):
     # ------------------------------------------------------ 传输解析
     def _ensure_transport(self) -> Any:
         """惰性取传输:注入优先;否则 build_client(解析 key 需真实凭据,仅真调用路径)。"""
+        if self._closed:
+            raise_code('CRED-703', reason='model_runtime_closed')
+        if self._triple is not None and self._triple.credential_store is not None:
+            self._triple.credential_store.validate_binding(
+                self._triple.api_key_ref, self._triple.credential_binding)
         if self._transport is None:
             if self._triple is None:
                 raise_code("CFG-601", reason="structural", fields=["llm"],
@@ -632,6 +640,18 @@ class OpenAICompatAdapter(LLMAdapter):
                                   "triple 或注入 transport")
             self._transport = build_client(self._triple, self.timeout)
         return self._transport
+
+    async def aclose(self):
+        self._closed = True
+        task = getattr(self, '_close_task', None)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = self._close_task = asyncio.create_task(self._close_transport())
+        await asyncio.shield(task)
+
+    async def _close_transport(self):
+        close = getattr(self._transport, 'aclose', None)
+        if close is not None:
+            await close()
 
     def _llm_cfg(self, ctx: Any) -> Any:
         """本请求 llm 配置段(ctx.config.llm → 构造 cfg → L1)。"""
@@ -738,9 +758,7 @@ class OpenAICompatAdapter(LLMAdapter):
         计数归属:显式注入(engine 装配共享实例)优先;未注入(桌面/CLI 装配期
         适配器先于 ctx)且 ctx.counters 在岗 → 落 ctx.counters——预算闸与
         llm 计量强制同源(scope._counters == ctx.counters == 本实例)。"""
-        cnt = self._counters
-        if not self._counters_injected:
-            cnt = getattr(ctx, "counters", None) or self._counters
+        cnt = getattr(ctx, 'counters', None) or self._counters
         return await report_usage(usage, model, ctx=ctx, counters=cnt)
 
     def _note_rate_limit(self, ctx: Any) -> None:
@@ -751,9 +769,7 @@ class OpenAICompatAdapter(LLMAdapter):
         → _rate_limit_streak 恒 0 → "连续限流达阈值降级"分支永不触发。
         已知限制:无"成功重置"点,计数为会话内累计而非严格"连续"。
         """
-        cnt = self._counters
-        if not self._counters_injected:
-            cnt = getattr(ctx, "counters", None) or self._counters
+        cnt = getattr(ctx, 'counters', None) or self._counters
         add = getattr(cnt, "rate_limit_add", None)
         if callable(add):
             add()
@@ -775,6 +791,40 @@ class OpenAICompatAdapter(LLMAdapter):
 # ================================================================ 注册表
 # AdapterRegistry(F030):name(= 模型名) → 适配器实例;换模型 = 注册 + 配置,llm 零改动
 adapters: dict[str, LLMAdapter] = {}
+
+
+class LLMRuntime:
+    """Application-owned connections; session counters are never retained here.
+
+    Explicit non-production adapters in the public registry remain a borrowed
+    test/plugin seam. New production clients are closed by this owner once.
+    """
+    def __init__(self):
+        self.registry = {key: value for key, value in adapters.items()
+                         if not isinstance(value, OpenAICompatAdapter)}
+        self.closed = False
+
+    def has_borrowed_adapter(self, name):
+        adapter = self.registry.get(name)
+        return adapter is not None and not isinstance(adapter, OpenAICompatAdapter)
+
+    async def aclose(self):
+        self.closed = True
+        task = getattr(self, '_close_task', None)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = self._close_task = asyncio.create_task(self._close_owned())
+        await asyncio.shield(task)
+
+    async def _close_owned(self):
+        errors = []
+        for adapter in {id(a): a for a in self.registry.values()}.values():
+            if isinstance(adapter, OpenAICompatAdapter):
+                try:
+                    await adapter.aclose()
+                except BaseException as exc:
+                    errors.append(exc)
+        if errors:
+            raise BaseExceptionGroup('model transport cleanup failed', errors)
 
 
 def register_adapter(name: str, factory: Any) -> LLMAdapter:
@@ -872,6 +922,16 @@ class _OpenAICompatHTTPTransport:
             trust_env=False)   # 禁读 env 代理:DeepSeek 直连;应用层不随 HTTP_PROXY 劫持
                                 # (桌面 exe 曾因此卡死在 Clash 转发上,180s 才超时)
         self._req_path = "/chat/completions"
+        self._validate = None
+        self._loop = None
+
+    def _check_send(self):
+        loop = asyncio.get_running_loop()
+        if self._loop is not None and self._loop is not loop:
+            raise_code('CRED-703', reason='model_transport_event_loop_changed')
+        self._loop = loop
+        if self._validate is not None:
+            self._validate()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -884,6 +944,7 @@ class _OpenAICompatHTTPTransport:
     async def complete(self, req: dict) -> Any:
         """非流式 POST → raw 命名空间对象(choices/message/tool_calls/usage 鸭子同构)。"""
         # 断网/连接/读超时等 httpx.HTTPError 直传(归一 303);HTTP ≥400 → 状态错(按状态映射)
+        self._check_send()
         resp = await self._client.post(self._req_path, json=self._body(req))
         if resp.status_code >= 400:
             raise ProviderStatusError(resp.status_code)
@@ -898,6 +959,7 @@ class _OpenAICompatHTTPTransport:
     async def stream(self, req: dict) -> AsyncIterator[Any]:
         """SSE 流式(include_usage):逐行 data: 块 → raw chunk 命名空间;断流异常直传。"""
         body = self._body(req)
+        self._check_send()
         async with self._client.stream("POST", self._req_path, json=body) as resp:
             if resp.status_code >= 400:
                 raise ProviderStatusError(resp.status_code)
@@ -918,6 +980,7 @@ class _OpenAICompatHTTPTransport:
     async def ping(self) -> float:
         """F033 探针:GET /models 往返秒(OpenAI 兼容端点均实现);≥400 → 状态错。"""
         t0 = time.perf_counter()
+        self._check_send()
         resp = await self._client.get("/models")
         if resp.status_code >= 400:
             raise ProviderStatusError(resp.status_code)
@@ -940,7 +1003,10 @@ def build_client(triple: AdapterTriple, limits: TimeoutLimits, *,
     偏离 2:spec 返回 openai.AsyncOpenAI——openai SDK 非本阶段运行依赖(真实调用留 e2e),
     此处返回 httpx OpenAI 兼容传输(complete/stream/ping,语义与 create 对齐),可整体注入。
     """
-    resolver = resolver or resolve_secret_ref
+    if triple.credential_store is not None:
+        resolver = lambda ref: triple.credential_store.resolve_ref(ref, binding=triple.credential_binding)
+    else:
+        resolver = resolver or resolve_secret_ref
     key = resolver(triple.api_key_ref)              # 缺失 → CRED-701(绝不空串/None 续跑)
     if not key:
         raise_code("CRED-701", ref=triple.api_key_ref,
@@ -949,7 +1015,11 @@ def build_client(triple: AdapterTriple, limits: TimeoutLimits, *,
     timeout = httpx.Timeout(limits.connect_s,       # 连接/写/池 档
                             read=limits.first_token_s,   # 首 token 档(60s)
                             write=limits.connect_s, pool=limits.connect_s)
-    return _OpenAICompatHTTPTransport(base_url=base, api_key=key, timeout=timeout)
+    transport = _OpenAICompatHTTPTransport(base_url=base, api_key=key, timeout=timeout)
+    if triple.credential_store is not None:
+        transport._validate = lambda: triple.credential_store.validate_binding(
+            triple.api_key_ref, triple.credential_binding)
+    return transport
 
 
 # ================================================================ 会话门面

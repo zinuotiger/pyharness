@@ -19,10 +19,10 @@ if TYPE_CHECKING:  # 仅注解引用(环形依赖,运行时不需要)
 
 log = logging.getLogger("pyharness.desktop.net")
 
-def pick_free_port() -> int:
+def pick_free_port(host: str = HOST) -> int:
     """127.0.0.1 随机空闲端口(bind 0 取系统分配 → 释放交 uvicorn;竞窗极小,F065 边界)。"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((HOST, 0))
+    with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
         return int(s.getsockname()[1])
 
 
@@ -48,18 +48,20 @@ def resolve_bind(cfg: Any) -> tuple:
         raise_code("CFG-601", field="shell.web.host", value=host,
                    advice="Web 壳只允许绑 loopback(127.0.0.1/localhost/::1);"
                           "对外暴露面不在本项目的安全姿态内")
+    if host == 'localhost':
+        host = HOST  # bind and probe the same concrete loopback address
     try:
         want = int(getattr(web, "port", 0) or 0)
     except (TypeError, ValueError):
         want = 0
     if want <= 0:
-        return host, pick_free_port()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return host, pick_free_port(host)
+    with socket.socket(socket.AF_INET6 if ':' in host else socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, want))
         except OSError:
-            fallback = pick_free_port()
+            fallback = pick_free_port(host)
             log.warning("shell.web.port=%d 不可用(被占用/无权限),回落空闲口 %d",
                         want, fallback)
             return host, fallback
@@ -95,31 +97,31 @@ def run_uvicorn(app: "DesktopApp", port: int, host: str = HOST) -> None:
         loop.close()
 
 
-def _probe_port(port: int) -> bool:
+def _probe_port(port: int, host: str = HOST) -> bool:
     """127.0.0.1:port 是否可连(就绪探测;失败静默返回 False)。"""
     try:
-        with socket.create_connection((HOST, port), timeout=0.3):
+        with socket.create_connection((host, port), timeout=0.3):
             return True
     except OSError:
         return False
 
 
-def wait_until_listening(port: int, timeout: float = LISTEN_TIMEOUT_S) -> bool:
+def wait_until_listening(port: int, timeout: float = LISTEN_TIMEOUT_S, *, host: str = HOST, app=None) -> bool:
     """同步就绪探测(webview 开窗前阻塞;失败 → 调用方退 1 不弹空窗)。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _probe_port(port):
+        if (app is None or getattr(getattr(app, 'server', None), 'started', False)) and _probe_port(port, host=host):
             return True
         time.sleep(0.05)
     return False
 
 
 async def wait_listening_async(app: "DesktopApp", port: int,
-                               timeout: float = LISTEN_TIMEOUT_S) -> None:
+                               timeout: float = LISTEN_TIMEOUT_S, *, host: str = HOST) -> None:
     """异步就绪探测(run_desktop 用;超时抛 CYC-999 由调用方收口)。"""
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
-        if _probe_port(port):
+        if getattr(getattr(app, 'server', None), 'started', False) and _probe_port(port, host=host):
             return
         if getattr(app, "stopping", None) is not None and app.stopping.is_set():
             raise_code("CYC-999", op="listening", port=port,

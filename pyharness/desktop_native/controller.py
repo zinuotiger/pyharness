@@ -35,7 +35,7 @@ class NativeController(QObject):
         self._provided_service = service
         self._registry = (None if service is not None else
                           ApplicationServiceRegistry(
-                              ctx, channel="desktop-native"))
+                              ctx, channel="desktop"))
         self.service = service or self._registry.get(self.tenant_id)
         self._subs: list[Any] = []
         self.selected_sid: str = ""

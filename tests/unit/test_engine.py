@@ -85,7 +85,7 @@ async def test_build_spine_components_present(tmp_path):
             assert need in vis, f"工具 {need} 应可见;实际={sorted(vis)}"
         assert spine.goals is not None and spine.todos is not None
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_streaming_flag_pass_through(tmp_path):
     try:
         assert spine.streaming is True
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_agent_ctx_of_activates_spill_once(tmp_path):
         assert isinstance(meta, dict)
         assert meta.get("ref"), f"put 应返回含 ref 的元数据:{meta}"
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_assemble_real_engine_ctx_shape(tmp_path):
         # 降级链装配:fallback_models 非空默认 → llm._chain 在岗
         assert getattr(ctx.llm, "_chain", None) is not None
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 def _env_of(spine) -> object:
@@ -157,13 +157,14 @@ def _env_of(spine) -> object:
     return _Env()
 
 
-def _close_spine(spine) -> None:
-    """尽力收尾:释放 scope 占位(不等待任务排水)。"""
+async def _close_spine(spine) -> None:
+    """Await the same cleanup owner used by production; do not hide failures."""
     try:
+        await spine.close()
+    finally:
         if getattr(spine, "scope", None) is not None:
             spine.scope.release()
-    except Exception:                                    # noqa: BLE001 收尾尽力
-        pass
+
 
 
 # =====================================================================
@@ -233,7 +234,7 @@ async def test_guard_from_config_injects_schema_validator(tmp_path):
                         call_id="c-good")
         assert str(await spine.guard.evaluate(good, spine.scope)) == "allow"
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 async def test_guard_from_config_applies_cfg_disabled(tmp_path):
@@ -260,7 +261,7 @@ async def test_guard_from_config_applies_cfg_disabled(tmp_path):
         assert str(await spine_on.guard.evaluate(_escape(), spine_on.scope)) \
             == "reject", "默认链应由 g-fs-path 拒越界路径"
     finally:
-        _close_spine(spine_on)
+        await _close_spine(spine_on)
 
     cfg_off = _cfg(tmp_path)
     cfg_off.security.guards.disabled = ["g-fs-path"]
@@ -275,7 +276,7 @@ async def test_guard_from_config_applies_cfg_disabled(tmp_path):
         assert str(await spine_off.guard.evaluate(_escape(), spine_off.scope)) \
             == "allow", "禁用 g-fs-path 后该越界调用不应再被 g3 拒"
     finally:
-        _close_spine(spine_off)
+        await _close_spine(spine_off)
 
 
 # =====================================================================
@@ -318,7 +319,7 @@ async def test_s23_tb_single_chain_and_single_governance(tmp_path):
         ctx2 = await _agent_ctx_of(spine, _env_of(spine))         # 幂等
         assert ctx2 is ctx1 and ctx2.governance is ctx1.governance
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 # ---------------------------------------------------------------- T-C
@@ -335,7 +336,7 @@ async def test_s23_tc_attach_path_mounts_same_governance(tmp_path):
         assert ctx.governance is spine.governance                 # 同一对象
         assert spine.guard is spine.governance.policy.chain
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 # ---------------------------------------------------------------- T-A
@@ -357,7 +358,7 @@ async def test_s23_ta_rules_match_chain(tmp_path):
         assert pol.disabled == frozenset()                          # 无禁用声明
         assert pol.fingerprint == spine.governance.policy.fingerprint() != ""
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 async def test_s23_ta_cfg_disabled_reaches_policy(tmp_path):
@@ -368,7 +369,7 @@ async def test_s23_ta_cfg_disabled_reaches_policy(tmp_path):
         assert "g-fs-path" in spine.governance.policy.policy.disabled
         assert "g-fs-path" not in spine.guard.enabled_guard_ids()
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 # ---------------------------------------------------------------- T-C
@@ -393,7 +394,7 @@ async def test_s23_tc_policy_rules_carry_injected_params(tmp_path):
         assert await spine.guard.evaluate(
             _tc(spine, "fs.read_file"), spine.scope) == "reject"
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 # ---------------------------------------------------------------- T-D
@@ -429,7 +430,7 @@ async def test_s23_td_guard_behavior_smoke(tmp_path):
         # g5 外发:allowlist 空 → reject
         assert await verdict("web.fetch", url="http://x/") == "reject"
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 async def test_s23_td_strict_scope_precheck(tmp_path):
@@ -442,7 +443,7 @@ async def test_s23_td_strict_scope_precheck(tmp_path):
             d = await spine.guard.evaluate(_tc(spine, name, **raw), spine.scope)
             assert str(d) == "reject", f"{name} 在 strict 下应终局拒"
     finally:
-        _close_spine(spine)
+        await _close_spine(spine)
 
 
 # ---------------------------------------------------------------- F-1 守卫

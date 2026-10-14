@@ -108,7 +108,7 @@ async def _make(e2e_factory, sid, adapter_cls):
     saved = dict(llm_mod.adapters)
     s = await e2e_factory(None, sid=sid, channel="desktop")
     llm_mod.adapters.clear()
-    llm_mod.adapters[s.ctx.settings.llm.model] = adapter_cls(
+    s.ctx.engine_spine.llm_runtime.registry[s.ctx.settings.llm.model] = adapter_cls(
         s.ctx.settings.llm.model)
     return s, saved
 
@@ -139,9 +139,8 @@ async def _run(s, mode):
 
     await s.ctx.session.append("user.message", {"content": "do"},
                                actor="user", sync=True)
-    from pyharness.core.task_queue import TaskQueue
-    q = TaskQueue(s.ctx.session, runner=s.ctx.task_runner, max_queue=8)
-    tid = await q.submit("do")
+    q = s.ctx.task_queue
+    tid = s.last_task_id = await q.submit("do")
     try:
         res = await asyncio.wait_for(q.wait_for(tid), timeout=25)
         return f"ok={res.ok} code={getattr(res, 'code', None)}"

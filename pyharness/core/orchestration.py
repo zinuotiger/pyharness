@@ -6,6 +6,7 @@ run while preserving the caller's session/scope boundary.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -124,6 +125,7 @@ class EngineIntentRunner:
 
     def __init__(self, spine: Any) -> None:
         self.spine = spine
+        self.queue_tasks: dict[str, str] = {}
 
     async def run(self, ctx: Any, *, intent: str, task_id: str,
                   budget: Any = None) -> Any:
@@ -134,7 +136,32 @@ class EngineIntentRunner:
             await session.append("user.message", {"content": intent}, actor="user",
                                  origin="job", task_id=task_id, sync=True)
             queued = await tq.submit(intent)          # 队列自动 t-N(避开 job 段)
-            res = await tq.wait_for(queued)
+            self.queue_tasks[task_id] = queued
+            try:
+                res = await tq.wait_for(queued)
+            except asyncio.CancelledError:
+                primary = None
+                try:
+                    await tq.cancel(queued)
+                except BaseException as exc:
+                    primary = exc
+                # This is cancellation of work, distinct from a waiter's timeout.
+                terminal = asyncio.create_task(tq.wait_for(queued))
+                while True:
+                    try:
+                        res = await asyncio.shield(terminal)
+                        break
+                    except asyncio.CancelledError:
+                        if terminal.done(): raise
+                        # Repeated cancellation cannot abandon the work owner.
+                        continue
+                if primary is not None:
+                    raise primary
+                if not res.ok:
+                    raise
+                # Completion won the race; preserve its actual success.
+            finally:
+                self.queue_tasks.pop(task_id, None)
             ok = bool(getattr(res, "ok", False))
             reason = "complete" if ok else str(getattr(res, "code", "") or "error")
             return SimpleNamespace(reason=reason)     # JobManager 读 .reason 归一
@@ -153,6 +180,7 @@ class EngineSubagentRunner:
         self.spine = spine
         self.sessions_dir = sessions_dir
         self._stores: dict[str, Any] = {}
+        self._child_buses: dict[str, Any] = {}
         # N2-b:证据生产者工厂(由装配层注入;避免本模块反向 import engine)。
         # 签名 ``(spine_like) -> async handler(type_, env)``。
         self._evidence_producer = evidence_producer
@@ -178,23 +206,42 @@ class EngineSubagentRunner:
         async def _record(type_: str, payload: Any) -> None:
             await store.append(payload, sync=type_ in SYNC_TYPES)
 
-        for type_ in EVENT_TYPES:
-            child_bus.subscribe(type_, _record, owner=f"subagent-store:{sub_id}")
         self._stores[sub_id] = store
-        # GAP-10:子会话**继承父会话租户**——租户是会话树的横切归属,
-        # 子 Agent 的事件同样必须可归属到同一租户。
-        log_ = SessionLog(sid=sub_id, persistence=store, bus=child_bus,
-                          tenant_id=getattr(self.spine.session, "tenant_id", None))
-        # N2-b:子会话与父会话**同产治理证据** —— 触发点同为段关闭(``segment.end``),
-        # 只是换了"事件落点"(child log)与"事件汇点"(child bus)。生产者工厂由装配层
-        # 注入,本模块不反向 import engine(INV-08)。
-        if self._evidence_producer is not None:
-            holder = SimpleNamespace(
-                session=log_, governance=getattr(self.spine, "governance", None))
-            child_bus.subscribe(
-                "segment.end", self._evidence_producer(holder),
-                owner=f"subagent-evidence:{sub_id}")
-        return log_
+        self._child_buses[sub_id] = child_bus
+        try:
+            for type_ in EVENT_TYPES:
+                child_bus.subscribe(type_, _record, owner=f"subagent-store:{sub_id}")
+            # GAP-10:子会话**继承父会话租户**——租户是会话树的横切归属,
+            # 子 Agent 的事件同样必须可归属到同一租户。
+            log_ = SessionLog(sid=sub_id, persistence=store, bus=child_bus,
+                              tenant_id=getattr(self.spine.session, "tenant_id", None))
+            # N2-b:子会话与父会话**同产治理证据** —— 触发点同为段关闭(``segment.end``),
+            # 只是换了"事件落点"(child log)与"事件汇点"(child bus)。生产者工厂由装配层
+            # 注入,本模块不反向 import engine(INV-08)。
+            if self._evidence_producer is not None:
+                holder = SimpleNamespace(
+                    session=log_, governance=getattr(self.spine, "governance", None))
+                child_bus.subscribe(
+                    "segment.end", self._evidence_producer(holder),
+                    owner=f"subagent-evidence:{sub_id}")
+            return log_
+        except BaseException as primary:
+            try: self.close_child(sub_id)
+            except BaseException as secondary: primary.add_note(f'child rollback failed: {secondary!r}')
+            raise
+
+    def close_child(self, sub_id):
+        errors = []
+        child_bus = self._child_buses.pop(sub_id, None)
+        if child_bus is not None:
+            for owner in (f'subagent-store:{sub_id}', f'subagent-evidence:{sub_id}'):
+                try: child_bus.unsubscribe_all(owner)
+                except BaseException as exc: errors.append(exc)
+        store = self._stores.pop(sub_id, None)
+        if store is not None:
+            try: store.close()
+            except BaseException as exc: errors.append(exc)
+        if errors: raise BaseExceptionGroup('child cleanup failed', errors)
 
     async def run_child(self, env: Any) -> str:
         try:
@@ -207,21 +254,14 @@ class EngineSubagentRunner:
             if text:
                 return text
             return str(getattr(result, "reason", "") or "")
+        except BaseException as primary:
+            try: self.close_child(env.sub_id)
+            except BaseException as secondary: primary.add_note(f'child cleanup failed: {secondary!r}')
+            raise
         finally:
-            store = self._stores.pop(getattr(env, "sub_id", ""), None)
-            if store is not None:
-                try:
-                    flush = getattr(store, "flush", None)
-                    if callable(flush):
-                        maybe = flush()
-                        if hasattr(maybe, "__await__"):
-                            await maybe
-                except Exception:
-                    pass
-                try:
-                    store.close()
-                except Exception:
-                    pass
+            if getattr(env, 'sub_id', '') in self._stores:
+                self.close_child(env.sub_id)
+
 
 
 __all__ = ["EngineIntentRunner", "EngineSubagentRunner"]

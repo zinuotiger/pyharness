@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import PlainTextResponse
 
 from pyharness.application import ApplicationService, ApplicationServiceRegistry
 from pyharness.core.approval import ApprovalProvider
@@ -58,6 +58,24 @@ if TYPE_CHECKING:  # 仅注解引用(app↔bridge 环形依赖,运行时不需�
 
 log = logging.getLogger("pyharness.desktop.app")
 
+
+class LoopbackHostMiddleware:
+    """Strict HTTP authority check including bracketed IPv6; no DNS rebinding."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] in ('http', 'websocket'):
+            hosts = [value.decode('latin-1') for key,value in scope.get('headers', []) if key.lower() == b'host']
+            match = re.fullmatch(r'(?:localhost|127\.0\.0\.1|\[::1\])(?::([0-9]{1,5}))?', hosts[0], re.I) if len(hosts) == 1 else None
+            if match is None or (match.group(1) and not 0 < int(match.group(1)) <= 65535):
+                if scope['type'] == 'websocket':
+                    await send({'type':'websocket.close', 'code':1008})
+                else:
+                    await PlainTextResponse('Invalid host header', status_code=400)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
 class DesktopApp:
     """桌面程序总装(F065 内核入口):FastAPI 装配 + 总线 → SSE fan-out + 会话面。
 
@@ -82,10 +100,7 @@ class DesktopApp:
             ctx, channel="desktop")
         self.service = self._service_registry.get("default")
         self.api = FastAPI(title="PyHarness Desktop", docs_url=None, redoc_url=None)
-        self.api.add_middleware(
-            TrustedHostMiddleware,
-            allowed_hosts=["127.0.0.1", "localhost"],
-            www_redirect=False)
+        self.api.add_middleware(LoopbackHostMiddleware)
         self._api_token = self._resolve_api_token()
         self._tstore: Optional[TenantSettingsStore] = None   # 租户令牌库(惰性)
         self.api.middleware("http")(self._tenant_middleware)
@@ -211,7 +226,8 @@ class DesktopApp:
         meta:它随即被换成 HttpOnly cookie(JS 不可读、不进 DOM/日志),与既有 P1-2
         口径一致。URL 构造收在此处,供两处启动路径共用(免第二份实现漂移)。
         """
-        base = f"http://{host}:{port}/"
+        authority = f'[{host}]' if ':' in host else host
+        base = f"http://{authority}:{port}/"
         return f"{base}?token={self._api_token}" if self._api_token else base
 
     @staticmethod
@@ -1269,17 +1285,21 @@ class DesktopApp:
                 log.warning("desktop shutdown unsubscribe failed", exc_info=True)
         self._sub = None
         self.hub.close_all()                        # SSE 客户端收 close,前端可重开
-        await self._flush_persistence_async()       # 必须等待 pending 攒批落盘
+        errors = []
+        try: await self._flush_persistence_async()
+        except BaseException as exc: errors.append(exc)
         for service in self._service_registry.all():
             try:
                 await service.shutdown()
-            except Exception:                       # noqa: BLE001
-                log.warning("desktop tenant service shutdown failed", exc_info=True)
+            except BaseException as exc:
+                errors.append(exc)
         if self.server is not None:
             try:
                 self.server.should_exit = True      # uvicorn 线程自然退出
             except Exception:                       # noqa: BLE001
                 log.warning("desktop server stop signal failed", exc_info=True)
+        if errors: raise BaseExceptionGroup('desktop cleanup failed', errors)
+
     async def _flush_persistence_async(self) -> None:
         """异步收尾:等待 flush 完成后才允许调用方关闭 store。"""
         persist = getattr(self.ctx, "persistence", None)
@@ -1291,21 +1311,10 @@ class DesktopApp:
                     await _await(fn())
                 except Exception:                       # noqa: BLE001 兜底失败不阻断退出
                     log.warning("desktop 收尾 flush 失败", exc_info=True)
-        surface = getattr(self, "_surface", None)
-        if isinstance(surface, DesktopSessionManager):
-            try:
-                await surface.shutdown_all()
-            except Exception:                           # noqa: BLE001
-                log.warning("desktop session shutdown failed", exc_info=True)
-        spines = list(getattr(self, "_engines", {}).values())
-        ctx_spine = getattr(self.ctx, "engine_spine", None)
-        if ctx_spine is not None and all(s is not ctx_spine for s in spines):
-            spines.append(ctx_spine)
-        for spine in spines:
-            try:
-                await spine.close()
-            except Exception:                           # noqa: BLE001
-                log.warning("desktop engine close failed", exc_info=True)
+        # This helper flushes only. ApplicationService owns writer shutdown.
+        surface = getattr(self, '_surface', None)
+        for store in list(getattr(surface, '_stores', {}).values()):
+            await _await(store.flush())
 
     @staticmethod
     def _destroy_webview() -> None:

@@ -299,6 +299,7 @@ async def test_agent_loop_to_schedule_tool_closed_loop(tmp_path):
     llm_mod.adapters.clear()
     fake = ScriptedAdapter()
     llm_mod.adapters[cfg.llm.model] = fake
+    ctx = None
     try:
         ctx = await assemble_real_engine(cfg, sid="s-toolschedloop1",
                                          sessions_dir=tmp_path / "sessions", channel="cli")
@@ -308,7 +309,7 @@ async def test_agent_loop_to_schedule_tool_closed_loop(tmp_path):
         intent = "帮我建一个每天早上 8 点的定时任务"
         await ctx.session.append("user.message", {"content": intent},
                                  actor="user", sync=True)
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        q = ctx.task_queue
         tid = await q.submit(intent)
         res = await asyncio.wait_for(q.wait_for(tid), timeout=20.0)
         assert res.ok, f"闭环应成功,实际 code={getattr(res, 'code', res)}"
@@ -334,5 +335,12 @@ async def test_agent_loop_to_schedule_tool_closed_loop(tmp_path):
         assert [j.name for j in jobs] == ["morning"]
         ctx.engine_spine.schedule.stop()
     finally:
-        llm_mod.adapters.clear()
-        llm_mod.adapters.update(saved)
+        try:
+            if ctx is not None:
+                try:
+                    await ctx.engine_spine.close()
+                finally:
+                    ctx.scope.release()
+        finally:
+            llm_mod.adapters.clear()
+            llm_mod.adapters.update(saved)

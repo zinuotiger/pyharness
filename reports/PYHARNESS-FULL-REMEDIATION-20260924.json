@@ -1,0 +1,2038 @@
+{
+  "date": "2026-09-24",
+  "repository": "D:\\zinuotiger-workspace\\repositories\\pyharness",
+  "branch": "main",
+  "head": "41d74db15f47bee5813976bd11435dff1be166ef",
+  "snapshot": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924",
+  "code_state_sha256": "225842d909580b13e2f5a88972c1fda0affcdd536772aa3aee78c985affc4ad8",
+  "code_manifest": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\tested-code-manifest.json",
+  "baseline_status": " M .github/workflows/ci.yml\n M .gitignore\n M pyharness/config.py\n M pyharness/core/mcp.py\n M pyharness/core/session.py\n M pyharness/core/task_queue.py\n M pyharness/core/tools_executor.py\n M pyharness/engine.py\n M pyharness/persistence.py\n M tests/unit/test_events.py\n M tests/unit/test_mcp.py\n?? STATUS.md\n?? reports/\n?? scripts/build_local_candidate.py\n?? scripts/evleven_integration.py\n?? scripts/evleven_r1_server.py\n?? scripts/local_candidate/\n?? scripts/setup_evleven_r1.ps1\n?? scripts/verification_local.py\n?? scripts/verify_local_candidate.py\n?? tests/integration/test_evleven_r1.py\n?? tests/integration/test_verification_gaps.py\n?? tests/integration/test_verification_runtime.py\n",
+  "baseline_diff_stat": " .github/workflows/ci.yml         |   2 +-\n .gitignore                       |   3 ++\n pyharness/config.py              |   2 +\n pyharness/core/mcp.py            | 103 ++++++++++++++++++++++++---------------\n pyharness/core/session.py        |   5 ++\n pyharness/core/task_queue.py     |  44 ++++++++++++++---\n pyharness/core/tools_executor.py |   7 +--\n pyharness/engine.py              |   5 +-\n pyharness/persistence.py         |   8 ++-\n tests/unit/test_events.py        |   5 +-\n tests/unit/test_mcp.py           |  22 +++++++++\n 11 files changed, 152 insertions(+), 54 deletions(-)\n",
+  "baseline_protection": {
+    "ok": true,
+    "protected_files": 435,
+    "tracked": 414,
+    "untracked": 21,
+    "excluded": [],
+    "verified_hashes": 435,
+    "snapshot": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924",
+    "repo_unchanged": true,
+    "user_request": "C:\\Users\\LENOVO\\.codex\\attachments\\80325279-f31e-46c4-b8d2-5438fe71e01c\\已粘贴的文本.txt"
+  },
+  "issues": [
+    {
+      "issue_id": "F01",
+      "title": "租户宿主秘密边界",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tenant_settings.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\llm.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\application\\service.py"
+      ],
+      "root_cause": "普通租户可自选宿主引用与端点；拒绝前缓存宿主spine亦可旁路",
+      "implementation": "普通租户拒env/file；自有secret绑定租户/端点/版本；初始化先授权；所有fallback一并检查",
+      "files": [
+        "pyharness/core/tenant_settings.py",
+        "pyharness/core/llm.py",
+        "pyharness/application/service.py",
+        "tests/unit/test_remediation_credentials.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-env:SYNTHETIC_HOST]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-file:synthetic-host]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key-env:SYNTHETIC_HOST]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F01_old_unsafe_profile_denied_before_secret_read",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F01_unconfigured_tenant_cannot_inherit_host_model",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-164714-482685-adjacent-boundaries-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_rejected_public_spine_cannot_cache_host_credentials",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_credentials::test_F01_unconfigured_tenant_cannot_inherit_host_model",
+        "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-env:SYNTHETIC_HOST]",
+        "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key_ref-file:synthetic-host]",
+        "tests.unit.test_remediation_credentials::test_F01_tenant_cannot_select_host_secret[api_key-env:SYNTHETIC_HOST]",
+        "tests.unit.test_remediation_credentials::test_F01_old_unsafe_profile_denied_before_secret_read",
+        "tests.unit.test_remediation_credentials::test_F01_HTTP_tenant_boundary_and_F13_cached_binding",
+        "tests.unit.test_remediation_credentials::test_rejected_public_spine_cannot_cache_host_credentials",
+        "tests.unit.test_remediation_credentials::test_borrowed_primary_does_not_authorize_host_fallback"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_credentials.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F02",
+      "title": "JSONL部分提交唯一性",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\persistence.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\repair.py"
+      ],
+      "root_cause": "已提交前缀被整批重试；缺换行尾与扫描缓存判断不一致",
+      "implementation": "物理完整行对账，仅补未提交后缀；同seq异内容拒绝；补换行后重扫描；保留损坏字节",
+      "files": [
+        "pyharness/persistence.py",
+        "pyharness/repair.py",
+        "tests/unit/test_remediation_storage.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-0]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-0]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-0]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_close_commits_pending",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[flush]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162153-400767-storage-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_pending_all]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162153-400767-storage-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_batch]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162153-400767-storage-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_invalid_envelope_does_not_block_valid_append",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162153-400767-storage-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_rewrite_invalidates_scan_cache",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162153-400767-storage-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-0]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_properties::test_property_partial_retry_exact_suffix",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[write-2]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[partial-2]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[newline-2]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-before-2]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[flush-after-2]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-0]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-1]",
+        "tests.unit.test_remediation_storage::test_F02_retry_preserves_exact_physical_events[fsync-2]",
+        "tests.unit.test_remediation_storage::test_F02_close_commits_pending",
+        "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[flush]",
+        "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_pending_all]",
+        "tests.unit.test_remediation_storage::test_F02_conflict_retains_pending[_flush_batch]",
+        "tests.unit.test_remediation_storage::test_F02_invalid_envelope_does_not_block_valid_append",
+        "tests.unit.test_remediation_storage::test_F02_rewrite_invalidates_scan_cache",
+        "tests.unit.test_remediation_storage::test_F02_fsync_after_visible_batch_is_not_success_or_duplicate"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_storage.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F03",
+      "title": "锁租约一次性释放",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\persistence.py"
+      ],
+      "root_cause": "重复close会重复扣同路径共享引用",
+      "implementation": "锁路径租约置None只消费一次；关闭互斥；故障后独立关闭句柄与释放租约",
+      "files": [
+        "pyharness/persistence.py",
+        "tests/unit/test_remediation_storage.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_storage::test_F03_close_consumes_only_own_lease",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_properties::test_property_close_owner_once",
+        "tests.unit.test_remediation_properties::test_windows_real_lock_survives_duplicate_close",
+        "tests.unit.test_remediation_storage::test_F03_close_consumes_only_own_lease"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_storage.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F04",
+      "title": "关闭顺序与写入者终态",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\application\\service.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\application\\registry.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\engine.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop_native\\app.py"
+      ],
+      "root_cause": "先关持久化再停写入者；半初始化/中断跳过外壳清理；首租户错误阻断余项",
+      "implementation": "停止准入，等任务/Job/子agent、ticker，再关MCP/索引/存储/模型；幂等shield owner；逐项聚合错误",
+      "files": [
+        "pyharness/application/service.py",
+        "pyharness/application/registry.py",
+        "pyharness/engine.py",
+        "pyharness/desktop_native/app.py",
+        "tests/unit/test_remediation_lifecycle.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F04_service_stops_writers_before_store_close",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161003-426294-lifecycle-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F04_shutdown_waits_for_admitted_initialization",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162353-855955-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F04_two_shutdown_waiters_wait_for_writer_finally",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162353-855955-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_registry_shutdown_failure_still_closes_other_tenants",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_web_shutdown_reaps_active_sse_and_task",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171553-992238-final-barrier-matrix",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.integration.test_shell_service_contract::test_native_main_window_only_calls_existing_controller_methods",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+        "tests.unit.test_remediation_lifecycle::test_F04_service_stops_writers_before_store_close",
+        "tests.unit.test_remediation_lifecycle::test_F04_shutdown_waits_for_admitted_initialization",
+        "tests.unit.test_remediation_lifecycle::test_F04_two_shutdown_waiters_wait_for_writer_finally",
+        "tests.unit.test_remediation_lifecycle::test_registry_shutdown_failure_still_closes_other_tenants",
+        "tests.unit.test_remediation_lifecycle::test_web_shutdown_reaps_active_sse_and_task"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_lifecycle.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F05",
+      "title": "Job取消传播真实队列",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\jobs.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\orchestration.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\task_queue.py"
+      ],
+      "root_cause": "只取消等待包装任务；取消审计失败可跳过执行任务清理等待",
+      "implementation": "记录真实queue task id；取消队列并等待实际终态；审计失败保留但不跳过清理；取消/成功竞态单终态",
+      "files": [
+        "pyharness/core/jobs.py",
+        "pyharness/core/orchestration.py",
+        "pyharness/core/task_queue.py",
+        "tests/unit/test_remediation_lifecycle.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F05_job_cancel_removes_real_queued_work",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161003-426294-lifecycle-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F05_job_cancel_removes_real_queued_work",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161353-990136-lifecycle-green",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_job_cancel_waits_for_real_terminal_without_timeout",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-164355-613644-lifecycle-adjacent-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[False]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170349-417896-task-cancel-audit-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[True]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170349-417896-task-cancel-audit-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_job_cancel_audit_failure_waits_for_real_cleanup",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_lifecycle::test_F05_job_cancel_removes_real_queued_work",
+        "tests.unit.test_remediation_lifecycle::test_job_cancel_waits_for_real_terminal_without_timeout",
+        "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[False]",
+        "tests.unit.test_remediation_lifecycle::test_task_cancel_audit_failure_still_stops_work[True]",
+        "tests.unit.test_remediation_lifecycle::test_job_cancel_audit_failure_waits_for_real_cleanup",
+        "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[False]",
+        "tests.unit.test_remediation_lifecycle::test_job_completion_cancel_barrier_has_one_terminal[True]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_lifecycle.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F06",
+      "title": "一次性exec进程树回收",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\proc.py"
+      ],
+      "root_cause": "线程等待被取消并不停止真实子进程",
+      "implementation": "Windows Job加启动门；POSIX受控session/group；等待器取消仍收尾实际process owner",
+      "files": [
+        "pyharness/core/proc.py",
+        "pyharness/core/process_owner.py",
+        "tests/unit/test_remediation_process.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_process::test_F06_cancel_stops_test_owned_parent_and_child",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160552-673847-process-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_process::test_F06_timeout_has_no_surviving_owned_process",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-165637-542273-review-baseline-full",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_process::test_F06_cancel_stops_test_owned_parent_and_child",
+        "tests.unit.test_remediation_process::test_F06_timeout_has_no_surviving_owned_process",
+        "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[assign]",
+        "tests.unit.test_remediation_process::test_process_partial_initialization_cleans_every_owned_resource[second-reader]",
+        "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[False]",
+        "tests.unit.test_remediation_process::test_exec_natural_exit_cancel_race_reaps_owned_process[True]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_process.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F07",
+      "title": "ACP多会话所有权",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\acp.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\engine.py"
+      ],
+      "root_cause": "切换覆盖单个ctx持有的runtime；EOF遗漏manager存储",
+      "implementation": "按会话ctx缓存队列/spine；共享应用LLM owner；切换失败回滚；EOF关闭全部runtime及store",
+      "files": [
+        "pyharness/acp.py",
+        "pyharness/engine.py",
+        "tests/unit/test_remediation_lifecycle.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_F07_acp_switch_reuses_session_runtime",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161003-426294-lifecycle-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_acp_failed_attach_keeps_borrowed_store_usable",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-164355-613644-lifecycle-adjacent-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_acp_eof_reaps_two_running_sessions_and_stores",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-165748-864954-acp-shared-owner-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_lifecycle::test_F07_acp_switch_reuses_session_runtime",
+        "tests.unit.test_remediation_lifecycle::test_acp_failed_attach_keeps_borrowed_store_usable",
+        "tests.unit.test_remediation_lifecycle::test_acp_eof_reaps_two_running_sessions_and_stores"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_lifecycle.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F08",
+      "title": "会话计量和连接隔离",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\llm.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\engine.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\application\\service.py"
+      ],
+      "root_cause": "共享adapter保存构造期计量；模型名不足以区别连接；Settings被内部键污染",
+      "implementation": "按调用ctx记账；完整连接身份key；运行时自己的registry及Settings副本",
+      "files": [
+        "pyharness/core/llm.py",
+        "pyharness/engine.py",
+        "pyharness/application/service.py",
+        "tests/unit/test_remediation_runtime.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_runtime::test_F08_counter_belongs_to_current_context",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160047-765673-F08-R04-binding-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_runtime::test_F08_same_model_different_endpoint_has_distinct_adapter",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160047-765673-F08-R04-binding-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_independent_services_do_not_mutate_shared_model_configuration",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts0]",
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts1]",
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts2]",
+        "tests.unit.test_remediation_lifecycle::test_independent_services_do_not_mutate_shared_model_configuration",
+        "tests.unit.test_remediation_lifecycle::test_independent_standalone_engines_preserve_shared_configuration",
+        "tests.unit.test_remediation_runtime::test_F08_counter_belongs_to_current_context",
+        "tests.unit.test_remediation_runtime::test_F08_same_model_different_endpoint_has_distinct_adapter"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_runtime.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F09",
+      "title": "非零退出不报告工具成功",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\proc.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tool_exec.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tools_executor.py"
+      ],
+      "root_cause": "provider返回包含失败的字典仍被执行器包装ok=True",
+      "implementation": "显式ProviderOutcome契约；非零状态贯通tool.result，同时保留stdout/stderr和退出码",
+      "files": [
+        "pyharness/core/provider_result.py",
+        "pyharness/core/proc.py",
+        "pyharness/core/tool_exec.py",
+        "pyharness/core/tools_executor.py",
+        "tests/unit/test_remediation_process.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_process::test_F09_nonzero_exec_is_not_tool_success",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160552-673847-process-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_process::test_F09_nonzero_exec_is_not_tool_success"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_process.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F10",
+      "title": "初始化失败资源回滚",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\persistence.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop\\sessions.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\subagent.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\engine.py"
+      ],
+      "root_cause": "锁、store、订阅、子agent或索引创建后失败，没有统一owner收尾",
+      "implementation": "先登记owner再await；事务式回滚；保留主错误；FTS降级前关库，清理期间取消仍传播",
+      "files": [
+        "pyharness/persistence.py",
+        "pyharness/desktop/sessions.py",
+        "pyharness/core/subagent.py",
+        "pyharness/engine.py",
+        "tests/unit/test_remediation_properties.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155131-286933-storage-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_subagent_bootstrap_failure_closes_owned_store",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-164355-613644-lifecycle-adjacent-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_subagent_bootstrap_failure_closes_owned_store",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-164412-126204-subagent-bootstrap-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[RuntimeError]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-172329-469504-optional-index-cleanup-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[CancelledError]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-172329-469504-optional-index-cleanup-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_optional_index_cleanup_preserves_new_cancellation",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-172624-756172-index-cleanup-cancel-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_lifecycle::test_subagent_bootstrap_failure_closes_owned_store",
+        "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[RuntimeError]",
+        "tests.unit.test_remediation_lifecycle::test_optional_index_activation_failure_releases_connection[CancelledError]",
+        "tests.unit.test_remediation_lifecycle::test_optional_index_cleanup_preserves_new_cancellation",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-before]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-created-after]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-replay]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[False-subscribe]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-before]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-created-after]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-replay]",
+        "tests.unit.test_remediation_properties::test_half_initialization_preserves_other_owner[True-subscribe]",
+        "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[1]",
+        "tests.unit.test_remediation_storage::test_F10_factory_failure_releases_lease[2]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_properties.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F11",
+      "title": "native最小安装和实际入口",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop\\__init__.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop_native\\app.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop_native\\controller.py"
+      ],
+      "root_cause": "native导入链耦合Web；控制器通道不属于既有白名单",
+      "implementation": "延迟Web导入，公共bootstrap；native使用既有desktop人类通道，不扩大权限",
+      "files": [
+        "pyharness/desktop/__init__.py",
+        "pyharness/application/bootstrap.py",
+        "pyharness/desktop_native/app.py",
+        "pyharness/desktop_native/controller.py",
+        "tests/unit/test_remediation_delivery.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_delivery::test_F11_native_import_does_not_require_web_stack",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162907-370174-F11-import-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171356-682783-native-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_native_controller_uses_real_application_channel",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-171912-286302-native-real-channel-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.integration.test_shell_service_contract::test_native_main_window_only_calls_existing_controller_methods",
+        "tests.unit.test_remediation_delivery::test_F11_native_import_does_not_require_web_stack",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[config]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[controller]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[window]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[show]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[interrupt]",
+        "tests.unit.test_remediation_delivery::test_native_main_cleans_partial_initialization_and_interrupt[run]",
+        "tests.unit.test_remediation_delivery::test_native_controller_uses_real_application_channel",
+        "tests.unit.test_shell_parity::test_native_controller_uses_tenant_owner_and_shared_tenant_predicate"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_delivery.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F12",
+      "title": "IPv6回环接线",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop\\net.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop\\app.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\desktop\\launcher.py"
+      ],
+      "root_cause": "IPv4端口探测/裸IPv6 URL/Host校验与实际监听不一致",
+      "implementation": "统一地址族和host；IPv6方括号；就绪要求本次server.started且同地址可连",
+      "files": [
+        "pyharness/desktop/net.py",
+        "pyharness/desktop/app.py",
+        "pyharness/desktop/launcher.py",
+        "tests/unit/test_remediation_delivery.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_delivery::test_F12_ipv6_url",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162832-890739-F12-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_F12_readiness_probes_configured_host",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162832-890739-F12-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_F12_host_validation[[::1]:12345-200]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162832-890739-F12-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_delivery::test_F12_ipv6_url",
+        "tests.unit.test_remediation_delivery::test_F12_readiness_probes_configured_host",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[127.0.0.1:12345-200]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[localhost:12345-200]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[[::1]:12345-200]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[evil.example-400]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[[::2]:12345-400]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[user@localhost-400]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[[::1]:bad-400]",
+        "tests.unit.test_remediation_delivery::test_F12_host_validation[localhost/evil-400]",
+        "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[127.0.0.1]",
+        "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[localhost]",
+        "tests.unit.test_remediation_delivery::test_F12_real_windows_loopback_service[::1]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_delivery.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F13",
+      "title": "凭据更新四态",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tenant_settings.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\llm.py"
+      ],
+      "root_cause": "direct/ref切换遗留旧secret；metadata与秘密写入不同步；旧transport复用",
+      "implementation": "新秘密代文件+metadata提交点；keep/direct/ref/clear明确；端点变更要求选择凭据；旧绑定拒绝",
+      "files": [
+        "pyharness/core/tenant_settings.py",
+        "pyharness/core/llm.py",
+        "tests/unit/test_remediation_credentials.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F13_direct_to_reference_and_clear",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F13_metadata_failure_keeps_old_secret",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F13_endpoint_change_cannot_reuse_secret",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_credentials::test_F13_stale_lazy_and_cached_adapter_do_not_read_new_secret",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160047-765673-F08-R04-binding-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_credentials::test_F13_direct_to_reference_and_clear",
+        "tests.unit.test_remediation_credentials::test_F13_metadata_failure_keeps_old_secret",
+        "tests.unit.test_remediation_credentials::test_F13_endpoint_change_cannot_reuse_secret",
+        "tests.unit.test_remediation_credentials::test_F13_stale_lazy_and_cached_adapter_do_not_read_new_secret",
+        "tests.unit.test_remediation_credentials::test_missing_committed_generation_preserves_metadata",
+        "tests.unit.test_remediation_credentials::test_retired_secret_cleanup_retries_all_generations",
+        "tests.unit.test_remediation_credentials::test_F13_all_update_states[direct]",
+        "tests.unit.test_remediation_credentials::test_F13_all_update_states[reference]",
+        "tests.unit.test_remediation_credentials::test_F01_HTTP_tenant_boundary_and_F13_cached_binding",
+        "tests.unit.test_remediation_properties::test_property_secret_four_states"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_credentials.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F14",
+      "title": "E2E replay和测试资源所有权",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\conftest.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\e2e\\test_derived_state_lifecycle_e2e.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\e2e\\test_persistence_failure_e2e.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_engine.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_wiring_fixes.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_application_service.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_engine_flow.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_schedule_nl_phase2.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\unit\\test_tool_schedule.py"
+      ],
+      "root_cause": "replay借写入store漏close；测试清理吞错误/只释放scope；使用非生产queue掩盖泄漏",
+      "implementation": "只读Reader回放；复用真实queue；await完整close；清理失败可见；物理记录精确断言",
+      "files": [
+        "tests/conftest.py",
+        "tests/e2e/test_derived_state_lifecycle_e2e.py",
+        "tests/e2e/test_persistence_failure_e2e.py",
+        "tests/unit/test_engine.py",
+        "tests/unit/test_wiring_fixes.py",
+        "tests/unit/test_application_service.py",
+        "tests/unit/test_engine_flow.py",
+        "tests/unit/test_schedule_nl_phase2.py",
+        "tests/unit/test_tool_schedule.py",
+        "tests/unit/test_remediation_runtime.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_runtime::test_F14_replay_does_not_acquire_writer",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155541-275527-F14-F15-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_persistence.TestSyncDurability::test_same_seq_replay_does_not_duplicate_line",
+        "tests.unit.test_remediation_runtime::test_F14_replay_does_not_acquire_writer"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_runtime.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "F15",
+      "title": "工具取消句柄与同步池生命周期",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tools_executor.py"
+      ],
+      "root_cause": "保存原始协程而非Task导致.cancel失效；成功同步工具线程池未关",
+      "implementation": "持有实际Task；重复取消幂等；同步成功/失败清理pool",
+      "files": [
+        "pyharness/core/tools_executor.py",
+        "tests/unit/test_remediation_runtime.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_runtime::test_F15_cancel_current_owns_task",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155541-275527-F14-F15-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_runtime::test_F15_sync_success_releases_pool",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155541-275527-F14-F15-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_runtime::test_F15_cancel_current_owns_task",
+        "tests.unit.test_remediation_runtime::test_F15_sync_success_releases_pool"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_runtime.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "同步运行中的任意工具不可保证强制停止；停止等待不等于副作用撤销。"
+    },
+    {
+      "issue_id": "R01",
+      "title": "PID复用和PTY危险路径",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "safely-constrained",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\proc.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\pty.py"
+      ],
+      "root_cause": "裸PID历史值不构成所有权；PTY缺可靠进程树owner",
+      "implementation": "Windows Job句柄；POSIX组长在killpg前保留未回收锚；没有安全树所有权的PTY入口TLB-807拒绝",
+      "files": [
+        "pyharness/core/process_owner.py",
+        "pyharness/core/proc.py",
+        "pyharness/core/pty.py",
+        "tests/unit/test_remediation_process.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_process::test_R01_closed_process_does_not_kill_recycled_pid",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160552-673847-process-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_process::test_process_cleanup_failure_remains_retryable",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161904-516665-process-cleanup-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_process::test_R01_pty_without_tree_ownership_fails_before_spawn",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-161904-516665-process-cleanup-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_process::test_process_cleanup_failure_remains_retryable",
+        "tests.unit.test_remediation_process::test_R01_pty_without_tree_ownership_fails_before_spawn",
+        "tests.unit.test_remediation_process::test_R01_closed_process_does_not_kill_recycled_pid",
+        "tests.unit.test_remediation_process::test_R01_posix_group_is_killed_before_leader_reaped",
+        "tests.unit.test_remediation_process::test_process_wait_failure_keeps_reap_retryable"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_process.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "PTY明确禁用；POSIX实际进程组未在Linux/WSL执行，已用受控系统调用替身校验顺序。"
+    },
+    {
+      "issue_id": "R02",
+      "title": "POSIX秘密文件创建时权限",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "environment-blocked",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tenant_settings.py"
+      ],
+      "root_cause": "先写秘密后chmod暴露窗口；固定临时名存在竞争",
+      "implementation": "mkstemp独占随机0600；写前fchmod/fstat验证；replace/权限故障明确失败；Windows DPAPI单列",
+      "files": [
+        "pyharness/core/tenant_settings.py",
+        "tests/unit/test_remediation_credentials.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_credentials::test_R02_atomic_write_uses_exclusive_private_temp",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-155714-353247-credentials-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_credentials::test_R02_atomic_write_uses_exclusive_private_temp",
+        "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[None]",
+        "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[mode]",
+        "tests.unit.test_remediation_credentials::test_R02_mode_is_private_before_first_byte[replace]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_credentials.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "Windows已运行fake POSIX调用顺序/权限/replace故障；wsl --list --quiet只有docker-desktop，不具独立POSIX运行环境。未宣称真实umask022已通过。"
+    },
+    {
+      "issue_id": "R03",
+      "title": "默认测试隔离",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\conftest.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\security\\conftest.py"
+      ],
+      "root_cause": "测试加载默认用户配置/真实路径和隐式外部能力",
+      "implementation": "显式最小Settings；进程白名单env+临时HOME；预收集及fixture网络闸；子进程显式marker",
+      "files": [
+        "tests/conftest.py",
+        "tests/support.py",
+        "tests/security/conftest.py",
+        "tests/unit/test_remediation_isolation.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_isolation::test_shared_fixture_ignores_host_configuration",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-154857-925557-R03-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_isolation::test_default_process_boundary",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-154857-925557-R03-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_isolation::test_shared_fixture_ignores_host_configuration",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-154955-523257-R03-green",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_isolation::test_shared_fixture_ignores_host_configuration",
+        "tests.unit.test_remediation_isolation::test_offline_boundary_blocks_network_without_dns",
+        "tests.unit.test_remediation_isolation::test_default_process_boundary"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_isolation.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "R04",
+      "title": "HTTP transport应用所有权",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\llm.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\application\\service.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\engine.py"
+      ],
+      "root_cause": "全局registry跨app/loop持有transport；关闭会话误伤共享客户端",
+      "implementation": "每应用LLMRuntime；借用adapter不夺所有权；spine和应用区别；close失败可重试；跨loop发送拒绝",
+      "files": [
+        "pyharness/core/llm.py",
+        "pyharness/application/service.py",
+        "pyharness/engine.py",
+        "tests/unit/test_remediation_lifecycle.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_runtime::test_R04_standalone_spine_closes_owned_transport",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-160047-765673-F08-R04-binding-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_R04_failed_transport_close_can_retry",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-162353-855955-lifecycle-review-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_lifecycle::test_independent_services_do_not_mutate_shared_model_configuration",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-170954-454030-independent-review-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_attachment::test_png_parser_matches_independent_struct_read_on_real_asset",
+        "tests.unit.test_remediation_lifecycle::test_R04_failed_transport_close_can_retry",
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts0]",
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts1]",
+        "tests.unit.test_remediation_lifecycle::test_shared_adapter_usage_and_close_are_session_scoped[amounts2]",
+        "tests.unit.test_remediation_lifecycle::test_independent_services_do_not_mutate_shared_model_configuration",
+        "tests.unit.test_remediation_lifecycle::test_independent_standalone_engines_preserve_shared_configuration",
+        "tests.unit.test_remediation_properties::test_property_restart_preserves_independent_messages",
+        "tests.unit.test_remediation_runtime::test_R04_standalone_spine_closes_owned_transport",
+        "tests.unit.test_subagent::test_child_runs_in_independent_session"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_lifecycle.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "仅限本报告环境、合成数据和指定边界；不代表穷尽所有输入或生产平台。"
+    },
+    {
+      "issue_id": "G01",
+      "title": "文档与交付事实一致",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\README.md",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\docs\\DEP.md",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\docs\\CFG.md"
+      ],
+      "root_cause": "混入其他项目路径、旧入口/计数、自动Python固定、生产与历史边界错误",
+      "implementation": "纠正入口/路径/默认数据/CI平台/模型替身/凭据/PTY/IPv6/退出码；独立文档复核",
+      "files": [
+        "README.md",
+        "docs/DEP.md",
+        "docs/CFG.md",
+        "STATUS.md"
+      ],
+      "failing_tests_before": [
+        {
+          "evidence": "见任务前快照对应源码、phase-command-index与专项安装/文档对比；不虚构未运行失败测试。"
+        }
+      ],
+      "passing_tests_after": [],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "文档通过不等于真实模型、完整人工GUI或其他机器验收。"
+    },
+    {
+      "issue_id": "G02",
+      "title": "授权调用点门禁",
+      "original_status": "审计线索；按任务前快照及本轮故障重新核实",
+      "final_status": "confirmed-fixed",
+      "original_locations": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\.github\\workflows\\ci.yml",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\pyharness\\core\\tools_executor.py",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\tracked-files-before\\tests\\conftest.py"
+      ],
+      "root_cause": "按文件数而非实际调用点计数，漏同文件重复",
+      "implementation": "AST输出文件/行/列/表达式；统一授权helper保留审批后重新授权；0/1/2与简单别名测试",
+      "files": [
+        "scripts/check_authorization.py",
+        ".github/workflows/ci.yml",
+        "pyharness/core/tools_executor.py",
+        "tests/conftest.py",
+        "tests/unit/test_remediation_delivery.py"
+      ],
+      "failing_tests_before": [
+        {
+          "test": "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files1-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-163106-065069-G02-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files2-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-163106-065069-G02-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files3-2]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-163106-065069-G02-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files5-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-163106-065069-G02-red",
+          "exit_code": 1
+        },
+        {
+          "test": "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files6-1]",
+          "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-163106-065069-G02-red",
+          "exit_code": 1
+        }
+      ],
+      "passing_tests_after": [
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files0-0]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files1-1]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files2-2]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files3-2]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files4-0]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files5-1]",
+        "tests.unit.test_remediation_delivery::test_G02_counts_calls_and_simple_aliases[files6-1]"
+      ],
+      "verification": {
+        "full": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "fault_or_race": "tests/unit/test_remediation_delivery.py",
+        "commands_index": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\phase-command-index.json"
+      },
+      "limitations": "静态扫描仅承诺明确的直接调用和简单本地别名，不声称解析反射或所有跨模块别名。"
+    }
+  ],
+  "full_test": {
+    "collected": 2371,
+    "passed": 2352,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 19,
+    "warnings": 5,
+    "seconds": 136.225,
+    "exit_code": 0,
+    "skip_details": [
+      {
+        "test": "tests.integration.test_evleven_r1::test_real_handshake_allowlist_and_graceful_shutdown",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_configured_denial_survives_assembly_and_preset",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[deny]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[timeout]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_pending_approval_never_sends_rejected_write[cancel]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[memory_create-args0-TLB-803-False]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[not_a_tool-args1-TLB-802-False]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_local_and_remote_errors_are_not_success[memory_read-args2-TLB-805-True]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_protocol_errors_and_server_validation_remain_distinct",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[missing]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[bad_start]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_service_failures_do_not_silently_restart[disconnect]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_cancelled_inflight_request_retires_connection",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_real_http_fresh_process_cross_session_memory",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_lost_write_ack_is_unknown_and_reconciled_without_retry[timeout]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.integration.test_evleven_r1::test_lost_write_ack_is_unknown_and_reconciled_without_retry[cancel]",
+        "reason": "Provision pinned local evleven R1 wheel first"
+      },
+      {
+        "test": "tests.unit.test_llm::test_cred702_loose_credential_permission_is_rejected",
+        "reason": "Windows mode 位无安全含义（ACL 尽力而为），本检查仅 POSIX 生效"
+      },
+      {
+        "test": "tests.unit.test_spill.TestEnter::test_mode_600",
+        "reason": "Windows ACL 尽力而为(spec)"
+      },
+      {
+        "test": "tests.unit.test_spill.TestRead::test_symlink_escape_zero_read",
+        "reason": "无符号链接权限(Windows 需管理员/开发者模式)"
+      }
+    ],
+    "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+    "command": {
+      "argv": [
+        "D:\\zinuotiger-workspace\\repositories\\pyharness\\.work\\verification\\venv\\Scripts\\python.exe",
+        "-B",
+        "-X",
+        "utf8",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "audit_safety",
+        "-o",
+        "addopts=",
+        "--basetemp",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\pytest",
+        "--junitxml",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\junit.xml",
+        "tests",
+        "-q",
+        "--cov=pyharness",
+        "--cov-report=term",
+        "--cov-report=json",
+        "--cov-fail-under=75"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\source",
+      "environment": {
+        "COMSPEC": "C:\\Windows\\system32\\cmd.exe",
+        "NUMBER_OF_PROCESSORS": "14",
+        "OS": "Windows_NT",
+        "PATH": "C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\LENOVO\\.codex\\tmp\\arg0\\codex-arg0K5abzM;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\libheif\\libheif\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\jxrlib\\jxrlib\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\poppler\\Library\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.8\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.8\\libnvvp;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;D:\\Program Files\\nodejs\\;D:\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2022.3.0\\;C:\\Git\\cmd;C:\\Program Files\\dotnet\\;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin;C:\\Users\\LENOVO\\.mavis\\bin;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Launcher\\;C:\\Users\\LENOVO\\AppData\\Local\\pnpm;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\LENOVO\\AppData\\Roaming\\npm;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Ollama;D:\\Users\\LENOVO\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\LENOVO\\AppData\\Local\\GitHubDesktop\\bin;C:\\Users\\LENOVO\\.dotnet\\tools;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\JohnMacFarlane.Pandoc_Microsoft.Winget.Source_8wekyb3d8bbwe\\pandoc-3.9.0.2;C:\\Git\\bin;D:\\Users\\LENOVO\\AppData\\Local\\Programs\\CodeBuddy CN\\bin;D:\\Program Files\\Wukong\\0.9.61-26060905\\bin\\dingsync;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\LENOVO\\.lmstudio\\bin;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Cua\\cua-driver\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\LENOVO\\AppData\\Local\\OpenAI\\Codex\\bin\\73fd6465d9c76545;C:\\Users\\LENOVO\\AppData\\Local\\OpenAI\\Codex\\bin\\247581e40ee272fb",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL",
+        "PROCESSOR_ARCHITECTURE": "AMD64",
+        "SYSTEMROOT": "C:\\Windows",
+        "WINDIR": "C:\\Windows",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924",
+        "HOME": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\home",
+        "USERPROFILE": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\home",
+        "APPDATA": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\appdata",
+        "LOCALAPPDATA": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\localappdata",
+        "TMP": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\tmp",
+        "TEMP": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\tmp",
+        "XDG_CACHE_HOME": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\cache",
+        "HYPOTHESIS_STORAGE_DIRECTORY": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\cache\\hypothesis",
+        "PH_CFG_PATH": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\isolated-config.yaml",
+        "COVERAGE_FILE": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\.coverage",
+        "PYHARNESS_TEST_SANDBOX": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final",
+        "QT_QPA_PLATFORM": "offscreen",
+        "UV_CACHE_DIR": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\cache\\uv",
+        "UV_PYTHON_INSTALL_DIR": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\test-logs\\20260924-174349-416539-release-closure-final\\cache\\python"
+      }
+    }
+  },
+  "coverage": {
+    "covered_lines": 16879,
+    "num_statements": 20237,
+    "percent_covered": 83.40663141770025,
+    "percent_covered_display": "83",
+    "missing_lines": 3358,
+    "excluded_lines": 57,
+    "percent_statements_covered": 83.40663141770025,
+    "percent_statements_covered_display": "83"
+  },
+  "r1_test": {
+    "collected": 16,
+    "passed": 16,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "warnings": 0,
+    "seconds": 37.952,
+    "exit_code": 0,
+    "skip_details": [],
+    "directory": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final",
+    "command": {
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\source\\.work\\verification\\venv\\Scripts\\python.exe",
+        "-B",
+        "-X",
+        "utf8",
+        "-m",
+        "pytest",
+        "tests/integration/test_evleven_r1.py",
+        "-q",
+        "-ra",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "audit_safety",
+        "-o",
+        "addopts=",
+        "--basetemp",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\pytest",
+        "--junitxml",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\junit.xml"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\source",
+      "environment": {
+        "COMSPEC": "C:\\Windows\\system32\\cmd.exe",
+        "OS": "Windows_NT",
+        "PATH": "C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\LENOVO\\.codex\\tmp\\arg0\\codex-arg0K5abzM;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\libheif\\libheif\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\jxrlib\\jxrlib\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\poppler\\Library\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.8\\bin;C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.8\\libnvvp;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;D:\\Program Files\\nodejs\\;D:\\Windows Kits\\10\\Windows Performance Toolkit\\;C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2022.3.0\\;C:\\Git\\cmd;C:\\Program Files\\dotnet\\;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\Docker\\Docker\\resources\\bin;C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin;C:\\Users\\LENOVO\\.mavis\\bin;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Launcher\\;C:\\Users\\LENOVO\\AppData\\Local\\pnpm;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\LENOVO\\AppData\\Roaming\\npm;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Ollama;D:\\Users\\LENOVO\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\LENOVO\\AppData\\Local\\GitHubDesktop\\bin;C:\\Users\\LENOVO\\.dotnet\\tools;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\JohnMacFarlane.Pandoc_Microsoft.Winget.Source_8wekyb3d8bbwe\\pandoc-3.9.0.2;C:\\Git\\bin;D:\\Users\\LENOVO\\AppData\\Local\\Programs\\CodeBuddy CN\\bin;D:\\Program Files\\Wukong\\0.9.61-26060905\\bin\\dingsync;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\LENOVO\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\LENOVO\\.lmstudio\\bin;C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Cua\\cua-driver\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin;C:\\Users\\LENOVO\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\LENOVO\\AppData\\Local\\OpenAI\\Codex\\bin\\73fd6465d9c76545;C:\\Users\\LENOVO\\AppData\\Local\\OpenAI\\Codex\\bin\\247581e40ee272fb",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL",
+        "SYSTEMROOT": "C:\\Windows",
+        "WINDIR": "C:\\Windows",
+        "HOME": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\home",
+        "USERPROFILE": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\home",
+        "APPDATA": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\home",
+        "LOCALAPPDATA": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\home",
+        "TMP": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\tmp",
+        "TEMP": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\tmp",
+        "XDG_CACHE_HOME": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\cache",
+        "PH_CFG_PATH": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\r1-final\\delivery-final\\config.yaml",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924",
+        "QT_QPA_PLATFORM": "offscreen"
+      }
+    }
+  },
+  "r1_wheel_sha256": "40d5cbd5ae312b4bb3af133405807fb9764653b95145a80e4633bed17039ea2e",
+  "artifacts": [
+    {
+      "path": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source\\dist\\pyharness-0.1.0-py3-none-any.whl",
+      "sha256": "db2ef1ee025ebf0739ba6a2312595c7cf13ed900a92c80df9fb351fa5d3fcd76",
+      "bytes": 688289
+    },
+    {
+      "path": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source\\dist\\pyharness-0.1.0.tar.gz",
+      "sha256": "ae7020702c18654c61af45d41532786080d7da07d2260cc9feb319eef7c2ae74",
+      "bytes": 3477723
+    }
+  ],
+  "installation_steps": [
+    {
+      "name": "build",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\build-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-m",
+        "hatchling",
+        "build",
+        "-t",
+        "wheel",
+        "-t",
+        "sdist"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:52.260794"
+    },
+    {
+      "name": "base-venv",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "venv",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env",
+        "--python",
+        "D:\\zinuotiger-workspace\\repositories\\pyharness\\.work\\verification\\venv\\Scripts\\python.exe",
+        "--no-python-downloads"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:53.276980"
+    },
+    {
+      "name": "base-install",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "install",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\python.exe",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source\\dist\\pyharness-0.1.0-py3-none-any.whl"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:53.342183"
+    },
+    {
+      "name": "base-import",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "-c",
+        "import pyharness,sys,importlib.metadata as m; print(sys.executable); print(pyharness.__file__); print(m.version('pyharness')); from pyharness.cli import main; assert callable(main)"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:54.410409"
+    },
+    {
+      "name": "base-help",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\pyharness.exe",
+        "--help"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:55.141239"
+    },
+    {
+      "name": "base-write",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "write",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:55.891998"
+    },
+    {
+      "name": "base-recover",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "recover",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:57.620293"
+    },
+    {
+      "name": "base-dependencies",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "freeze",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\base-env\\Scripts\\python.exe"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:58.576160"
+    },
+    {
+      "name": "native-venv",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "venv",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env",
+        "--python",
+        "D:\\zinuotiger-workspace\\repositories\\pyharness\\.work\\verification\\venv\\Scripts\\python.exe",
+        "--no-python-downloads"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:58.618975"
+    },
+    {
+      "name": "native-install",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "install",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source\\dist\\pyharness-0.1.0-py3-none-any.whl[native]"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:43:58.670473"
+    },
+    {
+      "name": "native-import",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "-c",
+        "import pyharness,sys,importlib.metadata as m; print(sys.executable); print(pyharness.__file__); print(m.version('pyharness')); from pyharness.cli import main; assert callable(main); from pyharness.desktop_native import main; assert callable(main)"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:01.302178"
+    },
+    {
+      "name": "native-help",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\pyharness.exe",
+        "--help"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:02.304345"
+    },
+    {
+      "name": "native-write",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "write",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:03.116910"
+    },
+    {
+      "name": "native-recover",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "recover",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:04.861522"
+    },
+    {
+      "name": "native-entry",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\entry_smoke.py",
+        "native"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:05.833464"
+    },
+    {
+      "name": "native-dependencies",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "freeze",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\native-env\\Scripts\\python.exe"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:07.405424"
+    },
+    {
+      "name": "desktop-venv",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "venv",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env",
+        "--python",
+        "D:\\zinuotiger-workspace\\repositories\\pyharness\\.work\\verification\\venv\\Scripts\\python.exe",
+        "--no-python-downloads"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:07.450898"
+    },
+    {
+      "name": "desktop-install",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "install",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\source\\dist\\pyharness-0.1.0-py3-none-any.whl[desktop]"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:07.498139"
+    },
+    {
+      "name": "desktop-import",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "-c",
+        "import pyharness,sys,importlib.metadata as m; print(sys.executable); print(pyharness.__file__); print(m.version('pyharness')); from pyharness.cli import main; assert callable(main); from pyharness.desktop import DesktopApp, main; assert callable(main)"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:08.670235"
+    },
+    {
+      "name": "desktop-help",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\pyharness.exe",
+        "--help"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:09.927748"
+    },
+    {
+      "name": "desktop-write",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "write",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:10.724804"
+    },
+    {
+      "name": "desktop-recover",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\wheel_smoke.py",
+        "recover",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-data"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:12.526410"
+    },
+    {
+      "name": "desktop-entry",
+      "argv": [
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\entry_smoke.py",
+        "desktop"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\outside source 中文",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:13.545685"
+    },
+    {
+      "name": "desktop-dependencies",
+      "argv": [
+        "C:\\Users\\LENOVO\\AppData\\Local\\hermes\\bin\\uv.exe",
+        "pip",
+        "freeze",
+        "--python",
+        "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure\\desktop-env\\Scripts\\python.exe"
+      ],
+      "cwd": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\sandbox\\release-closure",
+      "exit_code": 0,
+      "start": "2026-09-24T17:44:15.857978"
+    }
+  ],
+  "review": {
+    "code_reviewer": "/root/final_code_reviewer (independent; no implementation or tests)",
+    "additional_cross_check": "/root/final_code_reviewer/credentials_llm_review",
+    "document_reviewer": "/root/final_document_reviewer (independent; no implementation or tests)",
+    "findings": [
+      {
+        "id": "RV01",
+        "severity": "High",
+        "issue": "F01",
+        "title": "Rejected public spine cached host-bound LLM",
+        "red": "20260924-170954-454030-independent-review-red",
+        "green": "20260924-171101-840175-independent-review-green",
+        "resolution": "one authorized queue construction path; all borrowed fallbacks checked"
+      },
+      {
+        "id": "RV02",
+        "severity": "Medium",
+        "issue": "F02",
+        "title": "Complete JSON missing newline duplicated on retry",
+        "red": "20260924-170954-454030-independent-review-red",
+        "green": "20260924-171101-840175-independent-review-green",
+        "resolution": "heal then reconcile before missing suffix calculation"
+      },
+      {
+        "id": "RV03",
+        "severity": "Medium",
+        "issue": "F05",
+        "title": "Cancellation audit error bypassed actual terminal wait",
+        "red": "20260924-170954-454030-independent-review-red",
+        "green": "20260924-171101-840175-independent-review-green",
+        "resolution": "retain audit primary; shield terminal wait then rethrow"
+      },
+      {
+        "id": "RV04",
+        "severity": "Medium",
+        "issue": "F08/R04",
+        "title": "Shared Settings carried private runtime model key into next runtime",
+        "red": "20260924-170954-454030-independent-review-red",
+        "green": "20260924-171101-840175-independent-review-green",
+        "resolution": "runtime-local deep copied Settings; context references spine settings"
+      },
+      {
+        "id": "RV05",
+        "severity": "Medium",
+        "issue": "F04/F10",
+        "title": "Native main partial initialization and interrupt skipped controller/loop cleanup",
+        "red": "20260924-171356-682783-native-lifecycle-review-red",
+        "green": "20260924-171436-186673-native-lifecycle-review-green",
+        "resolution": "finally awaits controller before loop close, retains primary failure"
+      },
+      {
+        "id": "RV06",
+        "severity": "Medium",
+        "issue": "F04",
+        "title": "First tenant close failure prevented later tenant cleanup",
+        "red": "20260924-171356-682783-native-lifecycle-review-red",
+        "green": "20260924-171436-186673-native-lifecycle-review-green",
+        "resolution": "attempt all tenants and preserve error/failed ownership"
+      },
+      {
+        "id": "INSTALL01",
+        "severity": "Medium",
+        "issue": "F11",
+        "title": "Real NativeController passed unsupported channel desktop-native",
+        "red": "sandbox/release-final/native-entry.log; test-logs/20260924-171912-286302-native-real-channel-red",
+        "green": "test-logs/20260924-171929-579975-native-channel-green; sandbox/release-final-verified/native-entry.log",
+        "resolution": "use existing desktop channel; no governance whitelist changes"
+      },
+      {
+        "id": "RESOURCE01",
+        "issue": "F10",
+        "title": "FTS announce失败后SQLite连接缺owner（从资源警告追查并独立故障复现）",
+        "red": "test-logs/20260924-172329-469504-optional-index-cleanup-red",
+        "green": "test-logs/20260924-172427-857168-optional-index-cleanup-green",
+        "resolution": "先持owner；失败/取消均detach；诊断0残留"
+      },
+      {
+        "id": "RV07",
+        "issue": "F10",
+        "title": "索引清理期间新取消被吞",
+        "red": "test-logs/20260924-172624-756172-index-cleanup-cancel-red",
+        "green": "test-logs/20260924-172642-960617-index-cleanup-cancel-green",
+        "resolution": "记录新取消；等清理后传播并保留原因；reviewer最终复核通过"
+      }
+    ],
+    "document_fixes": [
+      "Python version not pinned automatically",
+      "actual package tree and installed CLI entry",
+      "configurable data location warning",
+      "IPv6 loopback and token scope",
+      "credential source category exposed without secret",
+      "cache TTL not effective",
+      "Ctrl-C exit 130"
+    ],
+    "adjudication": [
+      "Repeated start_job alone was an early hypothesis and withdrawn: start_job calls queue_for first. Actual list_jobs -> save_profile -> create_message path was dynamically proven instead."
+    ],
+    "followup": "Code reviewer rechecked RV01-RV04: no new effective Critical/High/Medium in scoped final diff. Document reviewer rechecked seven docs changes and RV05-RV06: no new findings. Final native channel cross-check agrees with existing contract.",
+    "limitations": "Static independent review is not dynamic verification; primary agent ran all RED/GREEN evidence. Not a review of all old repository history."
+  },
+  "changed_since_task_start": [
+    ".github/workflows/ci.yml",
+    "README.md",
+    "STATUS.md",
+    "docs/CFG.md",
+    "docs/DEP.md",
+    "pyharness/acp.py",
+    "pyharness/application/registry.py",
+    "pyharness/application/service.py",
+    "pyharness/cli.py",
+    "pyharness/core/approval.py",
+    "pyharness/core/jobs.py",
+    "pyharness/core/llm.py",
+    "pyharness/core/orchestration.py",
+    "pyharness/core/proc.py",
+    "pyharness/core/pty.py",
+    "pyharness/core/schedule.py",
+    "pyharness/core/subagent.py",
+    "pyharness/core/task_queue.py",
+    "pyharness/core/tenant_settings.py",
+    "pyharness/core/tool_exec.py",
+    "pyharness/core/tools_executor.py",
+    "pyharness/desktop/__init__.py",
+    "pyharness/desktop/app.py",
+    "pyharness/desktop/launcher.py",
+    "pyharness/desktop/net.py",
+    "pyharness/desktop/sessions.py",
+    "pyharness/desktop_native/app.py",
+    "pyharness/desktop_native/controller.py",
+    "pyharness/engine.py",
+    "pyharness/persistence.py",
+    "pyharness/repair.py",
+    "tests/conftest.py",
+    "tests/e2e/test_derived_state_lifecycle_e2e.py",
+    "tests/e2e/test_evidence_lifecycle_e2e.py",
+    "tests/e2e/test_multisession_isolation_e2e.py",
+    "tests/e2e/test_persistence_failure_e2e.py",
+    "tests/e2e/test_subagent_evidence_e2e.py",
+    "tests/integration/test_evleven_r1.py",
+    "tests/integration/test_mcp_stdio.py",
+    "tests/integration/test_verification_runtime.py",
+    "tests/invariants/test_inv_core.py",
+    "tests/security/conftest.py",
+    "tests/security/test_llm_egress.py",
+    "tests/unit/test_application_service.py",
+    "tests/unit/test_audit_run.py",
+    "tests/unit/test_desktop.py",
+    "tests/unit/test_engine.py",
+    "tests/unit/test_engine_flow.py",
+    "tests/unit/test_exec.py",
+    "tests/unit/test_mcp.py",
+    "tests/unit/test_persistence.py",
+    "tests/unit/test_pty.py",
+    "tests/unit/test_schedule_nl_phase2.py",
+    "tests/unit/test_tenant_settings.py",
+    "tests/unit/test_tool_fs.py",
+    "tests/unit/test_tool_schedule.py",
+    "tests/unit/test_tool_web.py",
+    "tests/unit/test_tools_guard.py",
+    "tests/unit/test_wiring_fixes.py"
+  ],
+  "new_since_task_start": [
+    "pyharness/application/bootstrap.py",
+    "pyharness/core/lifecycle.py",
+    "pyharness/core/process_owner.py",
+    "pyharness/core/provider_result.py",
+    "reports/PYHARNESS-FULL-REMEDIATION-20260924.json",
+    "reports/PYHARNESS-FULL-REMEDIATION-20260924.md",
+    "scripts/check_authorization.py",
+    "tests/__init__.py",
+    "tests/support.py",
+    "tests/unit/test_remediation_credentials.py",
+    "tests/unit/test_remediation_delivery.py",
+    "tests/unit/test_remediation_isolation.py",
+    "tests/unit/test_remediation_lifecycle.py",
+    "tests/unit/test_remediation_process.py",
+    "tests/unit/test_remediation_properties.py",
+    "tests/unit/test_remediation_runtime.py",
+    "tests/unit/test_remediation_storage.py"
+  ],
+  "old_reports_unchanged": [
+    "reports/LOCAL-CANDIDATE-REPORT.md",
+    "reports/PYHARNESS-EVLEVEN-INTEGRATION.md",
+    "reports/REPO-VERIFICATION.md"
+  ],
+  "commit": false,
+  "push": false,
+  "limits": [
+    "R02真实POSIX/umask022缺独立环境",
+    "ruff未安装且未在项目依赖声明；未安装",
+    "无项目配置的mypy门禁",
+    "无真实模型/付费API调用",
+    "无人工完整Qt/WebView2交互验收",
+    "无Docker交付配置，未强加Docker",
+    "未运行GitHub远程CI或其他机器",
+    "同步工具取消/远端MCP超时不保证副作用撤销",
+    "PTY主动禁用",
+    "最小安装需可访问依赖源或已有缓存，非完全离线通用便携包"
+  ],
+  "final_git_status": "M .github/workflows/ci.yml\n M .gitignore\n M README.md\n M docs/CFG.md\n M docs/DEP.md\n M pyharness/acp.py\n M pyharness/application/registry.py\n M pyharness/application/service.py\n M pyharness/cli.py\n M pyharness/config.py\n M pyharness/core/approval.py\n M pyharness/core/jobs.py\n M pyharness/core/llm.py\n M pyharness/core/mcp.py\n M pyharness/core/orchestration.py\n M pyharness/core/proc.py\n M pyharness/core/pty.py\n M pyharness/core/schedule.py\n M pyharness/core/session.py\n M pyharness/core/subagent.py\n M pyharness/core/task_queue.py\n M pyharness/core/tenant_settings.py\n M pyharness/core/tool_exec.py\n M pyharness/core/tools_executor.py\n M pyharness/desktop/__init__.py\n M pyharness/desktop/app.py\n M pyharness/desktop/launcher.py\n M pyharness/desktop/net.py\n M pyharness/desktop/sessions.py\n M pyharness/desktop_native/app.py\n M pyharness/desktop_native/controller.py\n M pyharness/engine.py\n M pyharness/persistence.py\n M pyharness/repair.py\n M tests/conftest.py\n M tests/e2e/test_derived_state_lifecycle_e2e.py\n M tests/e2e/test_evidence_lifecycle_e2e.py\n M tests/e2e/test_multisession_isolation_e2e.py\n M tests/e2e/test_persistence_failure_e2e.py\n M tests/e2e/test_subagent_evidence_e2e.py\n M tests/integration/test_mcp_stdio.py\n M tests/invariants/test_inv_core.py\n M tests/security/conftest.py\n M tests/security/test_llm_egress.py\n M tests/unit/test_application_service.py\n M tests/unit/test_audit_run.py\n M tests/unit/test_desktop.py\n M tests/unit/test_engine.py\n M tests/unit/test_engine_flow.py\n M tests/unit/test_events.py\n M tests/unit/test_exec.py\n M tests/unit/test_mcp.py\n M tests/unit/test_persistence.py\n M tests/unit/test_pty.py\n M tests/unit/test_schedule_nl_phase2.py\n M tests/unit/test_tenant_settings.py\n M tests/unit/test_tool_fs.py\n M tests/unit/test_tool_schedule.py\n M tests/unit/test_tool_web.py\n M tests/unit/test_tools_guard.py\n M tests/unit/test_wiring_fixes.py\n?? STATUS.md\n?? pyharness/application/bootstrap.py\n?? pyharness/core/lifecycle.py\n?? pyharness/core/process_owner.py\n?? pyharness/core/provider_result.py\n?? reports/\n?? scripts/build_local_candidate.py\n?? scripts/check_authorization.py\n?? scripts/evleven_integration.py\n?? scripts/evleven_r1_server.py\n?? scripts/local_candidate/\n?? scripts/setup_evleven_r1.ps1\n?? scripts/verification_local.py\n?? scripts/verify_local_candidate.py\n?? tests/__init__.py\n?? tests/integration/test_evleven_r1.py\n?? tests/integration/test_verification_gaps.py\n?? tests/integration/test_verification_runtime.py\n?? tests/support.py\n?? tests/unit/test_remediation_credentials.py\n?? tests/unit/test_remediation_delivery.py\n?? tests/unit/test_remediation_isolation.py\n?? tests/unit/test_remediation_lifecycle.py\n?? tests/unit/test_remediation_process.py\n?? tests/unit/test_remediation_properties.py\n?? tests/unit/test_remediation_runtime.py\n?? tests/unit/test_remediation_storage.py",
+  "final_git_diff_stat": ".github/workflows/ci.yml                      |  23 +-\n .gitignore                                    |   3 +\n README.md                                     |  20 +-\n docs/CFG.md                                   |  39 ++--\n docs/DEP.md                                   |  84 ++++----\n pyharness/acp.py                              |  87 ++++++--\n pyharness/application/registry.py             |  15 +-\n pyharness/application/service.py              | 154 +++++++++----\n pyharness/cli.py                              |  43 ++--\n pyharness/config.py                           |   2 +\n pyharness/core/approval.py                    |  10 +-\n pyharness/core/jobs.py                        |  44 ++--\n pyharness/core/llm.py                         |  86 +++++++-\n pyharness/core/mcp.py                         | 103 +++++----\n pyharness/core/orchestration.py               | 102 ++++++---\n pyharness/core/proc.py                        | 215 ++++++++----------\n pyharness/core/pty.py                         |  21 +-\n pyharness/core/schedule.py                    |   6 +\n pyharness/core/session.py                     |   5 +\n pyharness/core/subagent.py                    |  76 ++++---\n pyharness/core/task_queue.py                  |  89 +++++---\n pyharness/core/tenant_settings.py             | 238 ++++++++++++++++----\n pyharness/core/tool_exec.py                   |   6 +-\n pyharness/core/tools_executor.py              |  34 +--\n pyharness/desktop/__init__.py                 |  22 +-\n pyharness/desktop/app.py                      |  57 ++---\n pyharness/desktop/launcher.py                 |  26 ++-\n pyharness/desktop/net.py                      |  26 +--\n pyharness/desktop/sessions.py                 |  71 +++---\n pyharness/desktop_native/app.py               |  53 +++--\n pyharness/desktop_native/controller.py        |   2 +-\n pyharness/engine.py                           | 300 ++++++++++++--------------\n pyharness/persistence.py                      | 288 +++++++++++++++++--------\n pyharness/repair.py                           |  15 +-\n tests/conftest.py                             | 104 ++++++---\n tests/e2e/test_derived_state_lifecycle_e2e.py |   3 +\n tests/e2e/test_evidence_lifecycle_e2e.py      |   7 +-\n tests/e2e/test_multisession_isolation_e2e.py  |   6 +-\n tests/e2e/test_persistence_failure_e2e.py     |  25 ++-\n tests/e2e/test_subagent_evidence_e2e.py       |  12 +-\n tests/integration/test_mcp_stdio.py           |   1 +\n tests/invariants/test_inv_core.py             |   7 +\n tests/security/conftest.py                    |   4 +-\n tests/security/test_llm_egress.py             |   2 +-\n tests/unit/test_application_service.py        |   9 +-\n tests/unit/test_audit_run.py                  |   1 +\n tests/unit/test_desktop.py                    |  10 +-\n tests/unit/test_engine.py                     |  37 ++--\n tests/unit/test_engine_flow.py                |  41 ++--\n tests/unit/test_events.py                     |   5 +-\n tests/unit/test_exec.py                       |  33 +--\n tests/unit/test_mcp.py                        |  23 ++\n tests/unit/test_persistence.py                |   7 +-\n tests/unit/test_pty.py                        |  45 ++--\n tests/unit/test_schedule_nl_phase2.py         |  84 ++++----\n tests/unit/test_tenant_settings.py            |   9 +-\n tests/unit/test_tool_fs.py                    |   4 +-\n tests/unit/test_tool_schedule.py              |  14 +-\n tests/unit/test_tool_web.py                   |   1 +\n tests/unit/test_tools_guard.py                |   3 +-\n tests/unit/test_wiring_fixes.py               |  14 +-\n 61 files changed, 1813 insertions(+), 1063 deletions(-)",
+  "final_git_diff_name_only": ".github/workflows/ci.yml\n.gitignore\nREADME.md\ndocs/CFG.md\ndocs/DEP.md\npyharness/acp.py\npyharness/application/registry.py\npyharness/application/service.py\npyharness/cli.py\npyharness/config.py\npyharness/core/approval.py\npyharness/core/jobs.py\npyharness/core/llm.py\npyharness/core/mcp.py\npyharness/core/orchestration.py\npyharness/core/proc.py\npyharness/core/pty.py\npyharness/core/schedule.py\npyharness/core/session.py\npyharness/core/subagent.py\npyharness/core/task_queue.py\npyharness/core/tenant_settings.py\npyharness/core/tool_exec.py\npyharness/core/tools_executor.py\npyharness/desktop/__init__.py\npyharness/desktop/app.py\npyharness/desktop/launcher.py\npyharness/desktop/net.py\npyharness/desktop/sessions.py\npyharness/desktop_native/app.py\npyharness/desktop_native/controller.py\npyharness/engine.py\npyharness/persistence.py\npyharness/repair.py\ntests/conftest.py\ntests/e2e/test_derived_state_lifecycle_e2e.py\ntests/e2e/test_evidence_lifecycle_e2e.py\ntests/e2e/test_multisession_isolation_e2e.py\ntests/e2e/test_persistence_failure_e2e.py\ntests/e2e/test_subagent_evidence_e2e.py\ntests/integration/test_mcp_stdio.py\ntests/invariants/test_inv_core.py\ntests/security/conftest.py\ntests/security/test_llm_egress.py\ntests/unit/test_application_service.py\ntests/unit/test_audit_run.py\ntests/unit/test_desktop.py\ntests/unit/test_engine.py\ntests/unit/test_engine_flow.py\ntests/unit/test_events.py\ntests/unit/test_exec.py\ntests/unit/test_mcp.py\ntests/unit/test_persistence.py\ntests/unit/test_pty.py\ntests/unit/test_schedule_nl_phase2.py\ntests/unit/test_tenant_settings.py\ntests/unit/test_tool_fs.py\ntests/unit/test_tool_schedule.py\ntests/unit/test_tool_web.py\ntests/unit/test_tools_guard.py\ntests/unit/test_wiring_fixes.py",
+  "final_untracked_files": "STATUS.md\npyharness/application/bootstrap.py\npyharness/core/lifecycle.py\npyharness/core/process_owner.py\npyharness/core/provider_result.py\nreports/LOCAL-CANDIDATE-REPORT.md\nreports/PYHARNESS-EVLEVEN-INTEGRATION.md\nreports/PYHARNESS-FULL-REMEDIATION-20260924.json\nreports/PYHARNESS-FULL-REMEDIATION-20260924.md\nreports/REPO-VERIFICATION.md\nscripts/build_local_candidate.py\nscripts/check_authorization.py\nscripts/evleven_integration.py\nscripts/evleven_r1_server.py\n\"scripts/local_candidate/README-\\344\\270\\255\\346\\226\\207.md\"\nscripts/local_candidate/acceptance.py\nscripts/local_candidate/check.ps1\nscripts/local_candidate/install.ps1\nscripts/local_candidate/integrity.py\nscripts/local_candidate/model_preflight.py\nscripts/local_candidate/start.ps1\nscripts/local_candidate/trial.py\nscripts/setup_evleven_r1.ps1\nscripts/verification_local.py\nscripts/verify_local_candidate.py\ntests/__init__.py\ntests/integration/test_evleven_r1.py\ntests/integration/test_verification_gaps.py\ntests/integration/test_verification_runtime.py\ntests/support.py\ntests/unit/test_remediation_credentials.py\ntests/unit/test_remediation_delivery.py\ntests/unit/test_remediation_isolation.py\ntests/unit/test_remediation_lifecycle.py\ntests/unit/test_remediation_process.py\ntests/unit/test_remediation_properties.py\ntests/unit/test_remediation_runtime.py\ntests/unit/test_remediation_storage.py",
+  "final_verification": {
+    "code_review": "Final scoped read-only review complete; no new effective Critical/High/Medium; 5 final test files preserve assertions and expose cleanup failures.",
+    "document_review": "Final MD/JSON/STATUS review complete; 21 statuses, 60 phases, 24 zero-exit installation steps, 59 changed and 17 new files verified; 452 working file hashes matched.",
+    "review_roles_read_only": true,
+    "integrity_evidence": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\final-integrity-check.json",
+    "process_inventory_evidence": "D:\\zinuotiger-workspace\\checkpoints\\pyharness-full-remediation-pre-20260924\\final-results\\processes-after.json",
+    "owned_python_processes_after": 0,
+    "tracked_changes": 61,
+    "repo_temp_outputs_created": false
+  }
+}

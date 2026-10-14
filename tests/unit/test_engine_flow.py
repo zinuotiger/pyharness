@@ -17,7 +17,6 @@ import pytest
 
 from pyharness.config import Settings, load_settings
 from pyharness.core import llm as llm_mod
-from pyharness.core.task_queue import TaskQueue
 from pyharness.engine import assemble_real_engine
 
 
@@ -126,7 +125,7 @@ async def test_engine_full_chain_offline(tmp_path):
         intent = "帮我建个目标并记个待办,然后总结"
         await ctx.session.append("user.message", {"content": intent},
                                  actor="user", sync=True)
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        q = ctx.task_queue
         tid = await q.submit(intent)
         res = await asyncio.wait_for(q.wait_for(tid), timeout=8.0)
         assert res.ok, f"全链 run 应成功,实际 code={getattr(res, 'code', res)}"
@@ -164,13 +163,15 @@ async def test_engine_full_chain_offline(tmp_path):
         assert spine.todos.active_count(tid) == 1, \
             f"待办应关联当前任务 {tid}:{spine.todos.list_items(tid)}"
     finally:
-        llm_mod.adapters.clear()
-        llm_mod.adapters.update(saved)
-        if ctx is not None:
-            try:
-                ctx.scope.release()
-            except Exception:                      # noqa: BLE001 收尾尽力
-                pass
+        try:
+            if ctx is not None:
+                try:
+                    await ctx.engine_spine.close()
+                finally:
+                    ctx.scope.release()
+        finally:
+            llm_mod.adapters.clear()
+            llm_mod.adapters.update(saved)
 
 
 # ============================ RT-FIX-STAGE1 · F-01(policy.updated 装配留痕)
@@ -211,7 +212,7 @@ async def test_policy_updated_announced_once_at_first_run(tmp_path):
         intent = "帮我建个目标并记个待办,然后总结"
         await ctx.session.append("user.message", {"content": intent},
                                  actor="user", sync=True)
-        q = TaskQueue(ctx.session, runner=ctx.task_runner, max_queue=8)
+        q = ctx.task_queue
         tid = await q.submit(intent)
         res = await asyncio.wait_for(q.wait_for(tid), timeout=8.0)
         assert res.ok, f"全链 run 应成功,实际 code={getattr(res, 'code', res)}"
@@ -233,14 +234,12 @@ async def test_policy_updated_announced_once_at_first_run(tmp_path):
         assert len([e for e in ctx.session.events_after(0)
                     if e.type == "policy.updated"]) == 1, "每 spine 恰一条(幂等闸)"
     finally:
-        llm_mod.adapters.clear()
-        llm_mod.adapters.update(saved)
-        if ctx is not None:
-            try:
-                await ctx.engine_spine.close()
-            except Exception:                          # noqa: BLE001 收尾尽力
-                pass
-            try:
-                ctx.scope.release()
-            except Exception:                          # noqa: BLE001 收尾尽力
-                pass
+        try:
+            if ctx is not None:
+                try:
+                    await ctx.engine_spine.close()
+                finally:
+                    ctx.scope.release()
+        finally:
+            llm_mod.adapters.clear()
+            llm_mod.adapters.update(saved)

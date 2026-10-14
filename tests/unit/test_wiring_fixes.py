@@ -124,11 +124,15 @@ class TestSessionQueryMaxSeq:
     async def test_reads_indexed_max_seq(self):
         ix = SessionQueryIndex(":memory:")
         await ix.enter(None)                        # 建表(无总线:ctx=None 分支)
-        ix._db.execute(
-            "INSERT INTO fts_rows(session_id, seq) VALUES ('s-a', 3), ('s-a', 9)")
-        ix._db.commit()
-        assert ix.max_seq("s-a") == 9
-        assert ix.max_seq("s-other") == 0           # 未索引会话 = 0(不算落后)
+        try:
+            ix._db.execute(
+                "INSERT INTO fts_rows(session_id, seq) VALUES ('s-a', 3), ('s-a', 9)")
+            ix._db.commit()
+            assert ix.max_seq("s-a") == 9
+            assert ix.max_seq("s-other") == 0           # 未索引会话 = 0(不算落后)
+        finally:
+            await ix.detach(None)
+
 
 
 # ---------------------------------------------------------------- 4. exec.pty

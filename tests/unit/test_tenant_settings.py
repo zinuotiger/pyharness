@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -40,11 +41,15 @@ def test_tenant_secret_is_encrypted_and_never_returned(tmp_path):
     saved = store.upsert_profile("alpha", _profile())
     state = store.state("alpha")
     raw_meta = (tmp_path / "alpha" / "models.json").read_text(encoding="utf-8")
-    secret_raw = (tmp_path / "alpha" / "model-secrets.bin").read_bytes()
+    secret_path = store._secret_path('alpha', json.loads(raw_meta))
+    secret_raw = secret_path.read_bytes()
 
     assert saved["profile"]["has_api_key"] is True
     assert "sk-direct-secret-value" not in raw_meta
-    assert b"sk-direct-secret-value" not in secret_raw
+    if os.name == 'nt':
+        assert b"sk-direct-secret-value" not in secret_raw
+    else:
+        assert secret_path.stat().st_mode & 0o777 == 0o600
     assert "sk-direct-secret-value" not in json.dumps(state, ensure_ascii=False)
     assert resolve_tenant_secret("tenant:alpha:p-openai") == "sk-direct-secret-value"
 

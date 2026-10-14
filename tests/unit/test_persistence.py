@@ -578,6 +578,7 @@ def test_session_lock_released_on_close_allows_reopen(tmp_path):
     b.close()
 
 
+@pytest.mark.controlled_process
 def test_cross_process_lock_blocks_second_writer(tmp_path):
     """跨进程:父进程持锁时,子进程开同一会话 → PERS-202(单写者 INV-07)。"""
     store, d = _store(tmp_path)
@@ -858,7 +859,10 @@ class TestSyncDurability:
         assert store._retry_q[0] == (10, line_a)
         assert store._pending[0] == (10, line_b)
         assert store.path.read_text(encoding="utf-8") == ""   # 未写盘
-        store.close()
+        with pytest.raises(PyHError, match='PERS-202'):
+            store.close()  # close must report uncommittable pending data, not false success
+        assert store._fh.closed
+        assert store._lock_path is None
 
     async def test_t12_seq_unique_after_retry_cycles(self, tmp_path,
                                                     monkeypatch):
@@ -999,6 +1003,7 @@ async def test_partial_write_failure_does_not_corrupt_next_line(tmp_path,
 
 
 # ============ R14-2:会话锁占用探针(启动自检不得把活会话当修复候选)
+@pytest.mark.controlled_process
 def test_session_lock_held_probe_semantics(tmp_path):
     """``session_lock_held`` 只探测不改语义:未取过锁 → False(**不建锁文件**);
     持锁期间(同进程) → True;释放后 → False;跨进程占用 → True。"""

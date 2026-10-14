@@ -264,11 +264,11 @@ async def wait_result_async(sandbox: Path, command: str, *, timeout_s: int, pyth
     try:
         return await asyncio.shield(collector)
     except BaseException as primary:
-        async def cleanup():
+        async def cleanup(error=primary):
             try: await asyncio.to_thread(owner.terminate)
-            except BaseException as exc: primary.add_note(f'process cleanup: {type(exc).__name__}')
+            except BaseException as exc: error.add_note(f'process cleanup: {type(exc).__name__}')
             try: await collector
-            except BaseException as exc: primary.add_note(f'collector cleanup: {type(exc).__name__}')
+            except BaseException as exc: error.add_note(f'collector cleanup: {type(exc).__name__}')
         cleanup_task = asyncio.create_task(cleanup())
         while not cleanup_task.done():
             try: await asyncio.shield(cleanup_task)

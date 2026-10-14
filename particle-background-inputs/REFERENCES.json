@@ -1,0 +1,84 @@
+{
+  "purpose": "design-reference-manifest-not-runtime-config",
+  "production_backgrounds_included": false,
+  "references": [
+    {
+      "suggested_background_id": "particle-nebula-light",
+      "name": "星云粒子",
+      "reference_file": "references/01-nebula-reference.png",
+      "original_filename": "星云粒子梦幻工作台.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 1940065,
+      "sha256": "6f4dc99dfa869251eaef4811f63b580f1ba54d9dfb7d31caa304a53e5804c758",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    },
+    {
+      "suggested_background_id": "particle-ice-aurora-light",
+      "name": "冰湖极光粒子",
+      "reference_file": "references/02-ice-aurora-reference.png",
+      "original_filename": "冰湖极光玻璃界面.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2003491,
+      "sha256": "6d997c92cb5e4b7e753903b65564dc58f2d073e59e4de0b532228944de9f5888",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    },
+    {
+      "suggested_background_id": "particle-ocean-blue-light",
+      "name": "海蓝粒子",
+      "reference_file": "references/03-ocean-blue-reference.png",
+      "original_filename": "海蓝粒子_水下灵感工作台.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2060342,
+      "sha256": "c226a54df3f7c2b8a74a2b206a8a3df5bbcdf0d7fd9357a217e0fe263d147e2f",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    },
+    {
+      "suggested_background_id": "particle-starry-sky-light",
+      "name": "星空粒子",
+      "reference_file": "references/04-starry-sky-reference.png",
+      "original_filename": "星空粒子灵感工作台.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 1963167,
+      "sha256": "44528fed864ed5828e06844d4680a8267c48a8dc23e69be07d79f4f58f911bf4",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    },
+    {
+      "suggested_background_id": "particle-aurora-light",
+      "name": "极光粒子",
+      "reference_file": "references/05-aurora-reference.png",
+      "original_filename": "极光粒子工作台.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2083250,
+      "sha256": "04d469f9ad4e7816735078e1b67d21374feaa42dd3a334f0ea55c0562ec55cac",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    },
+    {
+      "suggested_background_id": "particle-ocean-light",
+      "name": "海洋粒子",
+      "reference_file": "references/06-ocean-reference.png",
+      "original_filename": "海洋粒子_沉浸式水下工作台.png",
+      "width": 1672,
+      "height": 941,
+      "bytes": 1992183,
+      "sha256": "6734989c7d25fcfa661ff215dd6569543efb9ac2e2c2d8683b7a99f5646c8d18",
+      "usage": "design-reference-only",
+      "contains_text_and_mock_ui": true,
+      "production_background_available_in_this_package": false
+    }
+  ]
+}

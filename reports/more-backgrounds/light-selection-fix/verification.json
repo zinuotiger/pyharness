@@ -1,0 +1,58 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "branch": "feat/pyharness-platform-web-v1",
+  "modified_files": [
+    "pyharness/ui/theme-kit/appearance/controller.js",
+    "pyharness/ui/host-adapters/platform.js",
+    "pyharness/ui/theme-kit/appearance/background-library.js",
+    "pyharness/ui/theme-kit/styles/theme.css",
+    "scripts/platform_background_contract.py",
+    "docs/user-guide/appearance.md"
+  ],
+  "fixed": [
+    "Legacy ocean/scene overlay no longer leaks into new static light backgrounds; saved original ID remains intact for cancellation",
+    "Explicit light/dark mode preserved; legacy scene replacement uses light panels",
+    "Both existing selectors display and select actual new background IDs with distinct Chinese labels",
+    "Settings background visible, headings and text have readable panel surfaces",
+    "Queued native close event no longer cancels the next selection; programmatic close still restores preview"
+  ],
+  "verification": {
+    "initial_overlay_regression": "failed before fix, passed after fix",
+    "initial_close_race_regression": "failed before fix, passed after fix",
+    "unit_tests": {
+      "command": "python -m pytest tests/unit/test_appearance.py tests/unit/test_background_library.py --no-cov -q",
+      "passed": 25
+    },
+    "javascript_syntax": "three changed JS modules passed node --check",
+    "browser_source": "passed 11 check groups",
+    "browser_extracted_wheel": "passed same 11 check groups",
+    "legacy_scene_animation": "representative starfield passed; all 8 original IDs and 6 image resources covered separately",
+    "build": "uv build --offline: wheel and sdist succeeded",
+    "packaged_files_matching_source": 45,
+    "image_404": 0,
+    "page_errors": 0
+  },
+  "screenshots": "Real app served on isolated local loopback ports with test data, not concept images; operator sessions and settings were not modified",
+  "remaining": "No remaining items for this fix. Existing operator page needs Ctrl+F5 to load the updated frontend.",
+  "frontend_sha256": {
+    "pyharness/ui/theme-kit/appearance/controller.js": "09322f66fa7e541f430fdd2a7ea3dd818f54ec3195aa18e80180792c7e0dabc8",
+    "pyharness/ui/host-adapters/platform.js": "0cbe3a234d02cb1576cba0f2dd1e2791343b2353de2b6140d8c880ec5bbe6162",
+    "pyharness/ui/theme-kit/appearance/background-library.js": "f10908e1779e95593b1067ea21e7a9e9ad62861186c8066feb1caac410c4bcda",
+    "pyharness/ui/theme-kit/styles/theme.css": "9b247452882fc9cd214334ff288f432efc1ce9cd5cd34c5161b6e19dfb42f067",
+    "scripts/platform_background_contract.py": "3b2b916d46f24d987a0329da4928ad0ebf0dfcb7b2fc6b826ea52821c2a4dc67",
+    "docs/user-guide/appearance.md": "a5d992cd1cc96e3b8ae1c7aaa873c2e2e946336fb0a9cc3a4a6bdb63966ec718"
+  },
+  "artifacts": {
+    "wheel": "dist/pyharness-0.1.0-py3-none-any.whl",
+    "sdist": "dist/pyharness-0.1.0.tar.gz"
+  },
+  "new_backgrounds": {
+    "particle-nebula-light": "ready; preview, apply, reload, cancel and navigation passed",
+    "particle-ice-aurora-light": "ready; preview, apply, reload, cancel and navigation passed",
+    "particle-ocean-blue-light": "ready; preview, apply, reload, cancel and navigation passed",
+    "particle-starry-sky-light": "ready; preview, apply, reload, cancel and navigation passed",
+    "particle-aurora-light": "ready; preview, apply, reload, cancel and navigation passed",
+    "particle-ocean-light": "ready; preview, apply, reload, cancel and navigation passed"
+  }
+}

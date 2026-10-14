@@ -1,0 +1,205 @@
+{
+  "title": "PyHarness 六种动态场景皮肤",
+  "base_head": "1235dd0f492007de89077de81f42d555c0eb059d",
+  "branch": "feat/pyharness-platform-web-v1",
+  "working_tree": "uncommitted changes retained",
+  "engineering": "passed within measured scope",
+  "visual_acceptance": "pending user review",
+  "previous_acceptance": "29 completed / 5 partial unchanged",
+  "scenes": [
+    {
+      "id": "starfield",
+      "name": "星空",
+      "implementation": "旋涡银河背景；分层闪烁星光和缓慢轨道运动",
+      "reference_difference": "银河主体为静态素材，运动来自前景星光与轨道；没有把整张参考 UI 用作贴图。"
+    },
+    {
+      "id": "sakura",
+      "name": "樱花",
+      "implementation": "花枝与粉紫暮光；大小、摆动、旋转不同的下落花瓣",
+      "reference_difference": "生成背景增加了远山、落日与建筑剪影，构图并非参考图逐像素复制。"
+    },
+    {
+      "id": "aurora",
+      "name": "极光",
+      "implementation": "山湖背景；三层渐变流动光幕和星点",
+      "reference_difference": "山水和主极光素材静态，程序光幕缓慢变化；未实现物理水面模拟。"
+    },
+    {
+      "id": "gold",
+      "name": "金色",
+      "implementation": "黑金背景；三条金砂波浪与流动轨迹",
+      "reference_difference": "粒子河流和细线运动，不是参考中全部金色光点逐一模拟。"
+    },
+    {
+      "id": "ocean",
+      "name": "海洋",
+      "implementation": "水下光束、水母背景；上升气泡和三只脉动水母",
+      "reference_difference": "背景中的大型水母静态；额外小水母和气泡动态，无流体模拟。"
+    },
+    {
+      "id": "tech-blue-particle",
+      "name": "科技",
+      "implementation": "发光网络球背景；旋转投影球面节点与局部连线",
+      "reference_difference": "保留已有主题 ID；新球面前景为程序化投影，背景地球纹理静态。"
+    }
+  ],
+  "tests": {
+    "collected": 2738,
+    "passed": 2697,
+    "skipped": 41,
+    "failed": 0,
+    "coverage_percent": 84.1301543710731,
+    "coverage_gate": 75,
+    "browser_regression": "12 pages passed; 0 uncaught JavaScript errors",
+    "six_scenes": "6 chat + 6 settings + 6 approval fixture + 12 responsive screenshots + 18 consecutive motion frames",
+    "installed_assets": "6 PNGs returned HTTP 200 image/png from installed desktop wheel",
+    "package": "wheel and sdist include six exact source PNG payloads; base/native/desktop installation smokes passed"
+  },
+  "performance": [
+    {
+      "scene": "starfield",
+      "sample_seconds": 2.64,
+      "renderer_task_percent": 7.17,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.6,
+      "heap_bytes": 3992564
+    },
+    {
+      "scene": "sakura",
+      "sample_seconds": 2.34,
+      "renderer_task_percent": 6.31,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.5,
+      "heap_bytes": 3968240
+    },
+    {
+      "scene": "aurora",
+      "sample_seconds": 2.5,
+      "renderer_task_percent": 6.98,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.5,
+      "heap_bytes": 2928464
+    },
+    {
+      "scene": "gold",
+      "sample_seconds": 2.34,
+      "renderer_task_percent": 5.78,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.5,
+      "heap_bytes": 3938504
+    },
+    {
+      "scene": "ocean",
+      "sample_seconds": 2.3,
+      "renderer_task_percent": 6.68,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.4,
+      "heap_bytes": 4364200
+    },
+    {
+      "scene": "tech-blue-particle",
+      "sample_seconds": 2.17,
+      "renderer_task_percent": 6.92,
+      "median_frame_ms": 33.3,
+      "p95_frame_ms": 33.4,
+      "heap_bytes": 5182316
+    }
+  ],
+  "lifecycle": {
+    "heap_after_gc": [
+      2620232,
+      2515076,
+      2620204,
+      2515208
+    ],
+    "dom_counters": [
+      {
+        "documents": 1,
+        "nodes": 344,
+        "jsEventListeners": 69
+      },
+      {
+        "documents": 1,
+        "nodes": 344,
+        "jsEventListeners": 69
+      },
+      {
+        "documents": 1,
+        "nodes": 344,
+        "jsEventListeners": 69
+      },
+      {
+        "documents": 1,
+        "nodes": 344,
+        "jsEventListeners": 69
+      }
+    ],
+    "replacements": 24,
+    "disposed_owner_check": true,
+    "asset_engine_fallback": true,
+    "legacy_preferences_preserved": true
+  },
+  "bounds": {
+    "points": 80,
+    "default_points": 48,
+    "max_canvas_pixels": 2400000,
+    "max_dpr": 2,
+    "target_fps": 30,
+    "background_files": 6,
+    "background_total_bytes": 12451817
+  },
+  "limits": [
+    "用户尚未确认六套视觉效果；不改变既有 29 completed / 5 partial。",
+    "浏览器 Chrome 桌面自动化覆盖 1440×900、1280×900、390×900；窄屏是模拟视口，不是真实手机验收。",
+    "隐藏暂停验证为 document.visibilitychange 的受控状态和宿主 visibility 接口；尚未做真实最小化/多显示器人工验收。",
+    "低动效沿用现有静态降级语义，和关闭均停止 Canvas RAF；背景仍显示。",
+    "WebView 只执行现有隐藏页面 smoke 与偏好存储测试；没有逐套 WebView 视觉或 Native Qt 六场景验收。",
+    "性能为每套约 2–3 秒的有界 Chrome 测量，包含截图开销；不代表低端设备、GPU 内存、电池或长期稳定性。",
+    "本轮没有真实模型、Docker 容器、外部 RAG/MCP 或其他项目人工验收；浏览器业务回归使用确定性假模型，场景审批卡片是明确标识的合成 fixture。"
+  ],
+  "source_assets": "pyharness/ui/theme-kit/scenes/provenance.json",
+  "evidence_names": [
+    "screenshots-brightness/scene-summary.json",
+    "screenshots-index.json",
+    "source-manifest.json",
+    "static-result.json",
+    "package-result.json",
+    "junit.xml",
+    "coverage.json"
+  ],
+  "preview": "http://127.0.0.1:59316/",
+  "switch_path": "右上角界面皮肤，或 设置 → 外观",
+  "real_model_requests": 0,
+  "commit_push_pr_changes": false,
+  "concurrent_changes": {
+    "origin": "运行这个程序",
+    "files": [
+      "pyharness/ui/platform.html",
+      "pyharness/ui/host-adapters/platform.js",
+      "pyharness/ui/theme-kit/styles/theme.css",
+      "docs/user-guide/appearance.md"
+    ],
+    "change": "Top selector and brighter scene CSS; other window completed, changes preserved and all six scenes revalidated.",
+    "scope": "Initial Python/API tests remain applicable: production Python unchanged since full test.",
+    "snapshot": "concurrent-final/manifest.json"
+  },
+  "frontend_sha256": {
+    "pyharness/ui/platform.html": "c46842769e78d74aae537558ea235868d075ad09bf082f649009e5f8f1eb1ddf",
+    "pyharness/ui/theme-kit/appearance/controller.js": "8f9d884d90051a10515be095c66a219e8f258c40c1677394e917544b252accc6",
+    "pyharness/ui/theme-kit/contracts/preferences.js": "94077ebba28d5932a59efacbf8ca4f97913ccefa756d91ca0b673446926d7e36",
+    "pyharness/ui/theme-kit/particles/engine.js": "a23162632754888893ebe58a60a31a73cdd4eed9a184cc3838ac7455d6ddcd95",
+    "pyharness/ui/theme-kit/particles/scenes.js": "aef828320df4283d3659fad47c249255305e4cbdeb635a3f2c43ae7ee0a1e4a0",
+    "pyharness/ui/theme-kit/scenes/aurora.png": "be3b3ec886e9a18b6cb7c16bf00eb93cf04dbb171d33bbbe9395e1bdc23d3886",
+    "pyharness/ui/theme-kit/scenes/gold.png": "ab9c0acff6b923f11d911eab29d2fe039603f3fe7e6f7aa85a7c20557b7b6ab3",
+    "pyharness/ui/theme-kit/scenes/ocean.png": "ad1ae99d29b3845a5328426b2a248172cd64281824002bdc338031f5623e3d28",
+    "pyharness/ui/theme-kit/scenes/provenance.json": "d357e163f4870cef0ad2e1d4639b7377734356d217a233edfb7655f215af097c",
+    "pyharness/ui/theme-kit/scenes/sakura.png": "b460ed764d0333db1aeaa0edeaa3e7ef7b202587ca443910e04a926bda6c2db7",
+    "pyharness/ui/theme-kit/scenes/starfield.png": "5937662cf60d1290a9c1fbb7a89a5ada1a943e0ad723bc15edb6e7a8defc0ae0",
+    "pyharness/ui/theme-kit/scenes/technology.png": "5eb1a3d27d8ffd84c38024a8d24925e3648b327336afd2c1bbdfbc4e308b9e58",
+    "pyharness/ui/theme-kit/styles/theme.css": "4f53b79c940e144c476d66920ac34b9958e242964e9cd50143a4209c8a5faf55",
+    "pyharness/ui/theme-kit/tokens/themes.js": "c7b77f8c56895f29b15aef74d60c2e374ea5c64ed7e3f1e52362dbe6270c8e49",
+    "pyharness/ui/host-adapters/classic.js": "5bdf7eb52a0fa0ccf5a6d39682a2c71469e0101fea9c9d69431561ce2daaf03f",
+    "pyharness/ui/host-adapters/platform.js": "fccb3d3a835a6f1b0848c62df061f81e9957e5d8c9b275859f44f648181e515b"
+  }
+}

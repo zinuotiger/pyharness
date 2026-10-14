@@ -87,28 +87,13 @@ from typing import Any, Optional
 
 from pyharness.errors import PyHError, raise_code
 
-log = logging.getLogger("pyharness.spill")
 
 # ------------------------------------------------------------------ 常量
-SUMMARY_PREVIEW: int = 500          # 摘要/引用 preview = 头 500 字符(固定)
-DEFAULT_MAX_PER_FILE: int = 10_485_760   # 默认 10MB(storage.spill.max_per_file_bytes)
 # 会话 spill 区**总量**上限(R24 接线:`storage.spill.max_per_session_mb`;此前零读取者)
-DEFAULT_MAX_PER_SESSION_MB: int = 100
-DEFAULT_LIMIT: int = 200            # read 默认行数(1-1000)
-MAX_READ_LIMIT: int = 1000          # read 单次上限行(schema 同步锁死)
-MODE_PRIVATE: int = 0o600           # 私有文件权限
-_MODE_PRIVATE_DIR: int = 0o700      # 目录需 owner execute 才能遍历，group/other 仍为零
-TOOL_NAME: str = "storage.spill"    # LLM 可见读工具名(模块职责 7:只读面)
-COUNTER_KEY: str = "spill_read_chars"  # 已读量计数键(防循环烧预算,F039 边界)
-SPILL_PATTERN: str = "spill-*.txt"  # spill 文件 glob(清理/审计用)
-FILE_PREFIX: str = "spill-"         # 文件名前缀(事件可 grep)
 
 # PERS-222 回喂文案(spec 异常表;经 raise_code 的 advice 落 tool.error)
-_REFUSED_ADVICE: str = "spill 引用越界,已拒绝读取;只允许本会话私有区"
 # PERS-223 回喂文案(超限拒写)
-_TOO_BIG_ADVICE: str = "输出超过 10MB spill 上限;上游截断或分块"
 # PERS-221 回喂文案(写失败)
-_WRITE_FAIL_ADVICE: str = "查 spill 目录权限(700)、文件权限(600)与磁盘空间(F039)"
 
 
 # ------------------------------------------------------------------ 配置/上下文辅助
@@ -118,139 +103,10 @@ from pyharness.core.config_access import _cfg_holder
 from pyharness.core.config_access import _cfg
 
 
-def _spill_root(ctx: Any) -> Optional[Path]:
-    """spill 根目录(expanduser 后 Path);配置缺失 → None(调用方定错误码)。"""
-    raw = _cfg(_cfg_holder(ctx), "storage.spill_dir", None)
-    if raw is None or not str(raw).strip():
-        return None
-    return Path(str(raw)).expanduser()
-
-
-def _session_id(ctx: Any) -> Optional[str]:
-    """会话 id 获取:ctx.session_id 直挂 → ctx.session.{session_id|sid}。"""
-    sid = getattr(ctx, "session_id", None)
-    if sid:
-        return str(sid)
-    sess = getattr(ctx, "session", None)
-    if sess is not None:
-        for attr in ("session_id", "sid"):
-            v = getattr(sess, attr, None)
-            if v:
-                return str(v)
-    return None
-
-
-def _max_per_file(ctx: Any) -> int:
-    """单文件上限:storage.spill.max_per_file_bytes(默认 10485760,CFG §3.6)。"""
-    v = _cfg(_cfg_holder(ctx), "storage.spill.max_per_file_bytes",
-             DEFAULT_MAX_PER_FILE)
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_PER_FILE
-
-
-def _max_per_session_bytes(ctx: Any) -> int:
-    """会话 spill 区**总量**上限(字节):`storage.spill.max_per_session_mb`(默认 100MB)。
-
-    R24 接线:该键此前**零读取者**(L-20 死配置)⇒ 文档承诺的"会话总量 100MB 闸"在
-    实现里不存在,只有**单文件** 10MB 闸 ⇒ 同一会话可反复 spill 撑爆磁盘。
-    """
-    v = _cfg(_cfg_holder(ctx), "storage.spill.max_per_session_mb",
-             DEFAULT_MAX_PER_SESSION_MB)
-    try:
-        mb = int(v)
-    except (TypeError, ValueError):
-        mb = DEFAULT_MAX_PER_SESSION_MB
-    return max(0, mb) * 1024 * 1024
-
-
-def _session_dir_bytes(d: Any) -> int:
-    """会话 spill 目录内现有字节数(只读;不存在 → 0,不可读项跳过不放大)。"""
-    total = 0
-    try:
-        entries = list(d.iterdir())
-    except OSError:
-        return 0
-    for p in entries:
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _redact(ctx: Any, text: str) -> str:
-    """出口脱敏(INV-09):优先 ctx.redact(F016 单口);否则回落 config.redact。
-
-    ctx.redact 为装配层注入的脱敏单口(已含 log.redact_enabled 开关语义);
-    回落路径尊重 log.redact_enabled(默认 true),关则原文直写(配置层承诺的
-    出口策略,见 SECURITY §6)。
-    """
-    fn = getattr(ctx, "redact", None)
-    if callable(fn):
-        try:
-            return fn(text)
-        except Exception:                       # noqa: BLE001 脱敏自身失败不吞事实
-            log.warning("spill ctx.redact 异常,回落 config.redact")
-    holder = _cfg_holder(ctx)
-    if _cfg(holder, "log.redact_enabled", True) is False:
-        return text                             # 显式关闭全出口脱敏
-    try:
-        from pyharness.config import redact as _module_redact
-        return _module_redact(text)
-    except Exception:                           # noqa: BLE001 兜底:原文直写
-        log.warning("spill 脱敏不可用,原文落盘(检查 config.redact)")
-        return text
-
-
-def _bump_counter(ctx: Any, key: str, delta: int) -> None:
-    """已读量入计数器(防循环烧预算):支持 dict / bump(key, n) / 属性三形态。
-
-    ctx.counters 未接线时静默跳过(log debug)——读数不受影响,仅防循环闸
-    少一个数据源(预算/轮数闸另有兜底)。
-    """
-    c = getattr(ctx, "counters", None)
-    if c is None:
-        return
-    if isinstance(c, dict):                     # dict 形态(单测/装配可直挂)
-        c[key] = c.get(key, 0) + delta
-        return
-    bump = getattr(c, "bump", None)
-    if callable(bump):
-        try:
-            bump(key, delta)
-            return
-        except Exception:                       # noqa: BLE001 降级到属性形态
-            pass
-    try:                                        # 属性形态(UsageCounters 风格)
-        setattr(c, key, int(getattr(c, key, 0)) + delta)
-    except Exception:                           # noqa: BLE001 均不可用:忽略
-        log.debug("spill 计数器形态不支持 bump,key=%s", key)
-
-
-def _log_warn(ctx: Any, msg: str, *args: Any) -> None:
-    """告警出口:ctx.log.warning 优先,缺失回落模块 logger(偏离 8)。"""
-    clog = getattr(ctx, "log", None)
-    if clog is not None and callable(getattr(clog, "warning", None)):
-        try:
-            clog.warning(msg, *args)
-            return
-        except Exception:                       # noqa: BLE001
-            pass
-    log.warning(msg, *args)
-
-
-async def _maybe_await(r: Any) -> Any:
-    """异步上下文里的 await-if-awaitable(executor._spill_put 同款处理)。"""
-    import inspect
-    if inspect.isawaitable(r):
-        return await r
-    return r
-
-
 # ------------------------------------------------------------------ enter
+from pyharness.core.spill_policy import (log, SUMMARY_PREVIEW, DEFAULT_MAX_PER_FILE, DEFAULT_MAX_PER_SESSION_MB, DEFAULT_LIMIT, MAX_READ_LIMIT, MODE_PRIVATE, _MODE_PRIVATE_DIR, TOOL_NAME, COUNTER_KEY, SPILL_PATTERN, FILE_PREFIX, _REFUSED_ADVICE, _TOO_BIG_ADVICE, _WRITE_FAIL_ADVICE, _spill_root, _session_id, _max_per_file, _max_per_session_bytes, _session_dir_bytes, _redact, _bump_counter, _log_warn, _maybe_await)
+from pyharness.core.spill_lifecycle import (detach, _unsubscribe_purge, purge_session, subscribe_purge)
+
 async def enter(ctx: Any) -> Path:
     """会话首访建私有目录(F039,幂等):spill_dir/<session_id>,权限 700。
 
@@ -410,141 +266,9 @@ def _resolve_ref(ref: Any, ctx: Any) -> Optional[Path]:
 
 
 # ------------------------------------------------------------------ detach
-async def detach(ctx: Any) -> None:
-    """幂等摘除(DIS-SEAM §6.1 ⑤):摘读工具/摘定位器/摘订阅,文件不删。
-
-    会话关闭(ctx.close)时调用;**文件保留**——留给 F060 归档/repair 在会话
-    结束后仍可读的窗口,删除统一由 purge_session 在 session.finished 后执行。
-    摘除失败仅本地日志告警,不阻断会话关闭(文件系统无副作用残留)。
-    """
-    storage = getattr(ctx, "storage", None)
-    # ---- 1) 幂等闸:locator 自报未挂载即已摘;无 locator 面按挂载痕迹判
-    if storage is not None:
-        gate = getattr(storage, "_unmounted", None)
-        if callable(gate):
-            try:
-                if await _maybe_await(gate("spill")):
-                    return                        # 已摘除(幂等早退)
-            except Exception:                     # noqa: BLE001 locator 异常:
-                pass                              # 继续尽力摘除,不阻断
-        else:
-            services = getattr(storage, "services", None) or {}
-            if not (hasattr(storage, "spill") or "spill" in services):
-                return                            # 无 spill 挂载痕迹 → 已摘
-    # ---- 2) 摘 LLM 可见读工具(TLB-802 = 已摘,静默幂等)
-    tools = getattr(ctx, "tools", None)
-    if tools is not None:
-        unreg = getattr(tools, "unregister", None)
-        if not callable(unreg):
-            unreg = getattr(tools, "unregister_definition", None)
-        if callable(unreg):
-            try:
-                await _maybe_await(unreg(TOOL_NAME))
-            except PyHError as e:
-                if e.code != "TLB-802":           # 已摘(重入/双摘)→ 静默
-                    _log_warn(ctx, "spill detach unregister 失败 code=%s", e.code)
-            except Exception as e:                # noqa: BLE001
-                _log_warn(ctx, "spill detach unregister 异常: %s", e)
-    # ---- 3) 摘定位器(ctx.storage.spill;真实 locator 走 unmount)
-    if storage is not None:
-        unmount = getattr(storage, "unmount", None)
-        if callable(unmount):
-            try:
-                await _maybe_await(unmount("spill"))
-            except Exception as e:                # noqa: BLE001
-                _log_warn(ctx, "spill detach unmount 失败: %s", e)
-        elif hasattr(storage, "spill"):           # 无 locator API:直接摘属性
-            try:
-                delattr(storage, "spill")
-            except Exception as e:                # noqa: BLE001
-                _log_warn(ctx, "spill detach 摘除属性失败: %s", e)
-    # ---- 4) 摘 session.finished 清理订阅(按会话属主)
-    _unsubscribe_purge(ctx)
-    log.info("spill detached(文件保留,F060 读窗口)")
-
-
-def _unsubscribe_purge(ctx: Any) -> None:
-    """按会话属主摘除 purge 订阅(owner=f"spill:{sid}";幂等)。"""
-    sid = _session_id(ctx)
-    if not sid:
-        return
-    bus = getattr(ctx, "bus", None)
-    drop = getattr(bus, "unsubscribe_all", None)
-    if callable(drop):
-        try:
-            drop(f"spill:{sid}")
-        except Exception as e:                    # noqa: BLE001
-            _log_warn(ctx, "spill purge 订阅摘除失败: %s", e)
 
 
 # ------------------------------------------------------------------ purge
-async def purge_session(session_id: str, ctx: Any = None) -> None:
-    """清理策略主体(F039 随会话生命周期/I-3):删除该会话 spill 目录全部文件。
-
-    先 containment 校验(只删 spill 根下本会话子目录,逃逸即 PERS-222 拒);
-    目录不存在幂等;删除失败记日志+告警不阻断(F060 repair 兜底残留)。
-    订阅 session.finished 后由本函数收口"spill 随会话生命周期清理"。
-    """
-    root = _spill_root(ctx)
-    if root is None:
-        raise_code("PERS-222", session=session_id,
-                   advice="spill 根未配置,无法校验清理目标,已拒绝")
-    root = root.resolve()
-    target = (root / session_id).resolve()       # 归一后比对
-    try:
-        target.relative_to(root)                 # containment 单点(Windows
-    except ValueError:                           # 大小写不敏感,偏离 4)
-        raise_code("PERS-222", session=session_id,
-                   advice="清理目标逃逸 spill 根,已拒绝")
-    if target == root:                           # 目标即根(空/`.` session)→ 拒
-        raise_code("PERS-222", session=session_id,
-                   advice="清理目标逃逸 spill 根,已拒绝")
-    try:
-        if target.exists():
-            for f in target.glob(SPILL_PATTERN):  # 逐文件删(可留审计计数)
-                f.unlink(missing_ok=True)
-            for f in target.glob(f"{SPILL_PATTERN}.tmp"):   # 残留 tmp(偏离 5)
-                f.unlink(missing_ok=True)
-            target.rmdir()                        # 空目录收口
-        log.info("spill purge done session=%s dir=%s", session_id, target)
-    except OSError as e:                          # 残留不致命(F060 兜底)
-        _log_warn(ctx, "spill purge failed session=%s: %s", session_id, e)
-
-
-def subscribe_purge(ctx: Any, session_id: Optional[str] = None) -> Optional[str]:
-    """订阅本会话 session.finished → purge_session(返回 owner 标记,可摘除)。
-
-    装配于 Provider.enter(生命周期 enter→announce→detach);bus 未接线/无
-    subscribe 面 → 返回 None(清理留待装配层兜底,文件由 F060 repair 覆盖)。
-    """
-    sid = session_id or _session_id(ctx)
-    if not sid:
-        return None
-    bus = getattr(ctx, "bus", None)
-    subscribe = getattr(bus, "subscribe", None)
-    if not callable(subscribe):
-        return None
-    owner = f"spill:{sid}"
-
-    async def _on_finished(type_: str, payload: Any) -> None:  # noqa: ARG001
-        """session.finished 回调:仅清本会话(总线跨会话共享,按 payload 过滤)。
-
-        声明 async:总线 _dispatch 对协程函数 handler 会 await(同步函数返回
-        协程则不会被等待,产生 never-awaited 告警)。
-        """
-        p_sid = getattr(payload, "session_id", None)
-        if p_sid is None and isinstance(payload, dict):
-            p_sid = payload.get("session_id")
-        if p_sid is not None and str(p_sid) != sid:
-            return                                # 其他会话的 finished:不动
-        await purge_session(sid, ctx)             # 删除本会话 spill 目录
-
-    try:
-        bus.subscribe("session.finished", _on_finished, owner=owner)
-    except Exception as e:                        # noqa: BLE001 订阅失败不致命
-        _log_warn(ctx, "spill purge 订阅失败: %s", e)
-        return None
-    return owner
 
 
 # ------------------------------------------------------------------ register

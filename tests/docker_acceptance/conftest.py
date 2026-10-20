@@ -4,8 +4,11 @@ from pathlib import Path
 
 def pytest_sessionfinish(session, exitstatus):
     config=session.config
-    if not config.getoption('--real-docker'): return
-    target=Path(config.option.basetemp).parent.parent/'artifacts'/'docker-runtime-summary.json'
+    if not config.getoption('--real-docker') or config.option.collectonly: return
+    if config.option.basetemp is None:
+        target=config._tmp_path_factory.getbasetemp()/'docker-runtime-summary.json'
+    else:
+        target=Path(config.option.basetemp).parent.parent/'artifacts'/'docker-runtime-summary.json'
     target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps({'real_docker':True,'exit_code':int(exitstatus),
         'checks':getattr(config,'docker_evidence',[]),'real_model':False},indent=2)+'\n',encoding='utf-8')

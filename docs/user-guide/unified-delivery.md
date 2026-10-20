@@ -57,3 +57,5 @@ wheel 与 sdist 必须保留运行资源、入口和 MIT/README 元数据；分�
 升级前保留原始源码（含未提交文件）、配置及受权数据的私有完整副本，核对摘要后再运行新版本。恢复时先正常关闭本任务启动的服务，确认资源已回收，再从副本恢复到新的专用目录；不得覆盖仍运行的目录，不删除原始工作树。旧运行的未知结果先按原命令键查询，不能直接重放外部动作。
 
 PDF 仅支持有文本层的受控导入、物理页和精确文本引用，不提供 OCR 或像素级排版还原。自动化 Qt 输入不是物理 IME/DPI 实测。测试中的模型为合成适配器，不代表付费外部服务、个人微信或飞书生产账户已联通。租户、主体、来源与操作审批的产品安全约束仍然生效。
+
+Linux 实际容器门运行 `tests/docker_acceptance/test_real_sandbox.py`，当前13项必须全部实跑且零跳过。Windows 独占写回的真实删除收据测试保留在 `test_writeback_delete.py`，须在有真实 Linux 容器后端的 Windows 宿主运行：`python -m pytest tests/docker_acceptance/test_writeback_delete.py --real-docker -o addopts=`。本轮本机已实跑通过1项、零跳过；它不能在Linux上以条件跳过冒充完成。两平台的原断言和每用例超时保持不变。

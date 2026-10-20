@@ -11,6 +11,9 @@ Hermes 同款机制(薄版):技能库根(skills/)下每个技能一个文件夹,
 from __future__ import annotations
 
 import logging
+import copy
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -51,19 +54,33 @@ class SkillManager:
         self._session = session
         self._bus = bus
         self._index: dict[str, dict] = {}
+        self._source_hashes: dict[str, str] = {}
+        self._frozen = False
+        self._loaded_views: dict[str, dict] = {}
         self.scan()
 
     # ------------------------------------------------------------ 索引
     def scan(self) -> int:
         """重建索引(启动/热重载调用);格式坏或重复名的技能跳过并记日志。"""
+        if self._frozen:
+            return len(self._index)
+        from pyharness.core.skill_registry import _safe_under
+        from pyharness.errors import PyHError
         found: dict[str, dict] = {}
+        hashes: dict[str, str] = {}
         for root in self.roots:
             if not root.exists():
                 continue
             for md in sorted(root.glob("*/SKILL.md")):
                 try:
-                    text = md.read_text(encoding="utf-8")
-                except OSError as e:                       # noqa: BLE001
+                    target = _safe_under(root, md.parent.name, 'SKILL.md')
+                    raw = target.read_bytes()
+                    if _safe_under(root, md.parent.name, 'SKILL.md') != target:
+                        continue
+                    # Preserve the original read_text universal-newline view;
+                    # retain the physical bytes separately for source identity.
+                    text = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+                except (OSError, UnicodeError, PyHError) as e:
                     log.warning("skill read failed %s: %s", md, e)
                     continue
                 meta = _parse_frontmatter(text)
@@ -80,8 +97,47 @@ class SkillManager:
                     "dir": str(md.parent),
                     "body": self._strip_front(text),
                 }
+                hashes[name] = hashlib.sha256(raw).hexdigest()
         self._index = found
+        self._source_hashes = hashes
         return len(found)
+
+    def frozen_copy(self, names=None):
+        """Private loaded index copy; explicit classic scans remain available."""
+        clone = SkillManager([], session=self._session, bus=self._bus)
+        chosen = list(self._index) if names is None else list(names)
+        for name in chosen:
+            self.load(name)  # Original unknown-name contract.
+        clone._index = {name: copy.deepcopy(self._index[name]) for name in chosen}
+        clone._source_hashes = {name: self._source_hashes[name] for name in chosen}
+        clone._loaded_views = {name: copy.deepcopy(self._loaded_views[name])
+                               for name in chosen if name in self._loaded_views}
+        clone._frozen = True
+        return clone
+
+    @classmethod
+    def from_loaded_snapshot(cls, snapshot):
+        """Restore a server-owned bounded load view, without rereading its path."""
+        clone = cls([])
+        name = snapshot['name']
+        view = {k: snapshot[k] for k in ('name', 'description', 'dir', 'body')}
+        clone._index[name] = copy.deepcopy(view)
+        clone._source_hashes[name] = snapshot['source_sha256']
+        clone._loaded_views[name] = copy.deepcopy(view)
+        clone._frozen = True
+        if clone.snapshot(name)['loaded_sha256'] != snapshot['loaded_sha256']:
+            raise_code('SKL-901', name=name, advice='固定技能视图校验失败')
+        return clone
+
+    def snapshot(self, name: str) -> dict:
+        """Describe exact loaded text separately from complete source identity."""
+        loaded = self.load(name)
+        raw = json.dumps({k: loaded[k] for k in ('name', 'description', 'body')},
+                         ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return {**loaded, 'source_sha256': self._source_hashes[name],
+                'loaded_sha256': hashlib.sha256(raw).hexdigest(),
+                'truncated': len(self._index[name]['body']) > _BODY_CAP,
+                'frozen': self._frozen}
 
     @staticmethod
     def _strip_front(text: str) -> str:
@@ -100,6 +156,8 @@ class SkillManager:
 
     def load(self, name: str) -> dict:
         """装载技能全文;未知名 → SKL-901(advice 指向 skill.list)。"""
+        if name in self._loaded_views:
+            return copy.deepcopy(self._loaded_views[name])
         m = self._index.get(name)
         if m is None:
             raise_code("SKL-901", name=name,

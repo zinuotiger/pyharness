@@ -74,6 +74,10 @@ class EventStreamHub:
         else:
             sid = _env_session_id(payload)  # 持久/带作用域瞬时事件按会话过滤
             seq = getattr(payload, "seq", None)
+        from pyharness.application.product_execution_sessions import is_product_session
+        # Legacy SSE has tenant-level subscriptions, not product/source authority.
+        # Product views poll their guarded exact execution endpoint instead.
+        if is_product_session(sid):return
         text = _serialize_event(type_, payload)
         # 租户归属:优先**落盘信封**(GAP-10,免疫重启/跨租户 sid 撞名),回落进程内映射
         event_tenant = event_tenant_of(payload, session_id=sid or "")

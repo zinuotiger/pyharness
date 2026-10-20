@@ -16,9 +16,24 @@ import hashlib
 import stat
 from typing import Protocol, Any
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Callable
 
 from pyharness.core.sandbox_models import SandboxProfile, SandboxRecord
 from pyharness.errors import PyHError
+
+
+@dataclass(frozen=True)
+class WorkspaceInputPreparation:
+    """Trusted in-process application transfer; never accepted from client JSON."""
+    digest: str
+    populate: Callable[[Path],None]
+    verify: Callable[[],None]
+    destination: Callable[[Path],None]
+
+    def __post_init__(self):
+        if not re.fullmatch(r'[0-9a-f]{64}',self.digest) or not all(callable(f) for f in (self.populate,self.verify,self.destination)):
+            raise ValueError('invalid trusted workspace preparation')
 
 
 def fail(code: str, detail: str = ''):
@@ -379,45 +394,22 @@ class SandboxManager:
         self.lock = asyncio.Lock()
         self.processes = {}
 
-    async def create(self, run_id: str, profile: SandboxProfile, source: Path | None = None):
-        if profile.mode == 'disabled':
-            fail('sandbox_disabled')
-        async with self.lock:
-            ident = 'ph-' + uuid.uuid4().hex
-            record = SandboxRecord(sandbox_id=ident, run_id=run_id, backend=profile.mode,
-                status='creating', workspace_mode=profile.workspace_mode, cpus=profile.cpus,
-                memory_mb=profile.memory_mb, pids_limit=profile.pids_limit,
-                network='none' if profile.mode in ('isolated','remote') else 'host_unrestricted')
-            root = safe_path(self.root, ident)
-            root.mkdir(parents=True)
-            try:
-                if source is not None and profile.workspace_mode == 'private_copy':
-                    private_copy(source, root)
-                elif profile.workspace_mode == 'private_git_clone':
-                    if source is None: fail('workspace_clone_unavailable')
-                    await private_git_clone(source,root)
-                if os.name != 'nt':
-                    # Private container copy is writable to the non-root container uid.
-                    for item in [root, *root.rglob('*')]:
-                        if os.getuid() == 0:
-                            os.chown(item, 65534, 65534)
-                        item.chmod(0o700 if item.is_dir() else 0o600)
-                await self.backends[profile.mode].create(record, root, profile)
-                record.status = 'running'
-            except BaseException as original:
-                # A backend may create a resource before reporting failure.
-                # Keep an owned handle when cleanup fails, so close/retry can reap it.
-                try:
-                    if record.status=='cleanup_failed' or not (isinstance(original,PyHError) and original.code=='sandbox_unavailable'):
-                        await asyncio.shield(self.backends[profile.mode].destroy(record))
-                    shutil.rmtree(root)
-                except BaseException:
-                    record.status='cleanup_failed'
-                    record.error_code='sandbox_destroy_failed'
-                    self.records[ident]=record
-                raise
-            self.records[ident] = record
-            return record
+    async def create(self, run_id: str, profile: SandboxProfile, source: Path | None = None, *, prepare_inputs: WorkspaceInputPreparation | None = None):
+        if prepare_inputs is not None:
+            if not isinstance(prepare_inputs,WorkspaceInputPreparation) or profile.mode!='isolated' or profile.workspace_mode!='empty' or source is not None:
+                fail('sandbox_operation_unsupported','prepared input requires isolated empty workspace and no host source')
+            prepare_inputs.verify()
+        from pyharness.core.sandbox_creation import create_owned
+        return await create_owned(self, run_id, profile, source, prepare_inputs)
+
+    async def create_for_attempt(self, run_id, profile, prepare_inputs, *, authorize):
+        if not isinstance(prepare_inputs, WorkspaceInputPreparation) or not callable(authorize):
+            fail('sandbox_operation_unsupported', 'trusted preparation and authority callback required')
+        authorize()
+        prepare_inputs.verify()
+        effective = profile.model_copy(update={'workspace_mode': 'empty'})
+        from pyharness.core.sandbox_creation import create_owned
+        return await create_owned(self, run_id, effective, None, prepare_inputs, authorize=authorize)
 
     def workspace(self, ident: str) -> Path:
         if ident not in self.records or self.records[ident].status != 'running':
@@ -426,6 +418,17 @@ class SandboxManager:
 
     @asynccontextmanager
     async def snapshot(self, ident):
+        async with self._snapshot_scope(ident,upload_remote=True) as root:
+            yield root
+
+    @asynccontextmanager
+    async def observe(self,ident):
+        """Read an owned backend snapshot; never upload a remote working copy."""
+        async with self._snapshot_scope(ident,upload_remote=False) as root:
+            yield root
+
+    @asynccontextmanager
+    async def _snapshot_scope(self,ident,*,upload_remote):
         record=self.records[ident]
         backend=self.backends[record.backend]
         if record.backend=='isolated':
@@ -437,7 +440,7 @@ class SandboxManager:
         finally:
             if record.backend=='isolated':
                 await backend.thaw(record)
-            elif record.backend=='remote':
+            elif record.backend=='remote' and upload_remote:
                 await backend.upload(record)
 
     async def file_operation(self, ident, name, args):

@@ -58,6 +58,8 @@ class Accounts:
                     tenant TEXT NOT NULL, expires REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS failures (
                     username TEXT PRIMARY KEY, count INTEGER NOT NULL, expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS local_operators (
+                    user_id TEXT PRIMARY KEY);
             ''')
         self.path.chmod(0o600)
 
@@ -100,6 +102,21 @@ class Accounts:
             raise AccountError('account_exists', 409) from None
         return {'user_id':ident, 'username':username, 'tenant':tenant, 'role':'owner'}
 
+    def provision_operator(self, username, password):
+        """Create a local administrator through trusted local setup, never HTTP."""
+        username = self.username(username)
+        if not isinstance(password, str) or not 12 <= len(password) <= 256:
+            raise AccountError('password_length')
+        salt, ident = secrets.token_bytes(16), 'u-'+uuid.uuid4().hex
+        digest = self.password_hash(password, salt)
+        try:
+            with self.db() as db:
+                db.execute('INSERT INTO users VALUES (?,?,?,?)', (ident, username, salt, digest))
+                db.execute('INSERT INTO local_operators VALUES (?)', (ident,))
+        except sqlite3.IntegrityError:
+            raise AccountError('account_exists', 409) from None
+        return {'user_id':ident, 'username':username, 'tenant':'default', 'role':'operator'}
+
     def login(self, username, password, tenant=None):
         username = self.username(username)
         if not isinstance(password, str) or len(password) > 256:
@@ -123,6 +140,8 @@ class Accounts:
         with self.db() as db:
             memberships = db.execute('SELECT tenant,role FROM members WHERE user_id=? ORDER BY tenant',
                                      (row['id'],)).fetchall()
+            if db.execute('SELECT 1 FROM local_operators WHERE user_id=?', (row['id'],)).fetchone():
+                memberships = [{'tenant':'default', 'role':'operator'}, *memberships]
             membership = next((m for m in memberships if tenant is None or m['tenant'] == tenant), None)
             if membership is None:
                 raise AccountError('invalid_credentials', 401)
@@ -141,10 +160,15 @@ class Accounts:
         if not isinstance(token, str) or not 20 <= len(token) <= 128:
             return None
         with self.db() as db:
-            row = db.execute('''SELECT u.id AS user_id,u.username,s.tenant,m.role FROM sessions s
+            row = db.execute('''SELECT u.id AS user_id,u.username,s.tenant,
+                CASE WHEN o.user_id IS NOT NULL AND s.tenant='default'
+                     THEN 'operator' ELSE m.role END AS role FROM sessions s
                 JOIN users u ON u.id=s.user_id
-                JOIN members m ON m.user_id=s.user_id AND m.tenant=s.tenant
-                WHERE s.digest=? AND s.expires>?''', (self.digest(token),time.time())).fetchone()
+                LEFT JOIN members m ON m.user_id=s.user_id AND m.tenant=s.tenant
+                LEFT JOIN local_operators o ON o.user_id=s.user_id
+                WHERE s.digest=? AND s.expires>?
+                AND (m.user_id IS NOT NULL OR (o.user_id IS NOT NULL AND s.tenant='default'))''',
+                (self.digest(token),time.time())).fetchone()
         return dict(row) if row else None
 
     def logout(self, token):

@@ -77,3 +77,15 @@
 | EVENT-SCHEMA.md §3.4.7 | 修复目标 |
 | pyharness/errors.py | 代码对齐对象 |
 | PRD-Core.md F019/F020 | 错误码体系权威 |
+
+## S05固定PDF解析适配器影响登记
+
+| 项目 | 处理与验证 |
+|---|---|
+| 依据 | 当前会话已授权持续完成S05–S19及文本层PDF；[ADR-024](decisions/ADR-024-versioned-project-documents.md)记录窄范围例外 |
+| 原冲突 | ADR-005/PRD-Core §4.5原“唯一多进程出口”为工具；不可信PDF需要资源可回收的固定解析载体 |
+| 同步范围 | PRD-Core §4.5、ADD对应补充、CONSTRAINTS-01 §9；不修改核心Agent/队列/SessionLog单进程语义 |
+| 权限与事实 | 仅SourceGrant下明确选择、预览确认的私有捕获；无用户命令/网络/PDF动作/第二事件真源，原guard/审批不变 |
+| 资源边界 | 512MiB、10秒、有界管道、200物理页、2MiB原件、每页2MiB及累计8MiB解压流、96KiB文字、400块；超时取消销毁 |
+| 当前证据 | 任务外pyharness-s05-20261018的full.xml、limits-probe.json、HTTP/独立安装；单流、多流及累计页超限回归不保存正文/控制事实 |
+| 文档对齐 | 最后行为修复后的运行时/测试/依赖冻结不变；PRD/ADD/本登记的纯文档补充单列documentation-amendment.json，不冒充重新执行全量测试 |

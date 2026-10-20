@@ -104,9 +104,15 @@ class ModelRequests:
                                                                  tools), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
         observation = {}
+        async def invoke_transport():
+            from pyharness.core.context_observation import observe_transport_request
+            await observe_transport_request(ctx,req,transport,request_event.seq)
+            from pyharness.core.product_model_gate import check_model_attempt
+            await check_model_attempt(ctx, self.model, 'chat')
+            return await transport.complete(req)
         try:
             raw = await observed_wait(           # 总时长闸(F017);只取消本任务
-                transport.complete(req), timeout=self.timeout.total_s, observation=observation)
+                invoke_transport(), timeout=self.timeout.total_s, observation=observation)
         except Exception as e:                      # noqa: BLE001 传输细分统一归一(ADI §7.2)
             code = normalize_exc(e)                 # 非 API 异常:原样上抛(不上 LLM 码)
             if code == "LLM-303":
@@ -149,10 +155,16 @@ class ModelRequests:
         from pyharness.core.llm_diagnostics import observed_wait
         observation = {}
         progress = {}
+        async def invoke_stream():
+            from pyharness.core.context_observation import observe_transport_request
+            await observe_transport_request(ctx,req,transport,request_event.seq)
+            from pyharness.core.product_model_gate import check_model_attempt
+            await check_model_attempt(ctx, self.model, 'chat_stream')
+            stream = transport.stream(req)
+            return await accumulate_stream(stream, ctx, progress=progress)
         try:
-            stream = transport.stream(req)          # 返回异步迭代器(鸭子;可注入替身)
             text, calls, finish, usage = await observed_wait(
-                accumulate_stream(stream, ctx, progress=progress), timeout=self.timeout.total_s, observation=observation)
+                invoke_stream(), timeout=self.timeout.total_s, observation=observation)
         except BaseException as e:                 # Include cancellation after emitted tokens.
             partial = ''.join(progress.get('parts', [])) + ''.join(
                 slot['arguments'] for slot in progress.get('slots', {}).values())

@@ -30,6 +30,8 @@ def parser():
     result.add_argument('--data-dir',required=True,type=Path)
     result.add_argument('--port',type=int,default=0)
     result.add_argument('--open-browser',action='store_true')
+    result.add_argument('--create-admin', metavar='USERNAME',
+                        help='Create a local administrator for this data directory, then exit')
     return result
 
 
@@ -63,6 +65,18 @@ async def serve(args):
 def main(argv=None):
     arguments = parser()
     args = arguments.parse_args(argv)
+    if args.create_admin:
+        from getpass import getpass
+        from pyharness.application.accounts import Accounts, AccountError
+        password = getpass('Administrator password (at least 12 characters): ')
+        if password != getpass('Confirm password: '):
+            arguments.error('Passwords do not match')
+        try:
+            account = Accounts(args.data_dir).provision_operator(args.create_admin, password)
+        except AccountError as exc:
+            arguments.error(exc.code)
+        print(f"Local administrator created: {account['username']}. Sign in at /login.")
+        return 0
     if not 0 <= args.port <= 65535:
         arguments.error('--port must be between 0 and 65535')
     # Uvicorn re-raises the original signal after closing HTTP connections.

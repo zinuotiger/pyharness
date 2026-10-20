@@ -33,6 +33,8 @@ class _OpenAICompatHTTPTransport:
             return {k: ('unknown' if isinstance(v, str) and api_key and api_key in v else v)
                     for k, v in d.items()}
         self._safe_diagnostics = safe_metadata
+        from pyharness.core.context_observation import public_request
+        self._public_context_view = lambda req: public_request(req,layer='transport_payload',known_secrets=(api_key,))
         self._base_url = base_url.rstrip("/")       # 裸域或 /v1 结尾(禁写 /chat/completions)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,

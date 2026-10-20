@@ -43,6 +43,9 @@ class WindowTabs:
         layout.addWidget(self.jobs_table)
         self.job_cancel_btn = QPushButton("取消选中 Job")
         layout.addWidget(self.job_cancel_btn)
+        from .product_execution_control import ProductExecutionControl
+        self.product_execution_control = ProductExecutionControl(self.controller, page)
+        layout.addWidget(self.product_execution_control)
         self.tabs.addTab(page, "Jobs")
 
     def _build_schedule_tab(self) -> None:

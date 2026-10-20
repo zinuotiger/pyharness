@@ -189,6 +189,31 @@ class DesktopSessionManager:
         self._stores[sid] = store
         return sid
 
+    async def create_product_session(self, sid, binding, *, task_id):
+        """Trusted product seam: bind the durable owner before publishing a handle."""
+        from pydantic import TypeAdapter
+        from pyharness.application.execution_contracts import ExecutionSessionId
+        from pyharness.application.execution_effects import confirmed_events
+        from pyharness.events.payload_product_execution import ExecutionLifecyclePayload
+        sid = TypeAdapter(ExecutionSessionId).validate_python(sid, strict=True)
+        binding = ExecutionLifecyclePayload.model_validate(binding).model_dump()
+        if binding['phase'] != 'bound':raise_code('EVT-100', reason='product_execution_binding_required')
+        async with self._lock_for(sid):
+            if sid in self._logs or self._path(sid).exists():
+                raise_code('EVT-101', reason='product_execution_session_reserved')
+            store = await self._open_store(sid)
+            try:
+                log_ = await open_session(sid, store, tenant_id=self.tenant_id)
+                self._attach_persistence(log_, store, sid)
+                await log_.append('session.created', {'title': '任务执行', 'model': self._default_model()}, actor='system', sync=True)
+                event = await log_.append('execution.lifecycle', binding, actor='system', task_id=task_id, sync=True)
+                if confirmed_events(log_)[-1] != event:raise_code('PERS-202', reason='product_execution_binding_unconfirmed')
+            except BaseException as primary:
+                self._rollback_open(sid, store, primary)
+                raise
+            self._logs[sid] = log_; self._stores[sid] = store
+            return log_
+
     def _default_model(self) -> str:
         cfg = self.config
         llm = getattr(cfg, "llm", None)

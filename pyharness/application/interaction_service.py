@@ -12,6 +12,16 @@ from pyharness.core.lifecycle import admitted
 class InteractionService:
     """InteractionService responsibility; state is owned by the composing facade."""
 
+    async def _product_interaction_access(self, sid):
+        from pyharness.application.product_execution_sessions import is_product_session
+        if is_product_session(sid):await self.require_session(sid)
+
+    async def _product_interaction_visible(self, sid):
+        from pyharness.errors import PyHError
+        try:await self._product_interaction_access(sid)
+        except PyHError:return False
+        return True
+
     @admitted
     async def pending_approvals(self) -> dict:
         out: list[dict] = []
@@ -20,8 +30,9 @@ class InteractionService:
             pending = getattr(p, "_pending", None)
             if not isinstance(pending, dict):
                 continue
-            for aid, req in pending.items():
+            for aid, req in list(pending.items()):
                 identity = (getattr(req, 'session_id', ''), aid)
+                if not await self._product_interaction_visible(identity[0]):continue
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -77,6 +88,7 @@ class InteractionService:
             raise_code("EVT-100", field="decision", decision=decision,
                        advice="decision 取值 approve/deny")
         provider = self.provider_owning(aid, sid=sid)
+        await self._product_interaction_access(sid or self._approval_sid_of(provider, aid))
         fn = (getattr(provider, f"{decision}_async", None)
               or getattr(provider, decision, None))
         if not callable(fn):
@@ -118,6 +130,7 @@ class InteractionService:
                 item = dict(item)
                 item["session_id"] = self.sid_of_ask(p) or getattr(
                     getattr(p, "_session", None), "sid", "")
+                if not await self._product_interaction_visible(item['session_id']):continue
                 out.append(item)
         out.sort(key=lambda x: (str(x.get("session_id") or ""), x["ask_id"]))
         return {"pending": out, "count": len(out)}
@@ -140,6 +153,8 @@ class InteractionService:
                        hint="多个会话存在同 ask_id;请指定会话")
         if len(matches) == 1:
             provider = matches[0]
+            psid = self.sid_of_ask(provider) or getattr(getattr(provider, '_session', None), 'sid', '')
+            await self._product_interaction_access(psid)
             fn = getattr(provider, "answer_async", None) or provider.answer
             res = fn(int(ask_id), choice=choice, text=text, by=self.channel)
             ok = await res if inspect.isawaitable(res) else res

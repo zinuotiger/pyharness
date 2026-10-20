@@ -1,4 +1,14 @@
 /* The workbench is the sole feature shortcut outside Settings. */
+[data-configuration-history]{min-width:0;overflow-wrap:anywhere}
+[data-configuration-history] [hidden]{display:none!important}
+[data-configuration-history] pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-height:none;overflow:visible}
+[data-configuration-history] details{min-width:0;margin-block:12px}
+[data-configuration-history] select{max-width:100%;min-width:0;width:100%}
+[data-configuration-history] [data-ch-increases]:empty{display:none}
+[data-browser-workbench]{min-width:0;overflow-wrap:anywhere}
+[data-browser-workbench] pre{max-height:none;overflow:visible;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+[data-browser-workbench] [hidden]{display:none!important}
+[data-browser-workbench] input,[data-browser-workbench] textarea{max-width:100%;min-width:0;box-sizing:border-box}
 .sidebar{width:280px;border-radius:0}.main{margin-left:280px;min-width:0}
 .header{gap:24px}.header .search{min-width:0}.header .search input{min-width:0;width:100%}.header-actions{flex-shrink:0}
 .main :is(.row,.grow,.toolbar,.list-grid,.card,.page-title,.chat-top){min-width:0}.main :is(p,small,.failure,.warning,.inspector,.page-title){overflow-wrap:anywhere}

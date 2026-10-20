@@ -1,3 +1,5 @@
+> **统一版本更新（2026-10-21）**：运行、验证和恢复入口见[统一版本说明](docs/user-guide/unified-delivery.md)。第8–18步已逐阶段验收；S18统一版本全量4,429项（4,399通过、30原条件跳过、0失败），覆盖率88.12%，16核心最低84.95%。最终交付须核对对应源码和新提交CI，历史测试数不能替代。下文旧日期阶段状态保留为历史记录。真实Docker与受控浏览器已有阶段证据；付费模型质量、生产渠道账户、物理IME/DPI不由合成模型或自动化输入证明。
+
 # PyHarness Engineering Release Candidate
 
 Package version remains 0.1.0. The engineering candidate is pushed to its

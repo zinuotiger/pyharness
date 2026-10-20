@@ -1,5 +1,9 @@
 # specs/events.py.md — 编码规格
 
+S08增量：`ExecutionCheckpointPayload` / `execution.checkpoint`、`execution.correction_applied`及实际状态伴随事实`execution.state_checkpoint`强同步注册，当前89类型/22强同步（保留全部旧86/19）。逻辑检查点绑定本人日志前缀与实际消息摘要，状态伴随事实绑定精确checkpoint与私有blob；只观察、不授予工具重放，见[ADR-027](../decisions/ADR-027-execution-checkpoints.md)。
+
+产品控制增量：`WorkspaceResourceCommittedPayload` / `workspace.resource_committed` 已注册且强同步；最初资源约束见 [workspace-control.md](workspace-control.md)，当前全部严格resource_kind及对应ID分派以`events/payload_workspace.py`为准。上下文、Git/非Git输入、文档/引用/交付、RunAttempt、执行授权和取消沿同一控制事实扩展。SourceSnapshot等不可变提交只允许revision=1/parent_revision=0；task_definition保留schema1不可执行TaskContextReference，并支持schema2正式ProductTask，二者保存都不自动执行。事件只含摘要引用，不含清单正文、路径或创建者私有定义。当前完整词表89类型、强同步22类型（S07执行/私有委派见ADR-026，S08检查点见ADR-027），新增资源种类不增加事件名。
+
 > 目标代码:pyharness/events/(envelope.py 信封模型、vocab.py 词表注册、payload.py 各事件负载模型),即 PRD-Core §3 事件协议的实现载体,供 pyharness/core/session.py(F009)唯一写入口调用。AI 编码 Agent 只读本文件即可实现事件校验全链。权威源:PRD-Core.md §3.1-§3.8(信封/词表/seq/违规表)、§8.2;EVENT-SCHEMA.md(字段级权威展开);ERR.md §2.2(EVT-1xx);DIS-SEAM.md §4.4(全流程与保证)。全中文,仅 Python,禁 TS。
 
 ## 模块职责

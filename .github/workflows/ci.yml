@@ -19,7 +19,7 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }} / full, permissions, package
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:

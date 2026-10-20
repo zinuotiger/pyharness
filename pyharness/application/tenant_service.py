@@ -43,6 +43,14 @@ class TenantService:
     def tenant_root(self) -> Path:
         return self._storage_root() / "tenants" / self.tenant_id
 
+    @property
+    def skill_catalog_root(self) -> Path:
+        """Actual tenant skill root, without acquiring model/secret state."""
+        if self.tenant_id != 'default':
+            return self.tenant_root() / 'skills'
+        cfg = _session_module()._cfg_of(self.ctx)
+        return Path(cfg.skills.dir).expanduser()
+
     def _tenant_sessions_dir(self, ctx: Any = None) -> Path:
         """本租户的**会话目录**—— 唯一派生点(R24 收口)。
 
@@ -79,18 +87,13 @@ class TenantService:
             storage = dict(raw.get("storage") or {})
             storage["db_path"] = str(self.tenant_root() / "index.db")
             raw["storage"] = storage
+            skills = dict(raw.get('skills') or {})
+            skills['dir'] = str(self.skill_catalog_root)
+            raw['skills'] = skills
         if profile is not None:
             llm = dict(raw.get("llm") or {})
-            llm.update({
-                "model": profile["model"],
-                "base_url": profile["base_url"],
-                "api_key": f"tenant:{self.tenant_id}:{profile['id']}",
-                "temperature": profile.get("temperature",
-                                           llm.get("temperature", 0.7)),
-                "max_tokens": profile.get("max_tokens",
-                                          llm.get("max_tokens", 4096)),
-                "fallback_models": list(profile.get("fallback_models") or []),
-            })
+            from pyharness.application.model_profile_configuration import profile_values
+            llm.update(profile_values(profile, self.tenant_id, llm))
             raw["llm"] = llm
         from pyharness.config import Settings
         return Settings.model_validate(raw)

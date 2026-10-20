@@ -8,6 +8,7 @@ import secrets
 from fastapi import Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pyharness.application.accounts import Accounts, AccountError
+from pyharness.errors import PyHError
 from .auth_cookies import cookie_name, read_cookie
 
 COOKIE = 'pyharness_account'
@@ -28,8 +29,12 @@ def principal(request):
     return getattr(getattr(request, 'state', None), 'account', None)
 
 
+def operator_principal(request):
+    return getattr(getattr(request, 'state', None), 'operator_account', None)
+
+
 def denied(code='account_forbidden', status=403):
-    return JSONResponse({'code':code},status_code=status)
+    return JSONResponse({'code':code},status_code=status,headers={'Cache-Control':'no-store'})
 
 
 async def serve_with_quota(app, request, call_next):
@@ -41,6 +46,15 @@ async def serve_with_quota(app, request, call_next):
     async with locks.setdefault(account['tenant'], asyncio.Lock()):
         path = request.url.path
         platform = app.service.platform
+        execution_start=re.fullmatch(r'/api/v1/projects/(p-[0-9a-f]{16})/executions',path) if request.method=='POST' else None
+        repeated_execution=False
+        if execution_start and request.headers.get('Idempotency-Key'):
+            try:
+                observed=await app.service.projects.execution_submission(execution_start.group(1),request.headers['Idempotency-Key'])
+                repeated_execution=observed['status']=='committed'
+            except PyHError as exc:
+                status={'GRD-403':403,'PERS-202':503,'EVT-104':409}.get(exc.code,422)
+                return denied(exc.code,status)
         if path.startswith(('/api/v1/runs','/api/v1/workflows')) and not path.endswith('/cancel'):
             if not app.service.tenant_state()['active']:
                 return denied('tenant_model_profile_required',409)
@@ -63,9 +77,13 @@ async def serve_with_quota(app, request, call_next):
                 if path in ('/api/v1/sessions','/api/v1/chat/switch'): return denied('session_quota',429)
                 body = await request.json()
                 if not body.get('session_id'): return denied('session_quota',429)
-        if path == '/api/v1/runs' or (path.startswith('/api/v1/runs/') and path.endswith('/retry')):
+        if (path == '/api/v1/runs' or (path.startswith('/api/v1/runs/') and path.endswith('/retry')) or execution_start) and not repeated_execution:
             runs = (await platform.runs())['runs']
-            if sum(r['status'] in ('running','queued','waiting_approval','paused') for r in runs) >= ACTIVE_RUN_QUOTA:
+            private_active=0
+            for sid,queue in list(app.service._queues.items()):
+                if sid.startswith('s-pa-'):
+                    state=queue.status();private_active+=bool(state.running or state.waiting)
+            if private_active+sum(r['status'] in ('running','queued','waiting_approval','paused') for r in runs) >= ACTIVE_RUN_QUOTA:
                 return denied('active_run_quota',429)
         if path == '/api/v1/artifacts':
             artifacts = (await platform.artifacts())['artifacts']
@@ -105,6 +123,8 @@ def inspect_request(app, request):
                 return RedirectResponse('/login', status_code=303)
             if request.url.path not in ('/login','/api/account/login','/api/account/logout'):
                 return denied('account_session_expired',401)
+        elif account['role'] == 'operator' and account['tenant'] == 'default':
+            request.state.operator_account = account
         else:
             request.state.account = account
             declared = request.headers.get('x-pyharness-tenant') or request.query_params.get('tenant')
@@ -112,11 +132,26 @@ def inspect_request(app, request):
                 return denied('account_tenant_mismatch')
             path, method = request.url.path, request.method
             if path == '/classic': return denied('account_use_platform')
-            if method not in ('GET','HEAD','OPTIONS'):
+            # These exact POSTs are non-persistent metadata queries, not grant writes.
+            # Route/service still revalidate identifiers, body, membership and binding.
+            source_preflight = method == 'POST' and re.fullmatch(
+                r'/api/v1/projects/p-[0-9a-f]{16}/source-grants/sg-[0-9a-f]{16}/(preflight|selection-previews)', path)
+            if method not in ('GET','HEAD','OPTIONS') and not source_preflight:
                 if account['role'] == 'viewer' and path != '/api/account/logout':
                     return denied('account_read_only')
                 if account['role'] == 'member' and not (
                     path in ('/api/account/logout','/api/v1/runs','/api/v1/sessions','/api/v1/artifacts')
+                    or re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/source-grants/sg-[0-9a-f]{16}/(snapshot-previews|snapshots|snapshot-context-previews|git-source-previews|workspace-snapshot-previews|workspace-snapshots|git-input-candidates)',path)
+                    or re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/(context-task-references|context-manifests|workspace-context-manifests|workspace-inputs)',path)
+                    or re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/product-tasks(?:/pt-[0-9a-f]{16}/preflight)?',path)
+                    or re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/(documents|document-pdf-previews|citations|delivery-definitions)',path)
+                    or re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/run-attempts',path)
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/(execution-previews|executions|execution-cancellations)',path))
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/executions/ex-[0-9a-f]{16}/corrections',path))
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/executions/ex-[0-9a-f]{16}/index-repairs',path))
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/executions/ex-[0-9a-f]{16}/continuations',path))
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/(task-graphs|task-graph-previews|task-graph-runs|task-graph-cancellations)',path))
+                    or (method=='POST' and re.fullmatch(r'/api/v1/projects/p-[0-9a-f]{16}/(delivery-packages|role-contracts|role-handoffs|handoff-acks|delivery-acceptances|delivery-exports|handoff-documents|handoff-document-previews|merge-previews|merge-plans|writeback-applications|merge-plan-exports)',path))
                     or path.startswith('/api/asks/')
                     or re.fullmatch(r'/api/v1/sessions/[^/]+/(messages/[0-9]+/(edit|feedback)|(subagents|jobs)/[^/]+/cancel)',path)
                     or (path.startswith('/api/v1/runs/') and path.endswith(('/cancel','/retry')))):
@@ -163,6 +198,12 @@ def mount_accounts(app):
         response = JSONResponse({'account':store(app).authenticate(token)})
         response.set_cookie(cookie_name(request, COOKIE),token,httponly=True,samesite='strict',secure=request.url.scheme=='https',
                             max_age=Accounts.session_seconds,path='/')
+        # A password session owns this sign-in. Old launcher/tenant credentials
+        # must not survive logout and silently restore administrator access.
+        for name in ('pyharness_token', 'pyharness_tenant_token'):
+            response.delete_cookie(cookie_name(request, name), path='/')
+            if cookie_name(request, name) != name:
+                response.delete_cookie(name, path='/')
         return response
 
     @app.api.post('/api/account/logout')
@@ -173,6 +214,10 @@ def mount_accounts(app):
         response.delete_cookie(cookie_name(request, COOKIE),path='/')
         if cookie_name(request, COOKIE) != COOKIE:
             response.delete_cookie(COOKIE,path='/')
+        for name in ('pyharness_token', 'pyharness_tenant_token'):
+            response.delete_cookie(cookie_name(request, name), path='/')
+            if cookie_name(request, name) != name:
+                response.delete_cookie(name, path='/')
         return response
 
     @app.api.get('/api/account/me')
@@ -180,6 +225,9 @@ def mount_accounts(app):
         account = principal(request)
         if account:
             return {'account':account,'teams':store(app).teams(account['user_id'])}
+        operator = operator_principal(request)
+        if operator:
+            return {'mode':'local_operator', 'username':operator['username']}
         if app._operator_ok(request): return {'mode':'local_operator'}
         return denied('account_login_required',401)
 

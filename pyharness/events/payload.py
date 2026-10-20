@@ -60,5 +60,15 @@ from pyharness.events.payload_execution import (LlmRequestPayload, LlmResponsePa
 from pyharness.events.payload_orchestration import (TaskEnqueuedPayload, TaskStartedPayload, TaskCompletedPayload, TaskFailedPayload, SegmentStartPayload, SegmentEndPayload, PlanStep, PlanProposedPayload, PlanApprovedPayload, PlanRejectedPayload, PlanExecStepPayload, PlanDonePayload, PlanAbortedPayload, GoalCreatedPayload, GoalUpdatedPayload, GoalCompletedPayload, ScheduleTriggerPayload, ScheduleRegisteredPayload, ScheduleUpdatedPayload, ScheduleRemovedPayload, ScheduleBlockedPayload, ScheduleMissedPayload, JobStartedPayload, JobCompletedPayload, JobFailedPayload, SubagentSpawnedPayload, SubagentJoinedPayload, SubagentFailedPayload, WorkflowStepPayload, QueueSuspendedPayload, QueueResumedPayload, ForkCreatedPayload)
 from pyharness.events.payload_governance import (ContextCompactedPayload, PluginInstalledPayload, PluginUninstalledPayload, BusBackpressurePayload, SystemCancelledPayload, SystemErrorPayload, TodoItem, TodoUpdatedPayload, SyscheckFailPayload, BudgetPausedPayload, UserQuestionPayload, UserAnswerPayload, ScopeUpdatedPayload, PolicyUpdatedPayload, DecisionIssuedPayload, ReceiptEmittedPayload, EvidenceArchivedPayload, SkillInstalledPayload, SkillRemovedPayload, SkillRolledBackPayload, SkillUsedPayload, ConfigUpdatedPayload)
 
+from pyharness.events.payload_workspace import (_WorkspaceCommittedPayload, WorkspaceProjectCommittedPayload, WorkspaceSourceGrantCommittedPayload, WorkspaceSourceSnapshotCommittedPayload, WorkspaceContextManifestCommittedPayload, WorkspaceGitSnapshotCommittedPayload, WorkspaceInputCommittedPayload, WorkspaceTaskDefinitionCommittedPayload, WorkspaceResourceCommittedPayload)
+from pyharness.events.payload_workspace import (WorkspaceDocumentCommittedPayload, WorkspaceCitationCommittedPayload, WorkspaceDeliveryCommittedPayload)
+from pyharness.events.payload_workspace import WorkspaceRunAttemptCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceExecutionCommittedPayload,WorkspaceCancellationCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceTaskGraphCommittedPayload, WorkspaceTaskGraphRunCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceRegressionCaseCommittedPayload, WorkspaceRegressionDatasetCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceExperimentPreparationCommittedPayload,WorkspaceExperimentDefinitionCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceExperimentRunCommittedPayload,WorkspaceExperimentCancellationCommittedPayload
+from pyharness.events.payload_workspace import WorkspaceExperimentReportCommittedPayload
+
 __all__ = [name for name in globals()
            if name.endswith("Payload") or name in ("PlanStep", "TodoItem")]

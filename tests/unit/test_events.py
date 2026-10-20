@@ -69,8 +69,15 @@ EXPECTED_ALL = (
     "evidence.archived",
     # Platform V1 resource facts share the existing SessionLog.
     "platform.artifact", "platform.sandbox", "platform.knowledge", "executor.event",
+    "workspace.resource_committed",
+    # S07: actual lifecycle/effect facts, distinct from decision receipts (ADR-026).
+    "execution.lifecycle", "execution.effect", "execution.child",
+    "execution.checkpoint",
+    "execution.correction_applied",
+    "execution.state_checkpoint",
+    "execution.context",  # ADR-031: public prepared-request observation, never authority.
 )
-assert len(EXPECTED_ALL) == 82, "测试词表清单必须恰为 82 名"
+assert len(EXPECTED_ALL) == 90, "ADR-031 adds one independent observation and retains all previous 89 names"
 
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*Z$")
 
@@ -88,7 +95,8 @@ def _new_state(session_id: str = "s-abc12345", max_seq: int = 0) -> SeqState:
 def test_vocab_full():
     """词表 77 名(74 核心 + policy.updated/decision.issued/receipt.emitted/
     evidence.archived 治理层事件)。"""
-    assert len(EVENT_TYPES) == 82  # independent approval.reviewed audit event
+    assert len(EVENT_TYPES) == 90  # ADR-031: one public context fact plus all old 89.
+    assert 'workspace.resource_committed' in EV.SYNC_TYPES
     assert 'approval.reviewed' in EV.SYNC_TYPES
     assert set(EVENT_TYPES) == set(EXPECTED_ALL)
 
@@ -407,7 +415,8 @@ def test_s25_scope_events_are_registered():
 
 def test_s25_channel_counts():
     """通道计数冻结:强同步 14、瞬时 3(总数 77 由 test_vocab_full 覆盖)。"""
-    assert len(EV.SYNC_TYPES) == 15
+    assert len(EV.SYNC_TYPES) == 22  # ADR-027: logical/state checkpoints and application before inference
+    assert {'execution.lifecycle', 'execution.effect','execution.child','execution.checkpoint','execution.correction_applied','execution.state_checkpoint'} <= EV.SYNC_TYPES
     assert len(EV.TRANSIENT_TYPES) == 3
     assert "policy.updated" in EV.SYNC_TYPES          # 治理事件:强同步(ADR-020 Q3)
     assert "decision.issued" in EV.SYNC_TYPES         # 治理决策:强同步(ADR-015)

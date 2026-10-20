@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from pyharness.errors import raise_code
+from pyharness.core.model_configuration_history import ModelConfigurationHistory
 
 
 from pyharness.core.tenant_identity import (log, _TENANT_RE, _PROFILE_RE, _RESERVED, _STORES, _SESSION_TENANTS, normalize_tenant_id, normalize_profile_id, register_tenant_store, register_session_tenant, tenant_for_session, session_tenants, tenant_of_log, event_tenant_of, event_tenant_allowed, unregister_session_tenant, resolve_tenant_secret)
@@ -83,7 +84,7 @@ def _dpapi(data: bytes, *, protect: bool) -> bytes:
         kernel32.LocalFree(out_blob.pbData)
 
 
-class TenantSettingsStore:
+class TenantSettingsStore(ModelConfigurationHistory):
     """Filesystem-backed tenant settings with write-only model secrets."""
 
     def __init__(self, root: Path) -> None:
@@ -498,7 +499,8 @@ class TenantSettingsStore:
         key = 'service:'+service_id
         if value:
             values[key] = value
-            doc.setdefault('service_credentials', {})[service_id] = {'endpoint':endpoint}
+            doc.setdefault('service_credentials', {})[service_id] = {
+                'endpoint': endpoint, 'credential_revision': uuid.uuid4().hex}
         else:
             values.pop(key, None)
             doc.setdefault('service_credentials', {}).pop(service_id, None)

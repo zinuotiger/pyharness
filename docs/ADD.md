@@ -53,6 +53,35 @@ PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = �
 
 # 3 阅读约定
 
+## 产品平台增量登记（保留上述历史决策）
+
+本轮S05–S19由当前用户明确授权；阶段验收状态以对应冻结证据为准。S19将产品控制现行编号登记为ADR-038，先占号租户ADR-023保留；产品同号原文字节不变移入decisions/history供追溯。
+
+| 增量 | 正文 | 范围 |
+|---|---|---|
+| ADR-023 租户鉴权 | [每租户凭证绑定](decisions/ADR-023-per-tenant-authorization.md) | 沿用原Accepted租户授权边界 |
+| ADR-038 产品控制 | [产品控制事实与双壳](decisions/ADR-038-product-control-log.md) | 唯一控制SessionLog与当前主体/来源 |
+| ADR-024 | [资料、确切引用与交付定义](decisions/ADR-024-versioned-project-documents.md) | S05；验收与合并分别在S10/S11 |
+| ADR-025 | [持久提交与未知结果查询](decisions/ADR-025-durable-run-attempts.md) | S06；定义/尝试与执行分离 |
+| ADR-026 | [执行授权与真实效果观察](decisions/ADR-026-product-execution-effects.md) | S07；原Queue/治理/审批链 |
+| ADR-027 | [检查点与安全恢复](decisions/ADR-027-execution-checkpoints.md) | S08；该增量完成时89/22与新尝试续做；不自动重放 |
+| ADR-028 | [版本化产品任务图](decisions/ADR-028-versioned-task-graphs.md) | S09已验收；只替代新增产品DAG的历史排除范围，保留ADR-017旧顺序workflow |
+
+S08–S18已逐阶段验收。恢复、产品DAG、受控浏览器与原生共享工作台分别由ADR-027/028/036/037明确窄范围扩展；ADR-038不解除其他历史治理限制。以下为统一注册表的后续登记，原001–022历史正文保持原貌。
+
+| 增量 | 正文 | 范围 |
+|---|---|---|
+| ADR-029 | [ADR-029 固定交付产物、具名交接与独立验收](decisions/ADR-029-fixed-delivery-handoffs.md) | S10–S18已逐阶段验收 |
+| ADR-030 | [ADR-030：固定三方合并与显式目标写回](decisions/ADR-030-three-way-writeback.md) | S10–S18已逐阶段验收 |
+| ADR-031 | [ADR-031：公开请求事实、无执行权限预演与运行比较](decisions/ADR-031-public-run-observation.md) | S10–S18已逐阶段验收 |
+| ADR-032 | [ADR-032：确认后的失败用例与不可变数据集修订](decisions/ADR-032-versioned-regression-data.md) | S10–S18已逐阶段验收 |
+| ADR-033 | [ADR-033：固定数据与两版本的预算实验](decisions/ADR-033-budgeted-experiment-comparisons.md) | S10–S18已逐阶段验收 |
+| ADR-034 | [ADR-034：沿用原执行边界的扩展诊断](decisions/ADR-034-extension-diagnostics.md) | S10–S18已逐阶段验收 |
+| ADR-035 | [ADR-035：复用原配置权威的版本与兼容回滚](decisions/ADR-035-configuration-revisions.md) | S10–S18已逐阶段验收 |
+| ADR-036 | [ADR-036：受控浏览器通过原 MCP 工具链接入](decisions/ADR-036-controlled-browser.md) | S10–S18已逐阶段验收 |
+| ADR-037 | [ADR-037 原生控制与受权工作台共享服务](decisions/ADR-037-native-shared-workbench.md) | S10–S18已逐阶段验收 |
+| ADR-038 | [ADR-038 产品控制事实与递增扩展的统一登记](decisions/ADR-038-product-control-log.md) | S19文档唯一编号与历史保留 |
+
 - **模板**:每条 ADR 固定七节——元信息行(状态/日期/落点/原则映射)、背景、决策、后果、违反它的后果、备选方案对比、关联。「违反它的后果」必写具体失败场景——"回到被否方案会怎么炸",这是区别于泛泛架构描述的核心。
 - **状态语义**:全部为「已接受(Accepted)」;ADR 只增不改,若未来推翻某决策,新建一条 ADR 记录取代关系,旧条目保留原貌(不可变历史,同事件日志纪律)。
 - **编号与落点**:ADR-001 起顺序编号;「落点」= 实现阶段 + 关键 F 编号(阶段0=F001-F006、1=F007-F026、2=F027-F033、3=F034-F042、4=F043-F051、5=F052-F059、6=F060-F066),精确规格以 PRD-Core §5 为准;ADR-013~020 落点为**治理期**(Governed Agent Runtime v1.0 的 S0~S7 开发顺序,见 `ARCHITECTURE_DECISION_RECORD.md` §5),不对应 F 编号。
@@ -351,3 +380,19 @@ PyHarness 的全部架构约束可压缩成一句话:**单进程插件架构 = �
 **关联**:ADR-005(单进程不被外壳破坏)、ADR-001(页面=事件投影,刷新即重放)、ADR-011(/api 响应复用错误码)、PRD-Core §2.1 外壳层/阶段6。
 
 ---
+
+## S05对ADR-005的窄范围补充
+
+文本层PDF的固定、可信、一次性系统解析适配器按[ADR-024](decisions/ADR-024-versioned-project-documents.md)执行：主服务和唯一事实日志不跨进程；解析器仅私有固定输入/有界输出，限制时间、内存、页数与解压流，超时即销毁。没有Agent worker池、通用用户命令或新增工具放行路径。原ADR-005的“唯一多进程出口”描述在此明确补充这条系统适配例外，PRD-Core §4.5和CONSTRAINTS-01对应同步。
+
+## S10 具名交接与独立业务验收
+
+采用[ADR-029](decisions/ADR-029-fixed-delivery-handoffs.md)：固定原执行实际输出，分别保存角色、交接、签收、独立验收、导出与父剩余额度预留。承接资料使用显式document schema2并接原RunAttempt/图节点与原执行器；不改旧schema1默认字段、不复制父messages、不新建运行权威库。独立真实UID验收与工具审批分离，撤权传递到下游。具体入口与上限见[交付契约](specs/delivery-handoffs.md)。S10整体完成以当前源码验收账本为准。
+
+
+S11增量：ADR-030 [固定三方合并与显式目标写回](decisions/ADR-030-three-way-writeback.md)；仅扩展独立具名写范围，原SourceGrant只读、工具审批与团队宿主禁令保持。当前实现的整体验收状态以阶段台账为准。
+
+S12增量：ADR-031 [公开请求观察、权限预演与运行比较](decisions/ADR-031-public-run-observation.md)。当前公开观察接原队列、原执行/子日志和只读授权；不建立第二份消息历史或执行权。词表90、原强同步集22，旧事件Schema保持。S12已由候选3通过当前源码全量/核心覆盖、浏览器、独立安装、实际Docker/HTTP、恢复包与完整归档验收；后续阶段仍按总台账逐项执行。
+
+
+S13增量：[ADR-032](decisions/ADR-032-versioned-regression-data.md)将确认后的失败用例和数据集版本接入原控制日志；候选2通过4235项完整回归（4189PASS/46条件SKIP/0FAIL）、323Chrome、486运行文件独立安装及实际HTTP/Docker、来源保全、恢复包和完整归档。新增两个严格控制资源种类，原90类事件和22类强同步词表不变。S14增量：[ADR-033](decisions/ADR-033-budgeted-experiment-comparisons.md)接入固定两版本实验准备、显式预算的原图执行、最小停止、固定前缀报告及工作台；控制资源32→37，原90事件/22同步不变。当前仍待冻结源码整体验收、独立安装、实际HTTP/Docker、恢复与归档；切片通过不等于S14完成。

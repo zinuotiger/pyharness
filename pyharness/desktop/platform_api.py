@@ -62,3 +62,5 @@ def mount_platform(desktop):
     mount_management(router, desktop, service)
 
     desktop.api.include_router(router)
+    from .workspace_api import mount_workspace
+    mount_workspace(desktop)

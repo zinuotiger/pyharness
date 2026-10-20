@@ -78,7 +78,7 @@ class DesktopPages:
         declared = self._declared_tenant(request)
         tenant_tok = self._presented_tenant_token(request)
         operator = self._operator_ok(request)
-        from .accounts_api import principal
+        from .accounts_api import principal, operator_principal
         account = principal(request)
         tenant_ok = (declared != "default"
                      and self._verify_tenant_token(declared, tenant_tok))
@@ -113,7 +113,7 @@ class DesktopPages:
                         "<p>前端资源缺失(ui/index.html 未随包携带)</p></div></body></html>")
         resp = HTMLResponse(html, headers={'Cache-Control': 'no-store',
                                           'Referrer-Policy': 'no-referrer'})
-        if self._api_token and operator:
+        if self._api_token and operator and not operator_principal(request):
             resp.set_cookie(cookie_name(request, "pyharness_token"), self._api_token,
                             httponly=True, samesite="strict", path="/")
         if tenant_ok and not account:

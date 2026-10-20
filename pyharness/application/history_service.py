@@ -42,6 +42,11 @@ class HistoryService:
         for item in (lst or []):
             row = item if isinstance(item, dict) else {"sid": str(item)}
             sid = str(row.get("sid") or item)
+            from pyharness.application.product_execution_sessions import is_product_session
+            if is_product_session(sid):
+                from pyharness.errors import PyHError
+                try:await self.require_session(sid)
+                except PyHError:continue
             register_session_tenant(sid, self.tenant_id)
             if not row.get("title"):
                 row["title"] = _title_of(sid)

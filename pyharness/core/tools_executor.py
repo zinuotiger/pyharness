@@ -374,7 +374,7 @@ class ToolExecutor(ToolInvocation, ToolApproval):
         call = replace(call, args=args)                 # guard/审批读校验后实参
 
         # ---- tool.call 双份存档(raw_args 模型原话 vs args 实际执行;INV-06)
-        await self._append(ctx, "tool.call",
+        call_event = await self._append(ctx, "tool.call",
                            {"name": call.name, "args": dict(args),
                             "raw_args": dict(call.raw_args or {}),
                             "call_id": call.call_id},
@@ -405,7 +405,13 @@ class ToolExecutor(ToolInvocation, ToolApproval):
         try:
             self._r.mark_running(call.name)             # registry 注销闸联动
             t0 = time.perf_counter()
-            provider_task = asyncio.create_task(self._run_provider(defn,args,ctx))
+            from pyharness.core.invocation_binding import InvocationBinding, current_invocation
+            token = current_invocation.set(InvocationBinding(call.call_id,
+                getattr(call_event, 'seq', 0), call.name, digest))
+            try:
+                provider_task = asyncio.create_task(self._run_provider(defn,args,ctx))
+            finally:
+                current_invocation.reset(token)
             fut = asyncio.create_task(asyncio.wait_for(provider_task, timeout=timeout))
             self._active = fut
             started = True                          # Provider 已进入 await 点

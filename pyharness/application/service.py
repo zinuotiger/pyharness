@@ -80,6 +80,14 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
         self.llm_runtime = LLMRuntime()
 
 
+    @property
+    def projects(self):
+        self._ensure_open()
+        if not hasattr(self, '_projects'):
+            from pyharness.application.projects import Projects
+            self._projects = Projects(self)
+        return self._projects
+
     def _surface_ctx(self) -> Any:
         if self.tenant_id == "default":
             return self.ctx
@@ -121,6 +129,8 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
     async def require_session(self, sid: str) -> Any:
         sm = _session_module()
         sid = sm.validate_session_id(sid)
+        from pyharness.application.product_execution_sessions import is_product_session
+        if is_product_session(sid):return await self.projects.product_session(sid)
         lock = self._session_locks.setdefault(sid, asyncio.Lock())
         async with lock:
             if sid in self._logs:
@@ -133,6 +143,11 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
 
     @admitted
     async def queue_for(self, sid: str, log_: Any = None) -> TaskQueue:
+        from pyharness.application.product_execution_sessions import reject_product_mutation
+        reject_product_mutation(sid)
+        return await self._queue_for_owned(sid, log_)
+
+    async def _queue_for_owned(self, sid: str, log_: Any = None) -> TaskQueue:
         self._ensure_open()
         if log_ is None:
             log_ = await self.require_session(sid)
@@ -269,6 +284,8 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
     @admitted
     async def delete_session(self, sid: str) -> dict:
         """Delete an idle session and all of its tenant-scoped files."""
+        from pyharness.application.product_execution_sessions import reject_product_mutation
+        reject_product_mutation(sid)
         sid = _session_module().validate_session_id(sid)
         queue = self._queues.get(sid)
         if queue is not None:
@@ -396,6 +413,8 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
 
     async def _shutdown_owned(self):
         await stop_admissions(self)
+        from pyharness.application.task_graph_runtime import stop_task_graphs
+        await stop_task_graphs(self)
         errors = []
         async def attempt(fn, *args, **kw):
             try:
@@ -419,6 +438,8 @@ class ApplicationService(TenantService, OrchestrationService, HistoryService, In
                 await attempt(queue.shutdown, reason='service-shutdown')
         if hasattr(self, '_platform'):
             await attempt(self._platform.close)
+        if hasattr(self, '_projects'):
+            await attempt(self._projects.close)
         if isinstance(self._surface, _session_module().DesktopSessionManager):
             await attempt(self._surface.shutdown_all)
         await attempt(self.llm_runtime.aclose)

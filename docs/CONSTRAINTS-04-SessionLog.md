@@ -9,7 +9,7 @@
 | S-01 | 只追加 | 已写事件不可修改不可删除;程序无"改历史"代码路径 |
 | S-02 | 单一真源 | 消息历史从日志派生(derive reducer);禁止内存消息列表作为第二真源 |
 | S-03 | 事件信封完整 | 每事件含 seq/type/timestamp/session_id/payload;seq 单调递增 |
-| S-04 | 强同步集 | **三类族**（`user.message` / `guard.rejected` / `approval.*`）为**原始三类**；此后为崩溃一致性追加了治理/编排型强同步事件，**现共 15 型**——唯一真源＝`events.vocab.SYNC_TYPES`（见 EVENT-SCHEMA §1.2 表）；其余批量异步（≤0.5s 或 ≥64 条） |
+| S-04 | 强同步集 | **三类族**（`user.message` / `guard.rejected` / `approval.*`）为**原始三类**；此后为崩溃一致性追加了治理/编排型及产品控制强同步事件，**现共 22 型**（含 `workspace.resource_committed`、`execution.lifecycle`、`execution.effect`、`execution.child`、`execution.checkpoint`、`execution.correction_applied`、`execution.state_checkpoint`；S07/S08增量见ADR-026/027）——唯一真源＝`events.vocab.SYNC_TYPES`（见 EVENT-SCHEMA §1.2 表）；其余批量异步（≤0.5s 或 ≥64 条） |
 
 ## 2. 写入纪律
 | # | 约束 | 说明 |

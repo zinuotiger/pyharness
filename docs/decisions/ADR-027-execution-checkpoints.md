@@ -1,0 +1,75 @@
+# ADR-027 产品运行的持久检查点与安全恢复边界
+
+状态：S08实施中。S07已验收事实及86/19词表保留；逻辑检查点与纠偏为88/21，实际状态伴随事实execution.state_checkpoint增加至当前89类型、22强同步。显式新尝试续做已接入；当前开发证据不代表S08整体验收。
+
+普通llm.response、tool.call或内存状态不能独自充当安全恢复点。检查点必须落在真实逻辑模型轮的最终消息物化完成后、模型调用前，使用原私有运行SessionLog的强同步链并精确读回。写失败或无法确认时不得调用模型。旧普通会话没有产品boundary时不增加检查点，不另建checkpoint数据库。
+
+严格schema1保存随机ck-ID、原execution及authorization摘要/序号、该日志精确prefix_seq与prefix_digest、materialized_messages_digest和当时本会话效果计数。消息摘要只是本次物化结果的运行时观察，不是Provider wire签名，也不是可以恢复正文的替代存储；不写消息正文、凭据或任意宿主路径。前缀包含完整Envelope JSON规范化字节的SHA，使用既有canonical实现。
+
+检查点scope=session_effects：started未配对结果为pending，unknown或file_observation=unavailable为未知；同一结果不重复计数。effect_replay_blocked仅反映该历史前缀本会话的未知/未结束效果，不对后续事实、子任务或外部系统作无效果保证。replay_authorized固定false。任何恢复仍须检查该水位之后的原始事实、独立孩子、当前权限、真实工作区和后续恢复契约；禁止把早期无未知的检查点解释成可以重放后续工具。
+
+Root和孩子分别在自己的原日志记录检查点，绑定自己的task和相同Root执行授权。严格历史回放检查checkpoint位于本人running阶段、system actor、唯一ck-ID、精确授权、前缀摘要/序号及重新派生的效果计数；坏事实返回未知/拒读，不能修文件或用旧缓存冒充安全恢复。新增投影最多显示最近100条并显式截断，同时返回当前完整日志的session效果观察，避免把旧水位状态当当前结论。
+
+当前已接入受信纠偏revision及pending/applied、下一实际上下文包含补充、当前creator/来源与并发revision检查；开发证据不等于S08整体验收。尚需完成真正工作区恢复映像、RecoveryPlan、未知效果阻塞、显式受控续做和最多两次有限修复；双壳取消一致及实际界面/安装/全量验收。
+
+## 当前服务长任务观察（B01开发增量）
+
+原执行收据增加control_observation，不改变原生命周期或授权。心跳由精确Root执行边界拥有的独立asyncio任务每2秒更新，10秒过期，结束/取消后清理；仅存在当前进程内，scope=service_event_loop，不进入SessionLog、不充当模型或工具完成证据。监视任务已停但最后心跳未超过10秒时为inactive/heartbeat_unavailable，不能提前称过期。观察不追加事件，不引入并发日志写入者。冷应用不存在精确匹配的原Queue/Engine/Boundary时，必须返回无本地执行者、not_observed，不能读旧时间戳冒充活跃。
+
+审批等待来自原ApprovalProvider中的pending请求，必须绑定已验证Root或仍运行的已验证孩子、相同租户/会话/任务及原approval.requested事件；仅返回审批ID和TTL，不夹带参数正文。孩子日志未知/截断时明确审批观察不完整。活动观察分别标记waiting_approval、heartbeat_expired、queued、running_unclassified、interrupted、terminal；运行心跳不产生继续或重发授权。replay_authorized及automatic_dispatch固定false。
+
+界面将服务已响应、读取权限不足、服务错误和失联/回执未知分别显示。任一刷新、轮询、心跳过期或重载仅GET；精确停止仍沿原取消命令和原键核对，不借状态观察更换执行目标。终态、心跳和业务验收分别展示；终态不是交付验收。
+
+Qt在现有Jobs页增加独立产品运行控制区，保留原Job操作及9页结构。输入项目/运行尝试后只读调用同一最小控制接口；显式停止仍由原Projects.cancel_execution核对当前creator、角色、精确execution_ref及原Queue。原资料撤权不阻断合法最小停止。原停止请求以主体/租户/私有存储范围与精确执行引用稳定派生，窗口重开或丢回执不另造停止键；查询不自动POST，不持久保存资料正文，也不另建控制事实存储。目标/租户改变、关闭与迟到响应丢弃旧视图，实际停止与业务验收分开。
+
+## 恢复预检的只读首片（B02/B04尚未完成）
+
+GET /projects/{project}/executions/{execution}/recovery-plan通过原store.observe_execution，在读取前后重新核对当前creator、角色和全部来源；引用Root及已授权孩子的精确已确认日志前缀、最新检查点和真实产物字节观察。只读FTS水位复用is_indexable/read_max_seq及租户effective_settings路径，不调用enter/rebuild，不建库、不改JSONL。内存中未刷新的普通尾部不当作已确认前缀。
+
+RecoveryPlan为严格DTO，plan_digest覆盖全部观察依据（包括当前租户索引范围摘要），不是执行许可。atomic_snapshot=false明确这些前缀不是一个跨进程原子快照；restore_state_available仅表示最新逻辑检查点存在经过严格核验的完整状态映像，continuation_authorized=false、repair_authorized=false、automatic_dispatch=false保持。repair_implementation=available只说明独立受控索引命令已经接入，不是预检本身获准执行。活跃执行、损坏/未知日志、孩子截断、任何Root或孩子产物校验失败、未确认效果、安全拒绝均明确阻塞。安全拒绝包括Root和孩子的guard.rejected、approval.denied/timeout原事实；不能因最后返回完成便忽略先前拒绝。早期干净检查点不能覆盖后续未知效果。
+
+恢复预检本身只读，核验精确执行范围与计划摘要，主体变化/撤权/迟到响应清空或丢弃。独立有限索引修复管理页沿下述显式命令执行。完整映像仍须独立continuation-plan及显式命令核验；S08整体验收尚未完成。
+
+## 显式新尝试续做（B02开发增量）
+
+GET continuation-plan只观察原Root、最多20层祖先日志、当前Source/主体/配置/模型及工具契约、完整映像和保守剩余预算。旧状态缺契约、未知费用、未确认效果、检查点后响应、活跃writer、孩子及未捕获外部工具状态均阻塞。允许续做不授予自动投递权。公开计划摘要将有限数字转换为IEEE754 binary64十六进制标记后规范化，确保Python/JavaScript对0.0及科学计数法一致；原RecoveryPlan与原请求摘要不变。
+
+POST continuations绑定精确父execution_ref、计划摘要、新attempt/execution ID及宿主边界确认。沿原控制日志记录schema2 run_attempt及execution_authorization，持有原Root和祖先的OS租约并复核精确日志/映像及当前授权。每个检查点只能预留一次；原key仅核对结果，预留而授权未知不自动派发。新SID/task/Root保留完整谱系，旧Root不复活、不改写、不清取消。
+
+受信准备路径校验并恢复实际文件/目录/新SID KV，仅重建新attempt引用目录。旧真实messages作为引用资料参与新模型上下文，不作为新日志工具命令重放。新Scope预算、轮数、工具数、timeout继承保守剩余额度；旧已确认写按工具别名与语义参数在Provider前阻止，跨多次续做覆盖全部祖先。产物基线仍取原输入，保证继承成果不漏交付。原运行功能与参数保持。
+
+费用计算以有界高精度Decimal保守预留、向上记录已知用量/预留、向下取剩余额度。不能用取整后的scope观察退回原日志中已知的微小费用。极大有限单价仍可形成明确的额度耗尽；超出公开有限数值表示的预留必须标费用未确认并阻塞，不能返回Infinity/零费用或未处理的服务异常。
+
+强退后旧私有工作区与孤儿容器不因冷GET或续做预检自动销毁。受控恢复只读取已确认映像，独立新Root使用新自有资源；未捕获的进程/外部状态阻塞续做。既有孤儿资源观察/显式管理仍保留，验收脚本的精确所有权清理与旧工作区留档不可冒充产品自动孤儿清理能力。
+
+界面打开/刷新/重开只GET，用户显式提交新尝试。丢回执后保留仅含引用/摘要的原key线索并按key核对；不存messages/KV/文件正文，不自动重发。双击、主体变化、撤权和迟到响应分别处理。实际进程强退、安装与全量验收须另有证据，不以开发贯通替代。
+
+## 有限派生索引修复（B04开发增量，待整体验收）
+
+POST execution/{id}/index-repairs只接收schema1、er-ID、精确execution_ref及预检摘要；没有客户端路径、工具或任意修复动作。原WorkspaceStore唯一owner记录严格index_repair资源：r1=started，r2=succeeded/failed/unknown。外部原键只使用一次，结果提交使用服务保留的不同内部键；不能违反原控制日志每键唯一语义。原键重试只观察资源最新修订，即使开始已确认而结果未知也不能重复执行。GET history及by-key均重核当前creator、角色、项目及来源。
+
+开始前重新读取严格Root/孩子日志，确认每个前缀与计划完全相同，再取得这些精确私有日志的独占OS租约。没有本地Queue不等于没有其他进程writer；任何占用都拒绝开始。修复前后及控制提交gate核对原日志字节和索引范围，原JSONL零改写。源文件、角色、索引配置或日志在观察后变化不能借旧计划修复新目标。
+
+开始事实强确认后才调用原SessionQueryIndex.enter/attach_source/rebuild（精确Root sid），不调用完整repair、KV重建、模型或原工具。仅核对共享内容白名单的索引水位，不能冒充全索引行字节证明。故障指纹绑定execution_ref、所有观察前缀及租户索引范围；同故障所有持久started资源最多两次，成功/失败/未知都消费名额，跨进程重启不重置，第三次新ID新key也拒绝。活跃执行、未知效果/日志、产物校验失败及安全拒绝不进入修复。
+
+管理界面打开、刷新和恢复线索都只GET。显式命令先封存原键及引用/摘要，不存正文或路径；双击只投递一次。丢回执后按原键核对，started只显示结果未确认。索引修复不授予续做、不解除原安全拒绝、不把旧外部动作重新发出。
+
+## 实际状态捕获首片（B02实施中，不等于受控续做）
+
+保留原execution.checkpoint schema1，新增execution.state_checkpoint强同步伴随事实，精确绑定同日志cp-ID/seq/envelope digest。实际文件、KV、最终物化messages和原scope预算/策略在模型调用前捕获；先确认逻辑CP，再保存私有不可变hash blob并确认伴随事实，最后重新核权后才可调用模型。假ack或强事实失败零模型。Root/child各自日志、任务与状态隔离。
+
+状态blob只在平台私有execution-state目录，以sha256为名，不是授权数据库，不暴露文件正文、KV或模型messages到通用执行回执。实际backend用observe，Docker真实pause/thaw；remote首片明确unsupported，不拿影子目录代替。文件含原字节base64/sha/size/mode，目录含路径及mode（包括空目录）；拒link/junction/hardlink/非普通文件、保留路径冲突检查，不用会跳binary/hidden的text_snapshot冒充完整映像。filesystem_capture区分files_and_directories、disabled的no_workspace及兼容files_only_legacy，不把缺空目录的旧观察升格为完整恢复状态。模式位不是OS内存/ACL快照。KV明确存在或不存在，不从工具摘要猜值；team共享内存首片标shared_memory_not_captured，不能以缺少sid.kv.json假称团队状态为空。scope预算仅标runtime_estimate，不当作已确认账单；缺注入计数器不能借零值获得恢复权。
+
+有界：单文件10MiB、总文件20MiB、4096文件、8192遍历项、messages序列化16MiB、全blob32MiB、单会话已确认blob合计256MiB。超限/不支持/读写状态失败写unavailable及原因，不截断冒充完整，也不改变原执行工具权限。旧状态或受控续做不因captured就获准；replay_authorized始终false，capture_scope=session_local_state不代表跨孩子或OS内存的原子快照。
+
+严格历史图验证伴随身份与原CP引用；回执只核对最近捕获blob当前字节/严格schema/上下文绑定，其余明确not_checked，坏blob标unconfirmed且不修原数据。实际续做还必须检查所有后续效果、孩子、Source与Agent版本、预算及后台进程，使用新尝试和新授权；本首片不提供任何resume自动投递。
+
+## 受信纠偏接线（S08后续实施）
+
+`execution_correction`是原WorkspaceStore控制日志上的严格版本资源，单execution一个cr-ID、expected_revision竞争检查、原key幂等、当前creator/owner/member及完整来源重新检查。正文最多4000字符，不能用命令扩工具/预算/Agent或来源权限。同一纠偏文档的新修订替换旧pending，旧未应用版本明确superseded，已应用的历史保留。补充范围是Root的下一个合法逻辑轮，不撤回在飞模型或工具，也不修改已准入孩子的任务。
+
+原AgentLoop在derive_messages之前提供可选application-owned before_round_context边界。先确认当前受信纠偏并追加精确user.message；真实物化完成、补充实际进入最终messages之后，才强同步execution.correction_applied，绑定原控制ref、user_message_seq、文本SHA及materialized_messages_digest；随后checkpoint摘要须与之匹配。物化失败保持pending，不假称applied。applied仅表示上下文准备成功，不等于外部Provider已收到/完成。
+
+窗口裁剪时，活跃补充从已确认控制版本及applied事实派生回最终messages，不在浏览器或内存另建指令权威。孤立user.message只可在重新核权后按唯一精确ref复用，重复或不一致拒绝。强applied写入或确认失败禁止下一模型；不会重放已完成的工具。Root/旧会话/嵌套孩子读取均由原已验证控制快照派生只读row view，核对历史纠偏来源；伪造应用ref即使重算checkpoint前缀也不能借原日志伪造受信输入。普通旧运行无产品boundary时保持原行为。
+
+新增HTTP路径：POST/GET `/projects/{p}/executions/{ex}/corrections`、GET `/projects/{p}/correction-submissions/by-key?key=...`。使用原私有router、no-store及鉴权，member只增加精确POST路径。控制定义提交与上下文应用分别记录，当前Source撤权后纠偏拒读/拒写，不影响原最小停止通道。实际纠偏UI、控制中心、恢复预检、可恢复工作区与有限修复仍待实现验收。

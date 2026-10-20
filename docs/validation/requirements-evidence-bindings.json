@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "scope": "Evidence bindings only; not a completion claim. Counts and limits must be generated from each current frozen run.",
+  "requirements": [
+    {
+      "id": "A01",
+      "name": "项目工作空间",
+      "acceptance": "选合成 linked worktree 建项目，跨租户/越界根拒绝，归档不删资料",
+      "stages": "S04",
+      "implementation": "pyharness/application/projects.py",
+      "test_modules": [
+        "tests/unit/test_workspace_projects.py",
+        "tests/unit/test_workspace_adversarial.py",
+        "tests/unit/test_workspace_audit_http.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "A02",
+      "name": "交付物中心",
+      "acceptance": "缺交项不通过、改一字节使验收失效、无导出授权不能下载",
+      "stages": "S05+S10",
+      "implementation": "pyharness/application/product_deliveries.py",
+      "test_modules": [
+        "tests/unit/test_delivery_packages.py",
+        "tests/unit/test_delivery_consumers.py",
+        "tests/unit/test_delivery_artifact_imports.py",
+        "tests/unit/test_delivery_dependency_revocation.py",
+        "tests/unit/test_delivery_execution_views.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "A03",
+      "name": "任务收件箱",
+      "acceptance": "草稿零执行；双击一个 attempt；提交超时可按 key 查回",
+      "stages": "S06",
+      "implementation": "pyharness/application/run_attempts.py",
+      "test_modules": [
+        "tests/unit/test_run_attempts.py",
+        "tests/unit/test_run_attempt_boundaries.py",
+        "tests/unit/test_run_attempt_git.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "A04",
+      "name": "文档阅读",
+      "acceptance": "文本层 PDF 真页与段落可读；扫描件无OCR显示不可定位，恶意 HTML不执行",
+      "stages": "S05",
+      "implementation": "pyharness/application/document_operations.py",
+      "test_modules": [
+        "tests/unit/test_document_pdf.py",
+        "tests/unit/test_documents.py",
+        "tests/unit/test_document_boundaries.py",
+        "tests/unit/test_document_adversarial.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "A05",
+      "name": "页码/段落引用定位",
+      "acceptance": "同名新版本不误跳，页/段/区间精确，越权 source 被拒",
+      "stages": "S05",
+      "implementation": "pyharness/application/document_references.py",
+      "test_modules": [
+        "tests/unit/test_documents.py",
+        "tests/unit/test_document_boundaries.py",
+        "tests/unit/test_document_adversarial.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "A06",
+      "name": "过期提示",
+      "acceptance": "替换/删除后旧引用明确 stale/missing，旧文本不被新内容冒名",
+      "stages": "S05",
+      "implementation": "pyharness/application/document_references.py",
+      "test_modules": [
+        "tests/unit/test_documents.py",
+        "tests/unit/test_document_boundaries.py",
+        "tests/unit/test_document_git_inputs.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "B01",
+      "name": "长任务控制中心",
+      "acceptance": "等待审批/心跳过期/服务失联分辨；失联不自动重发；双壳取消一致",
+      "stages": "S08",
+      "implementation": "pyharness/application/execution_control_projection.py",
+      "test_modules": [
+        "tests/unit/test_execution_liveness.py",
+        "tests/unit/test_product_execution_cancellation.py",
+        "tests/unit/test_native_product_execution_control.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "B02",
+      "name": "检查点与断点续做",
+      "acceptance": "强退后只恢复观察；receipt unknown 阻塞；已完成外部动作不再发",
+      "stages": "S08",
+      "implementation": "pyharness/application/execution_checkpoints.py",
+      "test_modules": [
+        "tests/unit/test_execution_checkpoints.py",
+        "tests/unit/test_execution_recovery_plan.py",
+        "tests/unit/test_execution_state_restore.py",
+        "tests/unit/test_execution_continuations.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "B03",
+      "name": "运行中纠偏",
+      "acceptance": "在飞工具不撤回；下一轮实际上下文含补充；并发 revision 冲突拒绝",
+      "stages": "S08",
+      "implementation": "pyharness/application/execution_correction_runtime.py",
+      "test_modules": [
+        "tests/unit/test_execution_corrections.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "B04",
+      "name": "异常诊断与有限自修复",
+      "acceptance": "索引可重建，安全拒绝不自动修，重复故障两次即停且无扩权",
+      "stages": "S08",
+      "implementation": "pyharness/application/product_index_repairs.py",
+      "test_modules": [
+        "tests/unit/test_execution_index_repairs.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "C01",
+      "name": "带依赖任务图",
+      "acceptance": "菱形依赖与并发额度正确，环/跨租户拒绝，重启不重投",
+      "stages": "S09",
+      "implementation": "pyharness/application/task_graph_runtime.py",
+      "test_modules": [
+        "tests/unit/test_task_graph_definitions.py",
+        "tests/unit/test_task_graph_runs.py",
+        "tests/unit/test_task_graph_runtime.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "C02",
+      "name": "角色与交接契约",
+      "acceptance": "缺产物/假handle阻塞，子权与预算不超父，换 Agent 名不能换身份",
+      "stages": "S10",
+      "implementation": "pyharness/application/delivery_roles.py",
+      "test_modules": [
+        "tests/unit/test_delivery_handoffs.py",
+        "tests/unit/test_delivery_budget_boundaries.py",
+        "tests/unit/test_delivery_context_limits.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "C03",
+      "name": "隔离工作区与合并预览",
+      "acceptance": "保留 staged/unstaged/未追踪字节，冲突零写，批准后target变化拒绝，partial apply不报成功",
+      "stages": "S04+S07+S11",
+      "implementation": "pyharness/application/writeback_application_store.py",
+      "test_modules": [
+        "tests/unit/test_workspace_snapshots.py",
+        "tests/unit/test_workspace_snapshot_recovery.py",
+        "tests/unit/test_writeback_merge.py",
+        "tests/unit/test_writeback_application.py",
+        "tests/unit/test_writeback_effect_failures.py",
+        "tests/unit/test_writeback_post_commit.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "C04",
+      "name": "独立验收关卡",
+      "acceptance": "自批拒绝、改交付摘要失效，验收过不自动合并/发布",
+      "stages": "S10",
+      "implementation": "pyharness/application/delivery_store.py",
+      "test_modules": [
+        "tests/unit/test_delivery_packages.py",
+        "tests/unit/test_delivery_consumers.py",
+        "tests/unit/test_delivery_dependency_revocation.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "D01",
+      "name": "脱敏公开上下文检查器",
+      "acceptance": "实际加载/截断可核；秘密/私有reasoning零泄露，旧记录 unavailable",
+      "stages": "S12",
+      "implementation": "pyharness/application/product_observations.py",
+      "test_modules": [
+        "tests/unit/test_context_public_request.py",
+        "tests/unit/test_context_actual_loopback_wire.py",
+        "tests/unit/test_product_context_observation.py",
+        "tests/unit/test_context_observation_boundaries.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "D02",
+      "name": "权限预演",
+      "acceptance": "Provider零调用/文件网络零变化，shell unknown，策略变更后真调用重查",
+      "stages": "S12",
+      "implementation": "pyharness/application/permission_observation.py",
+      "test_modules": [
+        "tests/unit/test_permission_observation.py",
+        "tests/unit/test_permission_observation_api.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "D03",
+      "name": "运行差异比较",
+      "acceptance": "刻意一条回归被指出，输入/验证器不一致标不可比，未知费不为0",
+      "stages": "S12+S14",
+      "implementation": "pyharness/application/run_observation_comparison.py",
+      "test_modules": [
+        "tests/unit/test_run_observation_comparison.py",
+        "tests/unit/test_run_observation_comparison_api.py",
+        "tests/unit/test_experiment_reports.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "D04",
+      "name": "失败转回归",
+      "acceptance": "未确认不能入集、秘密不进产物、历史tool.call不重放",
+      "stages": "S13",
+      "implementation": "pyharness/application/regression_candidates.py",
+      "test_modules": [
+        "tests/unit/test_failure_candidate_api.py",
+        "tests/unit/test_regression_source_boundaries.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "E01",
+      "name": "MCP连接管理台",
+      "acceptance": "真实synthetic stdio工具被发现，错协议/超时清理，预览不执行工具",
+      "stages": "S15",
+      "implementation": "pyharness/application/mcp_workbench.py",
+      "test_modules": [
+        "tests/integration/test_mcp_workbench.py",
+        "tests/integration/test_extension_workbench_http.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "E02",
+      "name": "浏览器任务工作台",
+      "acceptance": "本地合成页拒批零提交、旧generation拒绝、真实批准后准确目标读回、退出清理",
+      "stages": "S17",
+      "implementation": "pyharness/application/browser_setup.py",
+      "test_modules": [
+        "tests/unit/test_browser_contract.py",
+        "tests/integration/test_controlled_browser.py",
+        "tests/integration/test_browser_execution.py",
+        "tests/integration/test_browser_setup_http.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "E03",
+      "name": "技能调试台",
+      "acceptance": "linked越界拒绝，skill.used与注入可达，测试不改正式技能或增权",
+      "stages": "S15",
+      "implementation": "pyharness/application/skill_workbench.py",
+      "test_modules": [
+        "tests/integration/test_formal_skill_snapshot.py",
+        "tests/integration/test_skill_rehearsal.py",
+        "tests/integration/test_skill_rehearsal_cancellation.py",
+        "tests/unit/test_skill_snapshots.py",
+        "tests/unit/test_skill_tenant_boundary.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "E04",
+      "name": "配置版本与回滚",
+      "acceptance": "旧attempt不热换、秘密引用无效拒绝、回到宽松策略另授权，外部效果不撤销",
+      "stages": "S16",
+      "implementation": "pyharness/application/configuration_history.py",
+      "test_modules": [
+        "tests/unit/test_model_configuration_history.py",
+        "tests/unit/test_agent_configuration_history.py",
+        "tests/integration/test_configuration_history_http.py",
+        "tests/integration/test_configuration_history_execution.py",
+        "tests/unit/test_configuration_profile_binding.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "L01",
+      "name": "回归数据集",
+      "acceptance": "编辑不改旧版本；非法断言/超限/跨租户导入拒绝",
+      "stages": "S13",
+      "implementation": "pyharness/application/regression_store.py",
+      "test_modules": [
+        "tests/unit/test_regression_assertions.py",
+        "tests/unit/test_regression_dataset_api.py",
+        "tests/unit/test_regression_transfer.py",
+        "tests/unit/test_regression_recovery.py",
+        "tests/unit/test_regression_policy_history.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "L02",
+      "name": "实验执行",
+      "acceptance": "脚本模型走真实队列，取消/重启不双跑，真实模式无预算grant拒绝",
+      "stages": "S14",
+      "implementation": "pyharness/application/product_experiment_runs.py",
+      "test_modules": [
+        "tests/unit/test_experiment_runs.py",
+        "tests/unit/test_experiment_run_boundaries.py",
+        "tests/unit/test_experiment_cancel_failure.py",
+        "tests/unit/test_experiment_explicit_confirmation.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "L03",
+      "name": "版本效果比较",
+      "acceptance": "固定两版准确找到单例回归；unknown/cancelled不进passed；不匹配拒绝硬归因",
+      "stages": "S14",
+      "implementation": "pyharness/application/experiment_report_evaluation.py",
+      "test_modules": [
+        "tests/unit/test_experiment_reports.py",
+        "tests/unit/test_experiment_report_boundaries.py",
+        "tests/unit/test_experiment_report_live_prefix.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    },
+    {
+      "id": "L04",
+      "name": "回归证据与发布门",
+      "acceptance": "报告可重算/计数精确/秘密扫描通过、无授权不能导出、测试绿不自动publish",
+      "stages": "S14+S19",
+      "implementation": "pyharness/application/experiment_report_store.py",
+      "test_modules": [
+        "tests/unit/test_experiment_reports.py",
+        "tests/unit/test_experiment_report_boundaries.py",
+        "tests/unit/test_regression_evidence_policy.py"
+      ],
+      "evidence_status": "REQUIRES_CURRENT_FROZEN_RUN"
+    }
+  ],
+  "cross_shell_tests": [
+    "tests/integration/test_native_workbench.py",
+    "tests/unit/test_native_workbench_entry.py"
+  ]
+}

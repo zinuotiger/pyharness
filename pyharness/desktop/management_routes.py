@@ -6,6 +6,13 @@ from pydantic import ValidationError
 from pyharness.core.sandbox import fail
 
 def mount_management(router, desktop, service):
+    from .browser_setup_routes import mount_browser_setup
+    mount_browser_setup(router, desktop)
+    from .extension_workbench_routes import mount_extension_workbench
+    mount_extension_workbench(router, desktop, service)
+    from .configuration_history_routes import mount_configuration_history
+    mount_configuration_history(router, desktop, service)
+
     @router.get('/knowledge')
     async def knowledge():
         return service().knowledge_list()

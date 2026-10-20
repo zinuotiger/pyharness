@@ -88,3 +88,7 @@ grep -rn "messages = \[\]" src/session/ && echo "检查是否绕过 derive" || e
 | 4 编排 | H-04(单进程并发) | 子 Agent 走 asyncio 不跨进程 |
 | 5 系统 | H-09(日志 JSONL 不动) | SQLite 只建查询索引 |
 | 6 外壳 | H-04(单进程) | Desktop=pywebview 壳+FastAPI 同进程,不跨进程 |
+
+## S05 固定系统解析适配器
+
+本轮已授权文本层PDF需求增加可信固定解析脚本的一次性资源受限载体，窄范围补充H-04/ADR-005：它不运行Agent/用户命令、不产生独立事实、不设worker池或服务端口。主服务、治理、队列仍同进程；执行工具guard边界不变。具体范围、内存/时间/清理规则见 [ADR-024](decisions/ADR-024-versioned-project-documents.md)。

@@ -281,3 +281,39 @@ async def e2e_factory(tmp_path, adapter_factory):
             errors.append(exc)
     if errors:
         raise BaseExceptionGroup('E2E factory cleanup failed', errors)
+
+
+"""Keep the real test QApplication alive through its session; no app mocks."""
+import gc,threading
+import pytest
+
+_owned_application=None
+
+@pytest.fixture(scope='session',autouse=True)
+def real_native_application_owner(request):
+    global _owned_application
+    if not any('test_native_product_execution_control.py::' in item.nodeid for item in request.session.items):
+        yield None
+        return
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QCoreApplication,QEvent
+    from shiboken6 import delete,isValid
+    assert threading.current_thread() is threading.main_thread()
+    _owned_application=QApplication.instance() or QApplication([])
+    yield _owned_application
+    assert threading.current_thread() is threading.main_thread()
+    widgets=list(_owned_application.topLevelWidgets())
+    assert not any(widget.isVisible() for widget in widgets),'A native test left a visible window'
+    for widget in widgets:
+        if not isValid(widget):continue
+        if widget.__class__.__name__=='ProductExecutionControl':
+            assert widget.dead,'Native test did not dispose its control'
+            assert widget.inflight is None or widget.inflight.done(),'Native operation still in flight at session teardown'
+        delete(widget)
+    QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+    _owned_application.processEvents()
+    gc.collect()
+    delete(_owned_application)
+    _owned_application=None
+    assert QApplication.instance() is None,'Test QApplication was not destroyed on its owning thread'
+    print('Real native session cleanup completed on main thread; no QApplication remains',flush=True)

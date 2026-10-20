@@ -45,6 +45,7 @@ class MainWindow(WindowTabs, WindowSessions, WindowManagement, QMainWindow):
     def __init__(self, controller: NativeController) -> None:
         super().__init__()
         self.controller = controller
+        self._disposed = False
         self.sid = ""
         self._messages: list[dict] = []
         self._stream_text = ""
@@ -62,6 +63,8 @@ class MainWindow(WindowTabs, WindowSessions, WindowManagement, QMainWindow):
         storage = getattr(controller.service, '_storage_root', None)
         appearance_path = Path(storage())/'appearance'/'native.ini' if callable(storage) else None
         self.appearance = NativeAppearance(self, appearance_path)
+        from .window_workbench import NativeWorkbenchEntry
+        self._workbench_entry = NativeWorkbenchEntry(self)
 
         self._interaction_timer = QTimer(self)
         self._interaction_timer.timeout.connect(self._poll_interactions)
@@ -194,23 +197,53 @@ class MainWindow(WindowTabs, WindowSessions, WindowManagement, QMainWindow):
         self.audit_refresh_btn.clicked.connect(lambda: self._spawn(self.refresh_audit()))
 
     def _spawn(self, coro: Any) -> None:
-        task = asyncio.create_task(coro)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._disposed or loop is None:
+            close = getattr(coro, 'close', None)
+            if callable(close):
+                close()
+            return
+        task = loop.create_task(coro)
         task.add_done_callback(self._task_done)
 
     def _task_done(self, task: asyncio.Task) -> None:
         try:
             task.result()
         except Exception as exc:                       # noqa: BLE001
-            self.statusBar().showMessage(f"错误:{type(exc).__name__}: {exc}", 8000)
+            if not self._disposed:
+                self.statusBar().showMessage(f"错误:{type(exc).__name__}: {exc}", 8000)
 
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        from .window_geometry import fit_available_screen
+        QTimer.singleShot(0, lambda: fit_available_screen(self))
+        handle = self.windowHandle()
+        if handle is not None and not getattr(self, "_screen_fit_connected", False):
+            self._screen_fit_connected = True
+            handle.screenChanged.connect(
+                lambda screen: QTimer.singleShot(0, lambda: fit_available_screen(self)))
 
     def dispose(self) -> None:
         """Detach GUI resources even when the event loop stops before close."""
+        self._disposed = True
+        self._workbench_entry.dispose()
+        control = getattr(self, 'product_execution_control', None)
+        if control is not None:
+            control.dispose()
         self.appearance.destroy()
         self._interaction_timer.stop()
         self.hide()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.dispose()
-        self._spawn(self.controller.close())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # The native entry's finally block remains the service owner.
+        else:
+            loop.create_task(self.controller.close()).add_done_callback(self._task_done)
         super().closeEvent(event)

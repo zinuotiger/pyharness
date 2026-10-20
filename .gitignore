@@ -48,3 +48,9 @@ skills/make-skill/
 skills/.skills
 .tools/
 tooling/codex/runtime.json
+
+# Private task state remains local and in private recovery backups.
+.hypothesis/
+.ai-coding/*
+!.ai-coding/PROTOCOL.md
+!.ai-coding/TASK-TEMPLATE.md

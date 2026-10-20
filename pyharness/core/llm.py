@@ -135,6 +135,11 @@ class LLMClient:
             return await ch.chat_with_fallback(messages, tools, ctx=ctx,
                                                method=method)
         inst = self.require()
+        if not isinstance(inst, ModelRequests):
+            from pyharness.core.context_observation import observe_adapter_request
+            await observe_adapter_request(ctx, self.model, method, messages, tools)
+        from pyharness.core.product_model_gate import check_model_attempt
+        await check_model_attempt(ctx, self.model, method)
         return await getattr(inst, method)(messages, tools, ctx=ctx)
 
     def _egress_guard(self, method: str, ctx: Any) -> None:
@@ -428,7 +433,34 @@ def build_client(triple: AdapterTriple, limits: TimeoutLimits, *,
 # ================================================================ 会话门面
 
 
+
+def model_configuration_admission(actual,expected,registry,model):
+    from pyharness.core.model_connection_identity import connection_registry_key
+    actual_keys=[actual.model,*(actual.fallback_models or [])]
+    wanted=[expected.model,*(expected.fallback_models or [])]
+    if len(actual_keys)!=len(wanted):return False,False
+    limits=TimeoutLimits.from_cfg(expected.timeout)
+    for key,name in zip(actual_keys,wanted):
+        if key==name:continue  # old explicit borrowed-adapter configuration
+        adapter=registry.get(key)
+        if type(adapter) is not OpenAICompatAdapter or adapter._closed:return False,False
+        triple=adapter._triple
+        if (triple is None or adapter.model!=name or triple.model!=name or
+                triple.api_key_ref!=expected.api_key or triple.base_url!=expected.base_url or
+                adapter.timeout!=limits):return False,False
+        store=triple.credential_store;binding=triple.credential_binding
+        if store is not None:
+            # Original store validates the exact generation; no secret is read.
+            store.validate_binding(triple.api_key_ref,binding)
+        derived=connection_registry_key(expected.api_key,expected.base_url,name,limits,binding,
+            str(store.root.resolve()) if store is not None else '')
+        if key!=derived:return False,False
+    value=actual.model_dump();value['model']=expected.model;value['fallback_models']=expected.fallback_models
+    return value==expected.model_dump(),model in [*actual_keys,*wanted]
+
+
 __all__ = [
+    "model_configuration_admission",
     # 数据结构
     "TimeoutLimits", "ToolCall", "LLMResponse", "UsageCounters", "AdapterTriple",
     # 异常

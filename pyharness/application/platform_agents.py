@@ -9,6 +9,42 @@ from pyharness.application.platform_models import AgentDefinition, AgentVersion
 from pyharness.core.sandbox import fail
 from pyharness.application.platform_templates import TEMPLATES
 
+
+def _validated_agent(body):
+    agent = AgentDefinition.model_validate(body)
+    if agent.output_schema:
+        from pyharness.core.tools_registry import _compile_model
+        _compile_model('platform.output', agent.output_schema)
+    if agent.mcp_connections and agent.sandbox_profile.mode != 'host_approved':
+        fail('mcp_requires_explicit_host_approval')
+    return agent
+
+
+def _publish_into(data, ident):
+    """Original publication primitive, within an already owned transaction."""
+    if ident not in data['agents']:
+        fail('agent_not_found')
+    agent = AgentDefinition.model_validate(data['agents'][ident])
+    agent.current_version += 1
+    agent.status = 'published'
+    snap = agent.model_dump()
+    version = AgentVersion(agent_id=ident, version=agent.current_version, snapshot=agent,
+        sha256=hashlib.sha256(json.dumps(snap, sort_keys=True).encode()).hexdigest()).model_dump()
+    data['versions'].setdefault(ident, []).append(version)
+    data['agents'][ident] = snap
+    return version
+
+
+def _version_in_data(data, ident, number):
+    for version in data['versions'].get(ident, []):
+        if version['version'] == number:
+            checksum = hashlib.sha256(json.dumps(version['snapshot'], sort_keys=True).encode()).hexdigest()
+            if checksum != version['sha256']:
+                fail('agent_version_integrity_failed')
+            return version
+    fail('agent_version_not_found')
+
+
 class PlatformAgents:
     """PlatformAgents responsibility; state is owned by the composing facade."""
 
@@ -31,12 +67,7 @@ class PlatformAgents:
                 fail('account_host_execution_forbidden')
 
     def save_agent(self, body, ident=None):
-        agent = AgentDefinition.model_validate(body)
-        if agent.output_schema:
-            from pyharness.core.tools_registry import _compile_model
-            _compile_model('platform.output',agent.output_schema)
-        if agent.mcp_connections and agent.sandbox_profile.mode!='host_approved':
-            fail('mcp_requires_explicit_host_approval')
+        agent = _validated_agent(body)
         with self.store.transaction() as data:
             if ident:
                 old = data['agents'].get(ident)
@@ -51,17 +82,7 @@ class PlatformAgents:
 
     def publish_agent(self, ident):
         with self.store.transaction() as data:
-            if ident not in data['agents']:
-                fail('agent_not_found')
-            agent = AgentDefinition.model_validate(data['agents'][ident])
-            agent.current_version += 1
-            agent.status = 'published'
-            snap = agent.model_dump()
-            version = AgentVersion(agent_id=ident, version=agent.current_version, snapshot=agent,
-                sha256=hashlib.sha256(json.dumps(snap, sort_keys=True).encode()).hexdigest()).model_dump()
-            data['versions'].setdefault(ident, []).append(version)
-            data['agents'][ident] = snap
-        return version
+            return _publish_into(data, ident)
 
     def agent_action(self, ident, action, body=None):
         data = self.store.read()
@@ -103,13 +124,7 @@ class PlatformAgents:
         return {'ok':True}
 
     def version(self, ident, number):
-        for version in self.store.read()['versions'].get(ident, []):
-            if version['version'] == number:
-                checksum=hashlib.sha256(json.dumps(version['snapshot'],sort_keys=True).encode()).hexdigest()
-                if checksum!=version['sha256']:
-                    fail('agent_version_integrity_failed')
-                return version
-        fail('agent_version_not_found')
+        return _version_in_data(self.store.read(), ident, number)
 
     def new_binding_version(self, ident, number):
         data=self.store.read()

@@ -191,6 +191,8 @@ class SubagentExecution:
                 self._completed.popitem(last=False)
             if h.result is not None and h.result.done() and not h.result.cancelled():
                 h.result.exception()  # Retrieve failures even without a waiting join.
+            finalize=getattr(self._runner,'finalize_child',None)
+            if callable(finalize):finalize(h.sub_id)
 
     def _historic_result(self, sub_id):
         """Only owned child IDs may be recovered from this parent's event log."""

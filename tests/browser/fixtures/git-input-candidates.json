@@ -1,0 +1,171 @@
+{
+  "project": {
+    "projects": [
+      {
+        "project": {
+          "schema_version": 1,
+          "project_id": "p-0123456789abcdef",
+          "revision": 1,
+          "name": "Synthetic candidates",
+          "description": "",
+          "archived": false
+        },
+        "digest": "f2bfeb8da88f568af6df64e10f2d13144e103824b8e1c6def2e4703532cfb097",
+        "source_seq": 2,
+        "created_at": "2026-10-17T00:13:26.987806Z",
+        "created_by": "local-operator"
+      }
+    ],
+    "total": 1
+  },
+  "grant": {
+    "grant_id": "sg-0123456789abcdef",
+    "revision": 1,
+    "root_identity": "6b82dcf8929ee1eecaea30e65e1da17350a9529408089c68cd9caa290e0c5ab2",
+    "actions": [
+      "read"
+    ],
+    "expires_at": "2099-01-01T00:00:00Z",
+    "revoked": false,
+    "digest": "993515d73966d9c8b66a1513a7c50116f7e53167d7988a5e9ecdc90ce58631f4",
+    "source_seq": 3
+  },
+  "candidates": {
+    "schema_version": 1,
+    "status": "git_candidates_observed",
+    "project_id": "p-0123456789abcdef",
+    "project_revision": 1,
+    "grant_id": "sg-0123456789abcdef",
+    "grant_revision": 1,
+    "grant_source_seq": 3,
+    "metadata_grant_id": null,
+    "metadata_grant_revision": null,
+    "metadata_grant_source_seq": null,
+    "repository_kind": "ordinary",
+    "head_oid": "59172903369fef2bd0a57c24df17bdba9e0a0404",
+    "index_digest": "5ca679a9432602b37f6ddbc494a4f4abb25fe6af4e4a6edc22e0bdc8c46963c4",
+    "scope": "tracked_and_untracked_candidates",
+    "ignored_requested": false,
+    "ignore_policy": "worktree_gitignore_only",
+    "body_policy": "git_metadata_and_ignore_rules_only",
+    "content_safety": "not_evaluated",
+    "capture_stability": "stable_observed",
+    "persisted": false,
+    "executable": false,
+    "required_tracked_count": 2,
+    "excluded_required_count": 0,
+    "capture_file_limit": 200,
+    "items": [
+      {
+        "entry_index": 0,
+        "path": ".ai-coding/RULES.md",
+        "path_digest": "f669908b11343f7dec2dda4c0b50ab7c136e47a3f544cdcf77bb6a17cfb8bc06",
+        "origin": "untracked",
+        "required": false,
+        "head": null,
+        "index": null,
+        "working": {
+          "size_bytes": 20,
+          "mtime_ns": "1792196006432309900",
+          "native_mode": 438
+        },
+        "staged": false,
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "status": "candidate",
+        "reason": null
+      },
+      {
+        "entry_index": 1,
+        "path": "delete.txt",
+        "path_digest": "30a3065795952f18bc74a8d26d53fecea61cb6b99b1075821a1313488a550aa6",
+        "origin": "tracked",
+        "required": true,
+        "head": {
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "mode": 33188
+        },
+        "index": {
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "mode": 33188
+        },
+        "working": null,
+        "staged": false,
+        "deletion_marker": true,
+        "index_deletion_marker": false,
+        "status": "candidate",
+        "reason": null
+      },
+      {
+        "entry_index": 2,
+        "path": "new.txt",
+        "path_digest": "11f8ad13b4f875d3482479fb6936683d83f9268cc445efe277964f1823939313",
+        "origin": "untracked",
+        "required": false,
+        "head": null,
+        "index": null,
+        "working": {
+          "size_bytes": 11,
+          "mtime_ns": "1792196006431302200",
+          "native_mode": 438
+        },
+        "staged": false,
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "status": "candidate",
+        "reason": null
+      },
+      {
+        "entry_index": 3,
+        "path": "unchanged.txt",
+        "path_digest": "fa95fa527153c2f558cce0c30e651d71af5ab36c83b3c7ac4c08f1ac1113d540",
+        "origin": "tracked",
+        "required": true,
+        "head": {
+          "git_oid": "3713f5b7d56ccc70d86e96bece258bdddb60d037",
+          "mode": 33188
+        },
+        "index": {
+          "git_oid": "209a68ba468602c684fdb54ec0f67d0870aace17",
+          "mode": 33188
+        },
+        "working": {
+          "size_bytes": 12,
+          "mtime_ns": "1792196006429794000",
+          "native_mode": 438
+        },
+        "staged": true,
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "status": "candidate",
+        "reason": null
+      },
+      {
+        "entry_index": 4,
+        "path": "unselected.txt",
+        "path_digest": "983b8a71e5e8717b5f4739fc9b0a2338bfb2e2885eca142483ccc5725bb7ab79",
+        "origin": "untracked",
+        "required": false,
+        "head": null,
+        "index": null,
+        "working": {
+          "size_bytes": 20,
+          "mtime_ns": "1792196006432309900",
+          "native_mode": 438
+        },
+        "staged": false,
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "status": "candidate",
+        "reason": null
+      }
+    ],
+    "total": 5,
+    "page_count": 5,
+    "has_more": false,
+    "next_cursor": null,
+    "view_digest": "0c105f8ec331f80b1da650b110d79991bec5dc617ca35ea8b4fae229a033bb86",
+    "page_digest": "bf9078f0512d085e481d55abcbb6aa81574611477b374d44d60570e2ec860f78"
+  },
+  "label": "Synthetic real ASGI DTOs, not real HTTP"
+}

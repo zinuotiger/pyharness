@@ -45,7 +45,7 @@ class NativeController(QObject):
             for type_ in EVENT_TYPES:
                 try:
                     self._subs.append(bus.subscribe(
-                        type_, self._on_bus_event, owner=owner))
+                        type_, self._receive_bus_event, owner=owner))
                 except Exception:                      # noqa: BLE001
                     log.debug("native bus subscribe skipped %s", type_)
 
@@ -73,6 +73,11 @@ class NativeController(QObject):
         return event_tenant_allowed(self.tenant_id,
                                     event_tenant_of(payload, session_id=str(sid)))
 
+    async def _receive_bus_event(self, type_: str, payload: Any) -> None:
+        # EventBus runs synchronous subscribers in a worker thread. Qt delivery
+        # belongs on the qasync owner loop, without yielding before persistence.
+        self._on_bus_event(type_, payload)
+
     def _on_bus_event(self, type_: str, payload: Any) -> None:
         if not self._event_allowed(payload):
             return
@@ -89,6 +94,14 @@ class NativeController(QObject):
         self.event_received.emit(type_, payload)
 
     async def close(self) -> None:
+        try:
+            workbench = getattr(self, "_native_workbench", None)
+            if workbench is not None:
+                await workbench.close()
+        finally:
+            await self._close_services()
+
+    async def _close_services(self) -> None:
         bus = getattr(self.ctx, "bus", None) if self.ctx is not None else None
         if bus is not None:
             try:

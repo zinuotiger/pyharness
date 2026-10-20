@@ -1,0 +1,381 @@
+{
+  "project": {
+    "projects": [
+      {
+        "project": {
+          "schema_version": 1,
+          "project_id": "p-0123456789abcdef",
+          "revision": 1,
+          "name": "Synthetic workspace",
+          "description": "",
+          "archived": false
+        },
+        "digest": "d4901108cf9a6089909627fc19f1d5b11f96c5a0d1dc671962a07a8875abfe6f",
+        "source_seq": 2,
+        "created_at": "2026-10-16T20:08:39.472063Z",
+        "created_by": "local-operator"
+      }
+    ],
+    "total": 1
+  },
+  "grant": {
+    "grant_id": "sg-0123456789abcdef",
+    "revision": 1,
+    "root_identity": "ca0e059ca72f763c9dd2f59158c7b3069b60eb5fa3ed3bf37bf8053071431efa",
+    "actions": [
+      "read"
+    ],
+    "expires_at": "2099-01-01T00:00:00Z",
+    "revoked": false,
+    "digest": "b49791a1c96a4c001800533f03dfd27ece3f3e944e3c17ad45d2766154050188",
+    "source_seq": 3
+  },
+  "preview": {
+    "schema_version": 1,
+    "status": "workspace_snapshot_confirmation_required",
+    "repository_kind": "ordinary",
+    "project_id": "p-0123456789abcdef",
+    "grant_id": "sg-0123456789abcdef",
+    "grant_revision": 1,
+    "source_seq": 3,
+    "metadata_grant_id": null,
+    "metadata_grant_revision": null,
+    "head_oid": "a7d4249fc9b204a96c3e2d66bff620b157575282",
+    "index_digest": "9ed3e8bfa898fc829f66310532647a25c046e8698064175a04283aa90be6d0ef",
+    "items": [
+      {
+        "schema_version": 1,
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "3713f5b7d56ccc70d86e96bece258bdddb60d037",
+          "digest": "d031c36720eb6c865455d4ee7e82db46368754cb62dffbfaeb9b3b03342cdb07",
+          "size_bytes": 6,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "209a68ba468602c684fdb54ec0f67d0870aace17",
+          "digest": "f998faaeefd51e743f61d12d73a06dec1882021c33696a70bc18a50dbdcf503b",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": {
+          "schema_version": 1,
+          "git_oid": "dee9f112651b9667bde7f94a07e0cc12b1672b56",
+          "digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a",
+          "size_bytes": 12,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 1,
+        "path": "delete.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": null,
+        "deletion_marker": true,
+        "index_deletion_marker": false,
+        "selected_untracked": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 2,
+        "path": "new.txt",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "9c9be268411fbc6ec89814ee2c669c70fe58e623",
+          "digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be",
+          "size_bytes": 11,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true
+      },
+      {
+        "schema_version": 1,
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "977f9ee6411932e790e2f3266393a97143f84e62",
+          "digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349",
+          "size_bytes": 20,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true
+      }
+    ],
+    "file_count": 4,
+    "unique_content_size_bytes": 65,
+    "policy": "reject-secrets-utf8-v1",
+    "capture_stability": "stable_observed",
+    "scope": "tracked_plus_selected_untracked",
+    "persisted": false,
+    "executable": false,
+    "observation_digest": "323a2c4b74cc3648cc88108b5014d817c1f8190f17578496b066b7b4d9b70c88",
+    "project_revision": 1,
+    "tracked_paths": [
+      "delete.txt",
+      "unchanged.txt"
+    ],
+    "confirmation_digest": "b5259a64b772b1944742f8b55228933aab6bf1bc6c491012d1a6b329782ab218"
+  },
+  "snapshot": {
+    "schema_version": 1,
+    "snapshot_id": "ws-0123456789abcdef",
+    "revision": 1,
+    "project_id": "p-0123456789abcdef",
+    "project_revision": 1,
+    "root_identity": "ca0e059ca72f763c9dd2f59158c7b3069b60eb5fa3ed3bf37bf8053071431efa",
+    "metadata_root_identity": null,
+    "metadata_grant_source_seq": null,
+    "tracked_paths": [
+      "delete.txt",
+      "unchanged.txt"
+    ],
+    "confirmation_digest": "b5259a64b772b1944742f8b55228933aab6bf1bc6c491012d1a6b329782ab218",
+    "scope": "tracked_plus_selected_untracked",
+    "change_basis": "raw_layer_comparison",
+    "exclusions": [],
+    "repository_kind": "ordinary",
+    "grant_id": "sg-0123456789abcdef",
+    "grant_revision": 1,
+    "metadata_grant_id": null,
+    "metadata_grant_revision": null,
+    "head_oid": "a7d4249fc9b204a96c3e2d66bff620b157575282",
+    "index_digest": "9ed3e8bfa898fc829f66310532647a25c046e8698064175a04283aa90be6d0ef",
+    "file_count": 4,
+    "unique_content_size_bytes": 65,
+    "policy": "reject-secrets-utf8-v1",
+    "capture_stability": "stable_observed",
+    "observation_digest": "323a2c4b74cc3648cc88108b5014d817c1f8190f17578496b066b7b4d9b70c88",
+    "items": [
+      {
+        "schema_version": 1,
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "3713f5b7d56ccc70d86e96bece258bdddb60d037",
+          "digest": "d031c36720eb6c865455d4ee7e82db46368754cb62dffbfaeb9b3b03342cdb07",
+          "size_bytes": 6,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "209a68ba468602c684fdb54ec0f67d0870aace17",
+          "digest": "f998faaeefd51e743f61d12d73a06dec1882021c33696a70bc18a50dbdcf503b",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": {
+          "schema_version": 1,
+          "git_oid": "dee9f112651b9667bde7f94a07e0cc12b1672b56",
+          "digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a",
+          "size_bytes": 12,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": false,
+        "staged": true,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 1,
+        "path": "delete.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": null,
+        "deletion_marker": true,
+        "index_deletion_marker": false,
+        "selected_untracked": false,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 2,
+        "path": "new.txt",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "9c9be268411fbc6ec89814ee2c669c70fe58e623",
+          "digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be",
+          "size_bytes": 11,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "977f9ee6411932e790e2f3266393a97143f84e62",
+          "digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349",
+          "size_bytes": 20,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      }
+    ],
+    "grant_source_seq": 3,
+    "source_seq": 4,
+    "digest": "c4366cc7c112b99edaa4f05ff1f30f4570648cdd4d6564d4b16bfd3029cc2332",
+    "created_at": "2026-10-16T20:08:41.200710Z",
+    "selected_untracked_paths": [
+      "new.txt",
+      ".ai-coding/RULES.md"
+    ],
+    "total_size_bytes": 43,
+    "status": "captured",
+    "stale_reasons": [],
+    "persisted": true,
+    "executable": false,
+    "live_source_freshness": "not_asserted",
+    "receipt_digest": "37547c481266ba1d0a6a29cc629001808e504e469661e5c92ad4204055df21c4"
+  },
+  "manifest": {
+    "schema_version": 2,
+    "manifest_id": "cm-aaaaaaaaaaaaaaaa",
+    "project_revision": 1,
+    "task_ref": null,
+    "revision": 1,
+    "project_id": "p-0123456789abcdef",
+    "source_ref": {
+      "snapshot_id": "ws-0123456789abcdef",
+      "revision": 1,
+      "digest": "c4366cc7c112b99edaa4f05ff1f30f4570648cdd4d6564d4b16bfd3029cc2332",
+      "source_seq": 4,
+      "captured_project_revision": 1,
+      "grant_id": "sg-0123456789abcdef",
+      "grant_revision": 1,
+      "grant_source_seq": 3,
+      "root_identity": "ca0e059ca72f763c9dd2f59158c7b3069b60eb5fa3ed3bf37bf8053071431efa",
+      "metadata_grant_id": null,
+      "metadata_grant_revision": null,
+      "metadata_grant_source_seq": null,
+      "metadata_root_identity": null,
+      "head_oid": "a7d4249fc9b204a96c3e2d66bff620b157575282",
+      "index_digest": "9ed3e8bfa898fc829f66310532647a25c046e8698064175a04283aa90be6d0ef",
+      "confirmation_digest": "b5259a64b772b1944742f8b55228933aab6bf1bc6c491012d1a6b329782ab218",
+      "source_kind": "workspace_snapshot"
+    },
+    "items": [
+      {
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "size_bytes": 12,
+        "content_digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a"
+      },
+      {
+        "input_index": 2,
+        "path": "new.txt",
+        "size_bytes": 11,
+        "content_digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be"
+      },
+      {
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "size_bytes": 20,
+        "content_digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349"
+      }
+    ],
+    "total_size_bytes": 43,
+    "policy": "reject-secrets-utf8-v1",
+    "file_count": 3,
+    "digest": "66e8802a35ffe6386d2286104e670791f383fc12f65241637a36b8012c8530e9",
+    "source_seq": 5,
+    "created_at": "2026-10-16T20:08:41.292036Z",
+    "status": "current",
+    "stale_reasons": [],
+    "binding_mode": "project_only",
+    "executable": false,
+    "receipt_digest": "fe006cc126b2bce8aa752102b116a1cc7eb4a68a0a58decf47651f7bce00ca6c"
+  },
+  "task": {
+    "schema_version": 1,
+    "mode": "context_reference_only",
+    "product_task_id": "pt-bbbbbbbbbbbbbbbb",
+    "project_id": "p-0123456789abcdef",
+    "project_revision": 1,
+    "revision": 1,
+    "title": "Synthetic target",
+    "retired": false,
+    "digest": "1cd73743cc6779af7ab51fafde33d9c22e1869e8fe5962db04099f831aa7bc21",
+    "source_seq": 6,
+    "created_at": "2026-10-16T20:08:41.376006Z",
+    "status": "current",
+    "executable": false
+  },
+  "label": "Synthetic public DTOs from real ASGI; not real HTTP; no absolute source paths or credentials"
+}

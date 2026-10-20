@@ -225,6 +225,7 @@ class McpClient:
         self.connected = False
         self._tools: list[dict] = []
         self.initialization: dict = {}
+        self.tools_listing: dict = {}
 
     async def connect(self) -> dict:
         """MCP 握手:initialize → notifications/initialized → tools/list。"""
@@ -239,6 +240,7 @@ class McpClient:
             raise_code("TLB-805", module="mcp", hint=f"不支持协商版本 {negotiated}")
         await self.transport.request("notifications/initialized", {})
         listed = await self.transport.request("tools/list", {})
+        self.tools_listing = dict(listed or {})
         self._tools = list((listed or {}).get("tools") or [])   # result:null 判空(P2)
         self.connected = True
         return {"server": (init or {}).get("serverInfo"), "protocolVersion": negotiated,

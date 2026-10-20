@@ -15,8 +15,15 @@ from typing import Optional
 from pydantic import BaseModel, ValidationError
 
 from pyharness.errors import raise_code
+from pyharness.events.payload_product_execution import ExecutionLifecyclePayload, ExecutionEffectPayload
+from pyharness.events.payload_product_child import ExecutionChildPayload
+from pyharness.events.payload_checkpoint import ExecutionCheckpointPayload
+from pyharness.events.payload_correction import ExecutionCorrectionAppliedPayload
+from pyharness.events.payload_state_checkpoint import ExecutionStateCheckpointPayload
+from pyharness.events.payload_context import ExecutionContextPayload
 from pyharness.events.payload import (  # noqa: F401 — 模型类仅供注册引用
     ExecutorEventPayload,
+    WorkspaceResourceCommittedPayload,
     PlatformResourcePayload,
     AgentMessagePayload,
     ApprovalOutcomePayload,
@@ -108,6 +115,11 @@ SYNC_TYPES = frozenset({
     "policy.updated",                      # 治理层策略事件(ADR-020:强同步)
     "decision.issued",                     # 治理层决策事件(ADR-015:M3;强同步)
     "receipt.emitted",                     # 治理层凭证事件(M4;强同步)
+    "workspace.resource_committed",        # 产品控制事实先提交后投影
+    "execution.lifecycle", "execution.effect", "execution.child",  # S07 actual runtime facts
+    "execution.checkpoint",  # S08 must persist before the actual logical model round
+    "execution.correction_applied",  # S08 trusted context application, not a provider receipt
+    "execution.state_checkpoint",  # S08 actual private state companion, no replay grant
 })
 
 # 瞬时事件(仅总线,禁 append 入日志;registry.updated 为总线内部广播,无 payload 模型)
@@ -293,6 +305,14 @@ _CORE_EVENT_TYPES: tuple[tuple[str, type[BaseModel], bool], ...] = (
     ("executor.event", ExecutorEventPayload, False),
     ("platform.sandbox", PlatformResourcePayload, False),
     ("platform.knowledge", PlatformResourcePayload, False),
+    ("workspace.resource_committed", WorkspaceResourceCommittedPayload, False),
+    ("execution.lifecycle", ExecutionLifecyclePayload, False),
+    ("execution.effect", ExecutionEffectPayload, False),
+    ("execution.child", ExecutionChildPayload, False),
+    ("execution.checkpoint", ExecutionCheckpointPayload, False),
+    ("execution.correction_applied", ExecutionCorrectionAppliedPayload, False),
+    ("execution.state_checkpoint", ExecutionStateCheckpointPayload, False),
+    ("execution.context", ExecutionContextPayload, False),
 )
 
 

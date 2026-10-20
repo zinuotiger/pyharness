@@ -140,6 +140,10 @@ class OrchestrationService:
 
     @admitted
     async def cancel_subagent(self, sid: str, sub_id: str) -> bool:
+        from pyharness.application.product_execution_sessions import is_product_session
+        if is_product_session(sid):
+            from pyharness.application.product_child_cancellation import cancel_product_child
+            return await cancel_product_child(self,sid,sub_id)
         _, spine = await self.public_spine_for(sid)
         return bool(await spine.subagent.cancel(sub_id, by=self.owner_for(sid)))
 

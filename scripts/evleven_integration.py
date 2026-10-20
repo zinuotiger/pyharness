@@ -283,6 +283,11 @@ async def bounded_phase(data, action):
 
 def main():
     global BASE, R1_PYTHON
+    # This probe is captured/archived as UTF-8 even on a legacy Windows console.
+    # Setting PYTHONUTF8 later affects children, not this already-open stream.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-dir', type=Path, default=BASE)
     parser.add_argument('--data-dir', type=Path)

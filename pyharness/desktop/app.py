@@ -84,8 +84,7 @@ class DesktopApp(DesktopAuthority, DesktopRoutes, DesktopPages, DesktopHandlers,
         self._graceful_done: bool = False        # 优雅停服幂等标记(双击关闭只走一次)
         self._tenant_var: contextvars.ContextVar[str] = contextvars.ContextVar(
             "pyharness_desktop_tenant", default="default")
-        self._service_registry = ApplicationServiceRegistry(
-            ctx, channel="desktop")
+        self._service_registry = self._create_service_registry(ctx)
         self.service = self._service_registry.get("default")
         self.api = FastAPI(title="PyHarness Desktop", docs_url=None, redoc_url=None)
         self._api_token = self._resolve_api_token()
@@ -102,6 +101,10 @@ class DesktopApp(DesktopAuthority, DesktopRoutes, DesktopPages, DesktopHandlers,
         bus = getattr(ctx, "bus", None)
         if bus is not None:
             self._sub = self._subscribe_all(bus)
+
+    def _create_service_registry(self, ctx: Any) -> ApplicationServiceRegistry:
+        """Default owned registry; embedded native details may borrow its owner."""
+        return ApplicationServiceRegistry(ctx, channel="desktop")
 
     # ------------------------------------------------ tenant/service registry
     @property

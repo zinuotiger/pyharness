@@ -40,7 +40,10 @@ def compile_execution(service: ApplicationService, log_: SessionLog) -> tuple[Se
             profile = next((p for p in profiles if p['id'] == platform_definition.model_connection), None)
             if profile is None:
                 raise_code('CRED-701', reason='agent_model_connection_missing')
-            cfg.llm.model, cfg.llm.base_url = profile['model'], profile['base_url']
-            cfg.llm.api_key = f'tenant:{service.tenant_id}:{profile["id"]}'
+            from pyharness.application.model_profile_configuration import profile_values
+            from pyharness.application.session_access import _session_module
+            defaults = _session_module()._cfg_of(service.ctx).llm.model_dump()
+            for name, value in profile_values(profile, service.tenant_id, defaults).items():
+                setattr(cfg.llm, name, value)
             cfg.llm.fallback_models = []
     return cfg, platform_definition

@@ -104,8 +104,11 @@ KNOWN_UNIMPLEMENTED: dict[str, str] = {
 
 # 名字撞车的键:确实是死配置,但其**字段名**与生产里某个无关的关键字实参同名时,
 # 自动判据无法区分 ⇒ 只能靠人工复核,故不参与复活判定。
-# 2026-09-21 现状:**空**(此前唯一的 `max_bytes` 已随 F061 接线转正,见 R6)。
-NAME_COLLISION_DEAD: dict[str, str] = {}
+# `max_bytes` 已随 F061 接线转正。SourceGrant 的 DTO 版本字段不读取
+# Settings.config.schema_version；不能把独立协议同名字段当成配置已接线。
+NAME_COLLISION_DEAD: dict[str, str] = {
+    "schema_version": "SourceGrant schema/validator 同名；ConfigMeta 迁移锚仍无外部读者",
+}
 
 
 async def test_bus_backpressure_limit_is_wired(tmp_path):

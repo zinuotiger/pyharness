@@ -1,5 +1,11 @@
 # EVENT-SCHEMA.md — 会话事件协议规范(字段级权威展开)
 
+S12公开观察增量：新增独立 `execution.context`，保留原89类型与22型强同步集，当前90/22。严格字段见 `payload_context.py` 与 [ADR-031](decisions/ADR-031-public-run-observation.md)。它是同一原执行日志中的 prepared 请求观察，不是权限或消息历史；记录端显式 sync，既有 `SYNC_TYPES` 不变。未知到达状态不能推断为提供方已收到。
+
+S08 检查点增量：新增强同步 `execution.checkpoint`、`execution.correction_applied`及`execution.state_checkpoint`，保留此前86类型/19强同步，S08完成时89/22。严格字段及历史前缀、状态blob绑定见[ADR-027](decisions/ADR-027-execution-checkpoints.md)与`payload_checkpoint.py`/`payload_state_checkpoint.py`；这些是观察事实，`replay_authorized=false`，不把历史效果或捕获状态当作当前恢复授权。当前权威仍为`events/vocab.py`。
+
+产品控制增量：`workspace.resource_committed` 为强同步事件，最初的Project、SourceGrant与SourceSnapshot约束见 [workspace-control](specs/workspace-control.md)；后续上下文、正式任务、输入、文档/引用/交付、RunAttempt和执行授权/取消的严格资源分派以`events/payload_workspace.py`为准。此控制事件只携带摘要引用，不携带私有源路径或正文；不可变定义由唯一控制owner核验。当前词表90/强同步22（S07执行/私有委派见ADR-026，S08检查点见ADR-027，S12公开请求见ADR-031），以events/vocab.py及test_events为准；其余未实现领域不能使用任意record字典冒充严格契约。
+
 > **文档类型**:协议规范(字段级)。权威上游:PRD-Core.md §3(冲突以 PRD §3 为准)与 §5 对应 F;实现伪代码见 DIS-CORE.md §3/§8([DIS-§x.x] 引用),不重复代码。**术语**:事件=会话事实最小持久单元;信封=事件外框;payload=类型化负载;强同步=落盘成功才返回;派生视图=日志折叠产物(消息历史/UI/FTS/预算),可整体重建。
 
 **章节**:§1 设计总则 · §2 信封 Envelope · §3 词汇总表(A 会话/B 用户/C 模型/D 工具/E 编排)· §4 reducer · §5 JSONL 物理格式 · §6 校验错误码 · §7 版本演进 · §8 持久化边界。
@@ -18,7 +24,7 @@
 ## 1.2 强同步事件(`SYNC_TYPES`)(崩溃一致性锚点)
 
 以下**原始三类族**事件**立即写盘 + flush,成功才返回**(`sync=True` / `SYNC_TYPES`,[DIS-§3.3.1][DIS-§8.2]);
-**此后为崩溃一致性追加了治理/编排型强同步事件** ⇒ 现共 **15 型**,唯一真源＝`events.vocab.SYNC_TYPES`（`approval.denied/granted/requested/timeout/reviewed`·`context.compacted`·`decision.issued`·`fork.created`·`guard.rejected`·`policy.updated`·`receipt.emitted`·`segment.start`·`session.finished`·`session.recovered`·`user.message`）。
+**此后为崩溃一致性追加了治理/编排型及产品控制强同步事件** ⇒ 现共 **22 型**,唯一真源＝`events.vocab.SYNC_TYPES`（`approval.denied/granted/requested/timeout/reviewed`·`context.compacted`·`decision.issued`·`fork.created`·`guard.rejected`·`policy.updated`·`receipt.emitted`·`segment.start`·`session.finished`·`session.recovered`·`user.message`·`workspace.resource_committed`·`execution.lifecycle`·`execution.effect`·`execution.child`·`execution.checkpoint`·`execution.correction_applied`·`execution.state_checkpoint`）。
 
 原始三类族:
 
@@ -621,7 +627,7 @@ repair 幂等:同日志重复修复结果一致;修复前强制备份 `.jsonl.ba
 
 | 类别 | 事件 | 落盘 | 理由 |
 |---|---|---|---|
-| 强同步(立即 write+flush) | **全 15 型,唯一真源＝`events.vocab.SYNC_TYPES`**：`user.message`、`guard.rejected`、`approval.denied/granted/requested/timeout/reviewed`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted`、`decision.issued`、`receipt.emitted`、`policy.updated` | ✓ 持久 | §1.2 原始三类族 + 终态/锚点/空洞声明/**治理证据**(声明或裁决不持久则重放与审计语义崩坏) |
+| 强同步(立即 write+flush) | **全 22 型,唯一真源＝`events.vocab.SYNC_TYPES`**：`user.message`、`guard.rejected`、`approval.denied/granted/requested/timeout/reviewed`、`session.finished`、`session.recovered`、`segment.start`、`fork.created`、`context.compacted`、`decision.issued`、`receipt.emitted`、`policy.updated`、`workspace.resource_committed`、`execution.lifecycle`、`execution.effect`、`execution.child`、`execution.checkpoint`、`execution.correction_applied`、`execution.state_checkpoint` | ✓ 持久 | §1.2 原始三类族 + 终态/锚点/空洞声明/**治理证据与产品控制提交**(声明或裁决不持久则重放与审计语义崩坏) |
 | 普通(攒批 ≤0.5s/64 条) | §3 其余持久事件(created/renamed/llm.*/tool.*/task.*/plan.*/goal.*/job.*/subagent.*/queue.*/plugin.*/system.*/todo.*/bus.backpressure 等) | ✓ 持久 | 事实留痕;崩溃丢 ≤0.5s 窗由 recovered 声明 |
 | 仅内存(仅总线) | `llm.chunk`(明示)、`registry.updated`(F003 广播) | ✗ 不落 | 高频可重算/碎片无审计价值(§1.3 准则) |
 
@@ -640,3 +646,38 @@ repair 幂等:同日志重复修复结果一致;修复前强制备份 `.jsonl.ba
 ---
 
 **关联文档**:PRD-Core.md §3(权威,冲突以 PRD 为准)/§4.1/§5 · DIS-CORE.md §3(session)§8(persistence)· MAP.md · ADD.md(ADR-001/006)· 架构设计.md · ERR.md(EVT-1xx/PERS-2xx 详细表)。
+
+## P03 ContextManifest 控制资源增量（2026-10-17）
+
+复用 workspace.resource_committed，resource_kind 增加 context_manifest/cm-16hex、task_definition/pt-16hex；后者仅持久上下文目标引用，不执行任务。信封继续严格 schema_version=1、revision=parent_revision+1、blob_ref=digest、command_id/actor_ref/request_digest；事件不承载宿主路径或文件正文。新blob精确读回后再强同步append，历史事件按当时父版本校验，后续升版仅派生stale，不损坏历史。准确限额、退役/撤权与精确历史GET见 docs/specs/workspace-control.md。事件名仍82、SYNC_TYPES仍16，不另建日志或第二控制真源。
+
+
+## P03 workspace_input 控制资源增量（2026-10-17）
+
+既有workspace.resource_committed新增严格workspace_input/wi-16hex子类型，schema1、revision1、parent_revision0不可变。信封仍仅blob摘要、命令/请求摘要、可信actor及身份版本，不写宿主路径或正文。定义仅服务端从确切CMv2/WS派生工作层/删除、项目/可选任务/完整来源版本，按事件时上下文验证；未来stale/撤权仅影响当前读/使用，不改历史。单定义/收据512KiB、200files/deletions、10MiB working及200历史；blob checked-FD精确读回、既有强同步append和磁盘确认后收据尾核权。提交后不明按503unknown保留原键正文，无自动重放。词表82/SYNC_TYPES16不变，复制及backend临时目录不是持久真源或执行事实。
+
+
+## P03 workspace_input schema2 定义（2026-10-17）
+
+既有workspace.resource_committed控制信封保持schema1、workspace_input/wi-16hex、revision1/parent0；只扩不可变blob定义schema2，严格选CMv1/SourceSnapshot精确谱系、捕获native_mode、私有文件且0删除。schema1定义仍选Git CMv2。decoder按明确schema验证，历史重建不核未来到期；当前使用必须重新核权。唯一事实、强同步、未知磁盘核对、类型历史/字节/时间限额不变，词表82/SYNC_TYPES16不变。
+
+## S05 项目资料资源扩展
+
+沿既有强同步 workspace.resource_committed/schema1，新增严格 document/doc-16hex、citation/cit-16hex（仅首版）、delivery_definition/del-16hex 资源。旧七类、事件名及强同步集合不变；不可变blob、CAS、原键确认与单一SessionLog沿用。详见 [资料协议](specs/project-documents.md) 和 [ADR-024](decisions/ADR-024-versioned-project-documents.md)。
+
+## S06不可变运行尝试资源
+
+workspace.resource_committed既有schema1封套新增run_attempt，resource_id=ra-16hex，revision1/parent_revision0不可变；原事件名与强同步集不变。blob绑定服务端主体/租户、确切任务/输入及资料/引用/交付并集，原提交key和规范化request_digest与事件一致；重放只验证事件时事实。当前观察/未知原键查询不append、不补投、不解除失败writer隔离。字段、限额和边界见[task-inbox](specs/task-inbox.md)及[ADR-025](decisions/ADR-025-durable-run-attempts.md)。
+
+## S09版本任务图资源
+
+既有 workspace.resource_committed/schema1 信封新增 task_graph/tg（1–200修订）、task_graph_run/gr、task_graph_dispatch/gd、task_graph_cancellation/gc（后三者仅首修订）。ID均为对应前缀加16hex，blob_ref=digest、CAS/原键/主体与请求摘要纪律不变。图节点 attempt/execution 的不可变blob采用明确 schema3 解析，固定图引用和强意图摘要；schema1/2保留，事件名及SYNC_TYPES集合不变。运行意图仍在同一control日志，节点效果仍在原执行日志。详见[任务图协议](specs/task-graphs.md)。
+
+## S10 交付控制资源增量
+
+继续使用原workspace.resource_committed及原SYNC定义，严格resource_kind增加delivery_package(dp)、role_contract(rc)、role_handoff(ho)、handoff_ack(ha)、delivery_acceptance(av)、delivery_export(xp)、handoff_budget(hb)，ID后缀均16位小写hex。仅role_contract可CAS修订1–200，其余不可变1；所有主体来自服务端真实账户。document blob显式增加schema2 handoff_output源，旧document schema1及旧RunAttempt/ExecutionAuthorization/图schema不加默认字段。历史投影只验证事件当时绑定，不用未来文件/墙钟破坏整本日志；当前视图另核当前授权、源字节与独立结论。参见specs/delivery-handoffs.md及ADR-029。
+
+
+## S11 固定合并与写回控制事实
+
+原workspace.resource_committed包络增加writeback_grant(wg)、merge_plan(mp)、writeback_application(wa)、merge_export(we)四种严格分派。wg只允许签发1→撤回2；wa只允许强意图1→实际结果2，原键对应同一方案，admitted在只读视图中派生unknown且不能重放。mp/we不可变1版。所有事实仍唯一控制SessionLog强同步，无新事件名或数据库；历史验证不读取当前宿主文件。精确契约见[安全写回](specs/three-way-writeback.md)。

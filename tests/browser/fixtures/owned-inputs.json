@@ -1,0 +1,310 @@
+{
+  "binding": {
+    "project": "p-0123456789abcdef",
+    "grantId": "sg-0123456789abcdef",
+    "grantRevision": 1,
+    "sourceSeq": 3
+  },
+  "snapshot": {
+    "schema_version": 1,
+    "snapshot_id": "ws-0123456789abcdef",
+    "revision": 1,
+    "project_id": "p-0123456789abcdef",
+    "project_revision": 1,
+    "root_identity": "b450126997e0cbbf67137fe57d37db8f46451ef0246eb45106205861490e460f",
+    "metadata_root_identity": null,
+    "metadata_grant_source_seq": null,
+    "tracked_paths": [
+      "delete.txt",
+      "unchanged.txt"
+    ],
+    "confirmation_digest": "99c927c5fb0ce71ddd825f0ad4cd393d4134ba275e6e2d8a2fcd0ac7165141f4",
+    "scope": "tracked_plus_selected_untracked",
+    "change_basis": "raw_layer_comparison",
+    "exclusions": [],
+    "repository_kind": "ordinary",
+    "grant_id": "sg-0123456789abcdef",
+    "grant_revision": 1,
+    "metadata_grant_id": null,
+    "metadata_grant_revision": null,
+    "head_oid": "bf6d1dcd2d56135bd557710d4a2ea2dda96563d1",
+    "index_digest": "c72b5de197d51a7196d5fbbd48c9f8ccc7f6aa0ccd9fe85b3517967ec7eff260",
+    "file_count": 4,
+    "unique_content_size_bytes": 65,
+    "policy": "reject-secrets-utf8-v1",
+    "capture_stability": "stable_observed",
+    "observation_digest": "7f7407e77d368fb3e46dd3ffb87f026cd18dbc006ad43ae133e9d6740815debf",
+    "items": [
+      {
+        "schema_version": 1,
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "3713f5b7d56ccc70d86e96bece258bdddb60d037",
+          "digest": "d031c36720eb6c865455d4ee7e82db46368754cb62dffbfaeb9b3b03342cdb07",
+          "size_bytes": 6,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "209a68ba468602c684fdb54ec0f67d0870aace17",
+          "digest": "f998faaeefd51e743f61d12d73a06dec1882021c33696a70bc18a50dbdcf503b",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": {
+          "schema_version": 1,
+          "git_oid": "dee9f112651b9667bde7f94a07e0cc12b1672b56",
+          "digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a",
+          "size_bytes": 12,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": false,
+        "staged": true,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 1,
+        "path": "delete.txt",
+        "head": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "index": {
+          "schema_version": 1,
+          "git_oid": "9ddfb02b03ecd5e7736f0dcb401ee9b223dbb9aa",
+          "digest": "5446908c28ca54f0f0f7632ddcbcaafa5b83b9762d0062cdbf325568233a6e46",
+          "size_bytes": 8,
+          "mode": 33188,
+          "native_mode": null
+        },
+        "working": null,
+        "deletion_marker": true,
+        "index_deletion_marker": false,
+        "selected_untracked": false,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 2,
+        "path": "new.txt",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "9c9be268411fbc6ec89814ee2c669c70fe58e623",
+          "digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be",
+          "size_bytes": 11,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      },
+      {
+        "schema_version": 1,
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "head": null,
+        "index": null,
+        "working": {
+          "schema_version": 1,
+          "git_oid": "977f9ee6411932e790e2f3266393a97143f84e62",
+          "digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349",
+          "size_bytes": 20,
+          "mode": 33188,
+          "native_mode": 438
+        },
+        "deletion_marker": false,
+        "index_deletion_marker": false,
+        "selected_untracked": true,
+        "staged": false,
+        "unstaged": true,
+        "working_mode_differs": false
+      }
+    ],
+    "grant_source_seq": 3,
+    "source_seq": 4,
+    "digest": "12bfa6c06f2b922277891426028c50693a69b955e7614271c0a3fff8976c3466",
+    "created_at": "2026-10-17T02:20:55.304621Z",
+    "selected_untracked_paths": [
+      "new.txt",
+      ".ai-coding/RULES.md"
+    ],
+    "total_size_bytes": 43,
+    "status": "captured",
+    "stale_reasons": [],
+    "persisted": true,
+    "executable": false,
+    "live_source_freshness": "not_asserted",
+    "receipt_digest": "0d35a3659a264b66d2f55e90069bc257d91549434ac3fe183236b3d3962b6b4c"
+  },
+  "manifest": {
+    "schema_version": 2,
+    "manifest_id": "cm-aaaaaaaaaaaaaaaa",
+    "project_revision": 1,
+    "task_ref": null,
+    "revision": 1,
+    "project_id": "p-0123456789abcdef",
+    "source_ref": {
+      "snapshot_id": "ws-0123456789abcdef",
+      "revision": 1,
+      "digest": "12bfa6c06f2b922277891426028c50693a69b955e7614271c0a3fff8976c3466",
+      "source_seq": 4,
+      "captured_project_revision": 1,
+      "grant_id": "sg-0123456789abcdef",
+      "grant_revision": 1,
+      "grant_source_seq": 3,
+      "root_identity": "b450126997e0cbbf67137fe57d37db8f46451ef0246eb45106205861490e460f",
+      "metadata_grant_id": null,
+      "metadata_grant_revision": null,
+      "metadata_grant_source_seq": null,
+      "metadata_root_identity": null,
+      "head_oid": "bf6d1dcd2d56135bd557710d4a2ea2dda96563d1",
+      "index_digest": "c72b5de197d51a7196d5fbbd48c9f8ccc7f6aa0ccd9fe85b3517967ec7eff260",
+      "confirmation_digest": "99c927c5fb0ce71ddd825f0ad4cd393d4134ba275e6e2d8a2fcd0ac7165141f4",
+      "source_kind": "workspace_snapshot"
+    },
+    "items": [
+      {
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "size_bytes": 12,
+        "content_digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a"
+      },
+      {
+        "input_index": 2,
+        "path": "new.txt",
+        "size_bytes": 11,
+        "content_digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be"
+      },
+      {
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "size_bytes": 20,
+        "content_digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349"
+      }
+    ],
+    "total_size_bytes": 43,
+    "policy": "reject-secrets-utf8-v1",
+    "file_count": 3,
+    "digest": "16d0de22e2f446b4ca3fd385bcc137e440ba08454f33a1a9e510ff7fe860ef1c",
+    "source_seq": 5,
+    "created_at": "2026-10-17T02:20:55.648688Z",
+    "status": "current",
+    "stale_reasons": [],
+    "binding_mode": "project_only",
+    "executable": false,
+    "receipt_digest": "1d019eefbb4ff3471268fb1b1c2c11bd16d70faf52662600d0f7051e54b7f484"
+  },
+  "input": {
+    "schema_version": 1,
+    "input_id": "wi-0123456789abcdef",
+    "project_revision": 1,
+    "manifest_ref": {
+      "manifest_id": "cm-aaaaaaaaaaaaaaaa",
+      "revision": 1,
+      "digest": "16d0de22e2f446b4ca3fd385bcc137e440ba08454f33a1a9e510ff7fe860ef1c",
+      "source_seq": 5
+    },
+    "revision": 1,
+    "project_id": "p-0123456789abcdef",
+    "source_ref": {
+      "snapshot_id": "ws-0123456789abcdef",
+      "revision": 1,
+      "digest": "12bfa6c06f2b922277891426028c50693a69b955e7614271c0a3fff8976c3466",
+      "source_seq": 4,
+      "captured_project_revision": 1,
+      "grant_id": "sg-0123456789abcdef",
+      "grant_revision": 1,
+      "grant_source_seq": 3,
+      "root_identity": "b450126997e0cbbf67137fe57d37db8f46451ef0246eb45106205861490e460f",
+      "metadata_grant_id": null,
+      "metadata_grant_revision": null,
+      "metadata_grant_source_seq": null,
+      "metadata_root_identity": null,
+      "head_oid": "bf6d1dcd2d56135bd557710d4a2ea2dda96563d1",
+      "index_digest": "c72b5de197d51a7196d5fbbd48c9f8ccc7f6aa0ccd9fe85b3517967ec7eff260",
+      "confirmation_digest": "99c927c5fb0ce71ddd825f0ad4cd393d4134ba275e6e2d8a2fcd0ac7165141f4",
+      "source_kind": "workspace_snapshot"
+    },
+    "task_ref": null,
+    "files": [
+      {
+        "input_index": 0,
+        "path": "unchanged.txt",
+        "size_bytes": 12,
+        "content_digest": "36efed9ebbc81277f7f2cdac6332cbdfb310bc1015a0d1a30eebcd645a53af8a",
+        "native_mode": 438,
+        "applied_mode": 384
+      },
+      {
+        "input_index": 2,
+        "path": "new.txt",
+        "size_bytes": 11,
+        "content_digest": "fb4c67742b65d2302eb9c74ed49b5d09b856aa7e92150b09cbda7d86346709be",
+        "native_mode": 438,
+        "applied_mode": 384
+      },
+      {
+        "input_index": 3,
+        "path": ".ai-coding/RULES.md",
+        "size_bytes": 20,
+        "content_digest": "c3e786a499c7b9b3ea306bdd3733fb187b6ab75e7baa99e941bd3da6f8c5d349",
+        "native_mode": 438,
+        "applied_mode": 384
+      }
+    ],
+    "deletions": [
+      {
+        "input_index": 1,
+        "path": "delete.txt"
+      }
+    ],
+    "total_size_bytes": 43,
+    "policy": "private-working-copy-v1",
+    "status": "input_prepared",
+    "stale_reasons": [],
+    "workspace_state": "not_started",
+    "materialization_status": "checked_at_commit",
+    "materialization_lifetime": "per_explicit_use",
+    "persisted": true,
+    "executable": false,
+    "file_count": 3,
+    "deletion_count": 1,
+    "digest": "e0559a36e50bb47dc905e48ff6e881b44e046de1a708050a6e514ccae093c9d8",
+    "source_seq": 6,
+    "created_at": "2026-10-17T02:20:56.192036Z",
+    "receipt_digest": "d69f2f3dbc3af8742d9c8f943fdb4781cf5fb5750e6babcc2ee4ba0d303e4bf9"
+  },
+  "command": {
+    "schema_version": 1,
+    "input_id": "wi-0123456789abcdef",
+    "project_revision": 1,
+    "manifest_ref": {
+      "manifest_id": "cm-aaaaaaaaaaaaaaaa",
+      "revision": 1,
+      "digest": "16d0de22e2f446b4ca3fd385bcc137e440ba08454f33a1a9e510ff7fe860ef1c",
+      "source_seq": 5
+    }
+  },
+  "provenance": "public responses from fresh synthetic ASGI fixture; renderer tests use synthetic API, separate from real loopback HTTP"
+}

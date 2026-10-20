@@ -261,7 +261,7 @@ class ExtensionService:
     def skills_mgr(self) -> SkillManager:
         for spine in self._engines.values():
             mgr = getattr(spine, "skills", None)
-            if mgr is not None:
+            if mgr is not None and getattr(spine, 'platform_runtime', None) is None:
                 return mgr
         if self.tenant_id != "default":
             return SkillManager([self.tenant_root() / "skills"])
@@ -296,9 +296,9 @@ class ExtensionService:
             if mgr is not None:
                 counts.append({"session": str(getattr(
                     getattr(spine, "session", None), "sid", "?")),
-                    "count": mgr.scan()})
+                    "count": mgr.scan(), "frozen": bool(getattr(mgr, '_frozen', False))})
         if not counts:
             counts.append({"direct": True, "count": self.skills_mgr().scan()})
         return {"ok": True, "results": counts,
-                "hint": "新技能立即可被 agent skill.load"}
+                "hint": "经典会话已显式刷新；正式平台任务保留其装配时固定技能，新任务使用新快照"}
 

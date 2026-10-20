@@ -34,10 +34,10 @@ def browser(out,expect):
     env=environment(out/'browser-runner')
     for name in ('PROGRAMFILES','PROGRAMFILES(X86)'):
         if name in os.environ:env[name]=os.environ[name]
-    uv=shutil.which('uv')
-    if not uv:raise SystemExit('uv required')
-    # Only the Python driver is installed. Chrome/Edge is provided by the runner.
-    run([uv,'pip','install','--python',python_in(out/'test-env'),'playwright==1.61.0'],cwd=out,env=env)
+    # The driver is already installed from the frozen dev dependency lock.
+    # Chrome/Edge is supplied by the host; no implicit browser download.
+    run([python_in(out/'test-env'),'-I','-B','-c',
+         "import importlib.metadata; assert importlib.metadata.version('playwright') == '1.61.0'"],cwd=out,env=env)
     args=[python_in(out/'test-env'),'-B',ROOT/'scripts/platform_browser_smoke.py','--output-dir',out/'browser']
     if expect:args+=['--expect-docker',expect]
     run(args,cwd=ROOT,env=env,timeout=180)

@@ -270,6 +270,12 @@ class FallbackChain:
                 from pyharness.core.llm_diagnostics import call_attempt
                 token = call_attempt.set(attempt + 1)
                 try:
+                    from pyharness.core.llm_requests import ModelRequests
+                    if not isinstance(self.adapters[name], ModelRequests):
+                        from pyharness.core.context_observation import observe_adapter_request
+                        await observe_adapter_request(ctx, name, method, messages, tools)
+                    from pyharness.core.product_model_gate import check_model_attempt
+                    await check_model_attempt(ctx, name, method)
                     return await fn(messages, tools, ctx=ctx)
                 finally:
                     call_attempt.reset(token)

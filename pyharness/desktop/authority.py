@@ -180,7 +180,9 @@ class DesktopAuthority:
 
     def _operator_ok(self, request: Request) -> bool:
         """是否持有全局(操作者)令牌;未配置令牌时视为放行(沿用既有语义)。"""
-        from .accounts_api import principal
+        from .accounts_api import principal, operator_principal
+        if operator_principal(request):
+            return True
         if principal(request):
             return False
         expected = self._api_token
@@ -283,8 +285,8 @@ class DesktopAuthority:
         (引导/外联);全部数据端点(含读端与 SSE)强制鉴权——此前 39 个读端点
         匿名、SSE 无鉴权,任何本地进程可枚举全部会话。
         """
-        from .accounts_api import principal
-        if principal(request):
+        from .accounts_api import principal, operator_principal
+        if principal(request) or operator_principal(request):
             return
         expected = self._api_token
         if not expected:

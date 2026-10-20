@@ -139,11 +139,9 @@ def register_default_llm(cfg: Any, *, force: bool = False,
         if model_name in registry and not isinstance(registry[model_name], llm_mod.OpenAICompatAdapter):
             return model_name  # explicitly supplied deterministic/plugin adapter
         limits = llm_mod.TimeoutLimits.from_cfg(llm_cfg.timeout)
-        identity = (api_ref, str(llm_cfg.base_url).rstrip('/'), model_name, repr(limits),
-                    binding['revision'] if binding else '',
-                    str(credential_store.root.resolve()) if credential_store else '')
-        digest = hashlib.sha256(repr(identity).encode('utf-8')).hexdigest()[:20]
-        return f'__connection_{digest}__{model_name}'
+        from pyharness.core.model_connection_identity import connection_registry_key
+        return connection_registry_key(api_ref,llm_cfg.base_url,model_name,limits,binding,
+            str(credential_store.root.resolve()) if credential_store else '')
 
     main_model = actual_model(llm_cfg.model)
     main_key = key_for(main_model)

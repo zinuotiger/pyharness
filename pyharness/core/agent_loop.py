@@ -251,12 +251,20 @@ class AgentLoop:
         LLM 经注入 ctx.llm.chat 调用(INV-02 唯一合法入口);三档超时/退避/降级
         由 llm 内部消化;llm.request/usage 事件由 llm 层落日志,本函数不越权。
         """
-        hist = ctx.session.derive_messages(ctx.scope.window_tokens)  # 日志现派生(INV-01)
+        context_runtime=getattr(ctx,'platform_runtime',None)
+        prepare_context=getattr(context_runtime,'before_round_context',None)
+        if callable(prepare_context):await prepare_context(ctx)
+        from pyharness.core.context_observation import observes_context
+        from pyharness.core.context_derivation import derive_observed_messages,assemble_observed,request_context_scope
+        observing=observes_context(ctx);history_window=system_window=None
+        if observing:hist,history_window=derive_observed_messages(ctx.session,ctx.scope.window_tokens)
+        else:hist=ctx.session.derive_messages(ctx.scope.window_tokens)  # 原日志现派生
         # F010:装配器在岗(engine 注入 ctx.sysprompt)则先装配——system 段恒首、
         # 护栏段恒末、超窗头部截断(装配器内部,见 system_prompt.py);缺位 = 裸历史
         sysprompt = getattr(ctx, "sysprompt", None)
         if sysprompt is not None:
-            hist = sysprompt.assemble(hist, ctx=ctx)
+            if observing:hist,system_window=assemble_observed(sysprompt,hist,ctx)
+            else:hist=sysprompt.assemble(hist,ctx=ctx)
         from pyharness.core.message_materializer import MessageMaterializer
         runtime: Optional[MessageMaterializer] = getattr(ctx, 'platform_runtime', None)
         if runtime is not None:
@@ -267,7 +275,7 @@ class AgentLoop:
         # 聚合后与 chat 同型返回(append-only 不变式不受影响);CLI/单测默认非流式
         chat_fn = ("chat_stream" if getattr(ctx, "streaming", False) else "chat")
         from pyharness.core.llm_diagnostics import model_call
-        with model_call("main_agent"):
+        with model_call("main_agent"),request_context_scope(ctx,hist,history_window,system_window,enabled=observing):
             resp = await getattr(ctx.llm, chat_fn)(
                 hist, tools=[] if vision_input else ctx.tools.schemas_for(ctx.scope), ctx=ctx)
         if vision_input and resp.tool_calls:

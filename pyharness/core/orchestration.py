@@ -116,8 +116,11 @@ async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,
         seg_env = await session.append("segment.start", {"task_id": task_id},
                                        actor="system", sync=True)
         seg_start = int(getattr(seg_env, "seq", 0) or 0)
+    delegated_owner=getattr(child_runtime,'delegated_task_lifecycle',None)
     try:
-        if ctx.platform_runtime is None:
+        if callable(delegated_owner):
+            result=await delegated_owner(env,ctx,lambda:loop.wake(env,ctx=ctx))
+        elif ctx.platform_runtime is None:
             result = await loop.wake(env, ctx=ctx)
         else:
             async def governed_turn():
@@ -127,7 +130,7 @@ async def _run_on_session(spine: Any, session: Any, scope: Any, intent: str, *,
             if child_runtime is not None and getattr(result,'reason',None)=='complete':
                 await child_runtime.finish(ctx)
     finally:
-        if child_runtime is not None:
+        if child_runtime is not None and not callable(delegated_owner):
             await child_runtime.release(ctx)
         if seg_start is not None:
             await session.append(

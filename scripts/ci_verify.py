@@ -32,7 +32,7 @@ PYTHON_ARGS = ["-B", "-X", "utf8"]
 
 def environment(root: Path) -> dict[str, str]:
     keep = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE",
-            "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "SSL_CERT_FILE",
+            "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROGRAMFILES", "PROGRAMFILES(X86)", "SSL_CERT_FILE",
             "SSL_CERT_DIR", "LANG", "LC_ALL"}
     env = {k: v for k, v in os.environ.items() if k.upper() in keep}
     # Windows known-folder APIs expand USERPROFILE independently of APPDATA.
@@ -180,6 +180,7 @@ def safe_junit(raw: Path, target: Path) -> dict:
 
 def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     env = environment(out / suite)
+    env["PYTHONPATH"] = str(ROOT)
     artifacts = out / "artifacts"
     artifacts.mkdir(exist_ok=True)
     targets = {
@@ -207,7 +208,7 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
         run([python_in(out / "test-env"), *PYTHON_ARGS, Path(__file__), "_isolation"],
             cwd=out, env=env, timeout=60)
     try:
-        run(cmd, cwd=ROOT, env=env, timeout=1200)
+        run(cmd, cwd=ROOT, env=env, timeout=9000 if suite == "full" else 1200)
     except SystemExit as exc:
         code = int(exc.code)
     finally:
@@ -255,8 +256,12 @@ def check_archives(paths: list[Path]) -> dict:
                 entries = [(member.name, tf.extractfile(member).read()) for member in tf.getmembers() if member.isfile()]
         for name, data in entries:
             parts = PurePosixPath(name).parts
-            if any(part in {".git", ".work", ".venv", "checkpoints", "__pycache__", ".pytest_cache", "node_modules"} for part in parts):
+            if any(part in {".git", ".work", ".venv", "checkpoints", "__pycache__", ".pytest_cache", ".hypothesis", "node_modules"} for part in parts):
                 raise SystemExit("Forbidden generated/private archive member: " + name)
+            if ".ai-coding" in parts:
+                private = parts[parts.index(".ai-coding") + 1:]
+                if private not in (("PROTOCOL.md",), ("TASK-TEMPLATE.md",)):
+                    raise SystemExit("Private coding state in archive: " + name)
             if PurePosixPath(name).is_absolute() or ".." in parts:
                 raise SystemExit("Unsafe archive member")
             if re.search(rb"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----", data):

@@ -171,6 +171,8 @@ class DesktopHandlers:
                          after_seq: int = 0) -> StreamingResponse:
         """SSE 事件流:注册 StreamClient(游标 after_seq)→ 总线事件按 seq 序 fan-out;
         断开 → 客户端带 last_seq 重连续拉(F065 边界);15s 心跳注释行保活。"""
+        from pyharness.application.product_execution_sessions import reject_product_mutation
+        reject_product_mutation(sid)
         me = StreamClient(sid=str(sid or ""), tenant=self.current_tenant(),
                           last_seq=max(0, int(after_seq)))
 

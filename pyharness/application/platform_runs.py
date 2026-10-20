@@ -60,6 +60,8 @@ class PlatformRuns:
     async def start_run(self, body):
         from pyharness.application.platform_models import RunRequest
         body=RunRequest.model_validate(body).model_dump()
+        from pyharness.application.product_execution_sessions import reject_product_mutation
+        reject_product_mutation(body.get('session_id'))
         text = str(body.get('text') or '').strip()
         if not text or len(text) > 32000:
             fail('invalid_message')

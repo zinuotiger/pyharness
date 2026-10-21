@@ -185,7 +185,7 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     artifacts.mkdir(exist_ok=True)
     targets = {
         "full": ["tests"], "isolation": ["tests/unit/test_remediation_isolation.py"],
-        "portability": ["tests/unit/test_exec.py", "tests/unit/test_workspace_adversarial.py", "tests/unit/test_workspace_git_preview.py", "tests/unit/test_workspace_git_authority.py", "tests/unit/test_codex_integration.py", "tests/unit/test_source_preflight.py", "tests/unit/test_writeback_post_commit.py"],
+        "portability": ["tests/unit/test_exec.py", "tests/unit/test_workspace_adversarial.py", "tests/unit/test_workspace_git_preview.py", "tests/unit/test_workspace_git_authority.py", "tests/unit/test_codex_integration.py", "tests/unit/test_source_preflight.py", "tests/unit/test_writeback_post_commit.py", "tests/unit/test_desktop_native.py", "tests/unit/test_native_product_execution_control.py", "tests/unit/test_native_workbench_entry.py", "tests/integration/test_controlled_browser.py::test_exact_target_readback_consumption_origin_refusal_and_cleanup"],
         "posix": ["tests/unit/test_posix_secret_permissions.py"],
         "platform": ["tests/unit/test_model_failure_contract.py", "tests/unit/test_platform_models.py", "tests/unit/test_platform_service.py", "tests/unit/test_platform_safety.py", "tests/unit/test_platform_remote.py"],
         "docker": ["tests/docker_acceptance/test_real_sandbox.py", "--real-docker"],

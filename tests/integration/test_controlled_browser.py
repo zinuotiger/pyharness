@@ -77,9 +77,8 @@ def identities(pid):
 
 
 def process_rows():
-    command='Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,Name | ConvertTo-Json -Compress'
-    return json.loads(subprocess.check_output(['powershell.exe','-NoProfile','-NonInteractive','-Command',command],
-        creationflags=0x08000000,timeout=20).decode('utf-8'))
+    from tests.windows_process_snapshot import process_rows as native_rows
+    return native_rows()
 
 
 def assert_gone(rows):

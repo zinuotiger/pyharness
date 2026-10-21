@@ -309,9 +309,15 @@ def real_native_application_owner(request):
         if widget.__class__.__name__=='ProductExecutionControl':
             assert widget.dead,'Native test did not dispose its control'
             assert widget.inflight is None or widget.inflight.done(),'Native operation still in flight at session teardown'
-        delete(widget)
+        if widget.__class__.__module__.startswith('pyharness.desktop_native') and widget.__class__.__name__=='MainWindow':
+            widget.dispose()
+            assert widget.appearance.dead and not widget._interaction_timer.isActive()
+        widget.deleteLater()
     QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
     _owned_application.processEvents()
+    assert not any(isValid(widget) for widget in widgets),'Deferred Qt test widget cleanup did not finish'
+    widgets.clear()
+    widget=None
     gc.collect()
     delete(_owned_application)
     _owned_application=None

@@ -61,6 +61,8 @@ class GraphOwner:
             await asyncio.sleep(.02)
 
     async def stop_children(self):
+        # Revoke scheduler admission before awaiting child cleanup.
+        self.closed=True
         targets=dict(self.stop_targets)
         try:
             resources,_=self.projects.store._cancellation_state()
@@ -77,9 +79,21 @@ class GraphOwner:
             # These receipts only reduce permissions for exact already-owned
             # queues. They cannot read sources, create attempts or grant I/O.
             if not targets:raise
+        stopping=[]
         for target in targets.values():
             queue=self.projects._owned_stop_queue(target)
-            if queue is not None:await self.projects._signal_execution_stop(target,queue,'task_graph_stopped')
+            if queue is not None:
+                await self.projects._signal_execution_stop(target,queue,'task_graph_stopped')
+                stopping.append((target['task_id'],queue))
+        # A queue can publish its terminal result before segment cleanup clears
+        # its running slot. Retain only these already-verified owned identities;
+        # do not await, cancel or inspect unrelated queued work.
+        try:
+            async with asyncio.timeout(3):
+                while any(task in (queue.status().running,*queue.status().waiting) for task,queue in stopping):
+                    await asyncio.sleep(.01)
+        except TimeoutError:
+            raise_code('PERS-202',reason='graph_stop_unconfirmed')
 
     async def run(self):
         pending={n['node_id']:n for n in self.authority['nodes']};running={}

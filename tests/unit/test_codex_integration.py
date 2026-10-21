@@ -11,6 +11,7 @@ from pyharness.application.platform_models import AgentDefinition
 from pyharness.integrations.codex_transport import CodexTransport, CodexDisconnected
 
 
+@pytest.mark.controlled_process
 async def test_real_stdio_framing_disconnect_and_close(tmp_path):
     import sys
     server = tmp_path/'server.py'
@@ -31,6 +32,7 @@ for line in sys.stdin:
     assert client.process.returncode is not None
 
 
+@pytest.mark.controlled_process
 async def test_inherited_mcp_is_disabled_before_model_thread(tmp_path,monkeypatch):
     import sys
     from pyharness.integrations import codex_transport

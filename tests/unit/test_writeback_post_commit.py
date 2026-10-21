@@ -1,4 +1,5 @@
 """Actual SQL membership withdrawal after strong commit, before HTTP receipt."""
+import os
 import pytest
 from tests.unit.test_delivery_handoffs import delivery_team,post
 from tests.unit.test_writeback_application import prepared,plan
@@ -26,6 +27,16 @@ async def test_committed_receipt_after_membership_withdrawal_stays_unknown(deliv
         return result
     monkeypatch.setattr(store,'_append_context',withdraw_after_commit)
     response=await post(env.owner,path,command,'receipt-withdrawal-'+operation)
+    if operation=='apply' and os.name!='nt':
+        # This platform has no exclusive application backend: prove refusal,
+        # not a post-commit effect that cannot occur on this host.
+        assert not withdrawals
+        assert response.status_code==403,response.text
+        assert response.json().get('reason')=='writeback_application_backend_unavailable'
+        assert (env.target/'result.txt').read_bytes()==env.original
+        _,commands,_=await store._execution_read_state()
+        assert not any(key[1]=='receipt-withdrawal-'+operation for key in commands)
+        return
     assert withdrawals,'Test must hit the actual post-commit window'
     assert response.status_code==503,response.text
     assert response.json().get('reason')=='writeback_commit_receipt_unavailable',response.text

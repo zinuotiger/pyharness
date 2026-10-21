@@ -11,7 +11,10 @@ from tests.unit.test_source_grants import grant_app, issue, PID, GID, URL
 
 PREVIEW = f'{URL}/{GID}/git-source-previews'
 META = 'sg-aaaaaaaaaaaaaaaa'
-GIT = 'C:/Git/cmd/git.exe'
+import shutil
+GIT = shutil.which('git')
+if GIT is None:
+    raise RuntimeError('Real Git executable is required for workspace integration tests')
 
 
 def git(root, *args):

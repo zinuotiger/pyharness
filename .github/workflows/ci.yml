@@ -55,6 +55,8 @@ jobs:
         run: python -B scripts/ci_verify.py static --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: Host configuration, process and network isolation sentinels
         run: python -B scripts/ci_verify.py test --suite isolation --output-dir "${{ runner.temp }}/pyharness-ci"
+      - name: Cross-platform Git, child isolation, request privacy and unsupported-backend regression
+        run: python -B scripts/ci_verify.py test --suite portability --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: Full pytest without ignored modules; coverage at least 75 percent
         run: python -B scripts/ci_verify.py test --suite full --cov-fail-under "${{ env.COV_FLOOR }}" --output-dir "${{ runner.temp }}/pyharness-ci"
       - name: High-risk remediation regression (including real loopback listeners)

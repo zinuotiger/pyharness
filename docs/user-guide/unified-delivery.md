@@ -59,3 +59,5 @@ wheel 与 sdist 必须保留运行资源、入口和 MIT/README 元数据；分�
 PDF 仅支持有文本层的受控导入、物理页和精确文本引用，不提供 OCR 或像素级排版还原。自动化 Qt 输入不是物理 IME/DPI 实测。测试中的模型为合成适配器，不代表付费外部服务、个人微信或飞书生产账户已联通。租户、主体、来源与操作审批的产品安全约束仍然生效。
 
 Linux 实际容器门运行 `tests/docker_acceptance/test_real_sandbox.py`，当前13项必须全部实跑且零跳过。Windows 独占写回的真实删除收据测试保留在 `test_writeback_delete.py`，须在有真实 Linux 容器后端的 Windows 宿主运行：`python -m pytest tests/docker_acceptance/test_writeback_delete.py --real-docker -o addopts=`。本轮本机已实跑通过1项、零跳过；它不能在Linux上以条件跳过冒充完成。两平台的原断言和每用例超时保持不变。
+
+请求体、查询和请求头的框架校验错误使用不回显输入的通用422响应。跨平台回归在完整测试前单独执行：Git使用当前系统真实可执行文件；测试环境变量逐例恢复；仅受控合成子进程显式准入。Linux没有Windows独占写回应用后端，该分支验证拒绝和零写入；Windows继续实跑原提交后撤权断言。CI完整报告附16核心逐模块的精确行覆盖率，完整原用例、逐例超时和全局覆盖门保持。最终报告分别记录本机定向回归、当前Git提交三平台全量以及该提交安装包的实际运行结果。

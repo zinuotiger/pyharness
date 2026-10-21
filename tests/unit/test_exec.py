@@ -117,18 +117,18 @@ async def test_strict_guard_hides_exec(sandbox_ctx):
     assert e.value.code == "TLB-802"
 
 
-def test_sandbox_env_strips_proxy(tmp_path):
-    os.environ["HTTP_PROXY"] = "http://127.0.0.1:9999"
+def test_sandbox_env_strips_proxy(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
     env = proc.sandbox_env(tmp_path / "sb")
     assert "HTTP_PROXY" not in env and "http_proxy" not in env
     assert "PATH" in env
 
 
-def test_sandbox_env_strips_secrets(tmp_path):
-    os.environ["DEEPSEEK_API_KEY"] = "sk-test-secret"
-    os.environ["PH_LONG_SECRET"] = "value"
-    os.environ["PYTHONPATH"] = "C:\\host\\project"
-    os.environ["ALL_PROXY"] = "http://127.0.0.1:9999"
+def test_sandbox_env_strips_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("PH_LONG_SECRET", "value")
+    monkeypatch.setenv("PYTHONPATH", "C:\\host\\project")
+    monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
     env = proc.sandbox_env(tmp_path / "sb")
     for k in ("DEEPSEEK_API_KEY", "PH_LONG_SECRET", "PYTHONPATH", "ALL_PROXY"):
         assert k not in env, f"沙箱环境不应继承 {k}"

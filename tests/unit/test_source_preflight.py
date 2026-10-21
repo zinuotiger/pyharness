@@ -73,6 +73,9 @@ async def test_malformed_body_errors_never_echo_private_input(grant_app):
         assert response.status_code == 422
         assert str(source) not in response.text
         assert 'input' not in response.json()
+        serialized = json.dumps(response.json(), ensure_ascii=False)
+        assert json.dumps(str(source), ensure_ascii=False) not in serialized
+        assert '"input"' not in serialized
 
 
 @pytest.mark.parametrize('body', [

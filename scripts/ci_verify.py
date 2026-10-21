@@ -185,6 +185,7 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
     artifacts.mkdir(exist_ok=True)
     targets = {
         "full": ["tests"], "isolation": ["tests/unit/test_remediation_isolation.py"],
+        "portability": ["tests/unit/test_exec.py", "tests/unit/test_workspace_adversarial.py", "tests/unit/test_workspace_git_preview.py", "tests/unit/test_workspace_git_authority.py", "tests/unit/test_codex_integration.py", "tests/unit/test_source_preflight.py", "tests/unit/test_writeback_post_commit.py"],
         "posix": ["tests/unit/test_posix_secret_permissions.py"],
         "platform": ["tests/unit/test_model_failure_contract.py", "tests/unit/test_platform_models.py", "tests/unit/test_platform_service.py", "tests/unit/test_platform_safety.py", "tests/unit/test_platform_remote.py"],
         "docker": ["tests/docker_acceptance/test_real_sandbox.py", "--real-docker"],
@@ -223,7 +224,17 @@ def test(out: Path, suite: str, cov_floor: int = 75) -> None:
                 evidence.update(euid=os.geteuid(), real_posix_filesystem=True, required_umask="022")
             coverage = out / suite / "coverage.json"
             if coverage.exists():
-                evidence["coverage"] = json.loads(coverage.read_text(encoding="utf-8"))["totals"]
+                coverage_data = json.loads(coverage.read_text(encoding="utf-8"))
+                evidence["coverage"] = coverage_data["totals"]
+                core = ["engine.py", "errors.py", "persistence.py", "repair.py", "core/agent.py", "core/agent_loop.py", "core/approval.py", "core/llm.py", "core/orchestration.py", "core/scope.py", "core/session.py", "core/session_query.py", "core/system_prompt.py", "core/task_queue.py", "core/tools_executor.py", "core/tools_guard.py"]
+                facts = {name.replace("\\", "/"): data["summary"] for name, data in coverage_data["files"].items()}
+                rates = {}
+                for module in core:
+                    matches = [data for name, data in facts.items() if name == "pyharness/" + module or name.endswith("/pyharness/" + module)]
+                    if len(matches) != 1 or not matches[0]["num_statements"]:
+                        raise RuntimeError("Core coverage evidence missing or ambiguous: " + module)
+                    rates[module] = matches[0]["covered_lines"] / matches[0]["num_statements"]
+                evidence["core_coverage"] = rates
             write_json(artifacts / (suite + "-summary.json"), evidence)
             print(json.dumps(evidence), flush=True)
     if code:
@@ -479,7 +490,7 @@ def main(argv=None) -> int:
     parser.add_argument("stage", choices=("prepare", "test", "static", "package"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cov-fail-under", type=int, default=75)
-    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural", "platform", "docker"))
+    parser.add_argument("--suite", default="full", choices=("full", "isolation", "posix", "high-risk", "security", "acceptance", "e2e", "invariants", "structural", "platform", "docker", "portability"))
     parsed = parser.parse_args(args)
     if parsed.cov_fail_under < 75 or parsed.cov_fail_under > 100:
         parser.error("coverage gate must be between 75 and 100 percent")

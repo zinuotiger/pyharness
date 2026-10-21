@@ -1,6 +1,7 @@
 """Versioned thin HTTP adapter; authentication remains owned by DesktopApp."""
 from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from pyharness.core.sandbox import fail
@@ -29,7 +30,7 @@ class PlatformRoute(APIRoute):
                 return JSONResponse({'code':code,'message':code}, status_code=status)
             except ILinkError as exc:
                 return JSONResponse({'code':exc.code,'message':'微信连接操作未完成，请检查连接状态'},status_code=503)
-            except (ValidationError, ValueError, TypeError):
+            except (RequestValidationError, ValidationError, ValueError, TypeError):
                 return JSONResponse({'code':'invalid_request','message':'请求字段或状态不合法'}, status_code=422)
         return checked
 

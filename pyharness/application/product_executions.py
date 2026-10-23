@@ -41,9 +41,10 @@ def execution_projection(projects, row, summary, log):
     life=[e for e in events if e.type=='execution.lifecycle']
     from pyharness.application.execution_checkpoints import checkpoint_projection
     from pyharness.application.execution_state_reader import state_checkpoint_projection
+    from pyharness.application.execution_quality import quality_projection
     return dict(summary, status=status, execution_reason=life[-1].payload['reason'],execution_started='running' in phases, observed_seq=events[-1].seq,
         business_acceptance=summary.get('business_acceptance','not_evaluated'), effects=effects[-400:], unknown_effects=unknown,artifacts=artifacts,
-        result_summary=text[:8000], result_truncated=len(text)>8000,**checkpoint_projection(events),**state_checkpoint_projection(service.platform,events))
+        result_summary=text[:8000], result_truncated=len(text)>8000,**quality_projection(events),**checkpoint_projection(events),**state_checkpoint_projection(service.platform,events))
 
 
 def require_material_reader(definition,materials):

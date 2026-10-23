@@ -5,6 +5,21 @@ import time
 from ctypes import wintypes as t
 
 
+def descendant_identities(rows,pid):
+    """Bind every ancestry edge to creation time, including a reused root PID."""
+    root=next((row for row in rows if row['ProcessId']==pid),None)
+    if root is None:raise RuntimeError('Owned root absent from process snapshot')
+    parents={pid:int(root['CreationDate'])};selected=[]
+    while True:
+        added=[row for row in rows if row['ParentProcessId'] in parents
+            and row['ProcessId'] not in parents
+            and int(row['CreationDate'])>=parents[row['ParentProcessId']]]
+        if not added:return selected
+        parents.update((row['ProcessId'],int(row['CreationDate'])) for row in added)
+        selected.extend((row['ProcessId'],row['CreationDate']) for row in added
+            if row['Name'].lower() in {'python.exe','node.exe','chrome.exe','chrome_crashpad_handler.exe','msedge.exe','msedge_crashpad_handler.exe'})
+
+
 def process_rows():
     if os.name != 'nt':
         raise RuntimeError('Windows process identity evidence requires Windows')

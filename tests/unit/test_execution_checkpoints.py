@@ -112,7 +112,9 @@ async def test_later_unknown_effect_overrides_an_earlier_clear_checkpoint(runnin
     body=await command(env)
     started=await env.app.service.projects.start_execution(PID,body,'checkpoint-unknown')
     try:
-        await asyncio.wait_for(entered.wait(),5)
+        # Preparation includes durable checkpoints and the real KV provider.
+        # This is a bounded setup wait, not a five-second product latency SLA.
+        await asyncio.wait_for(entered.wait(),60)
         kv=env.app.service._tenant_sessions_dir()/(started['session_id']+'.kv.json')
         assert json.loads(kv.read_text(encoding='utf-8'))==dict(cp='actually-written')
         await env.app.service.projects.cancel_execution(PID,stop_command(started),'checkpoint-stop')

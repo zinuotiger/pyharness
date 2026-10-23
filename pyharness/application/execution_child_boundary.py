@@ -62,5 +62,5 @@ class ProductChildBoundary(ProductExecutionBoundary):
             raise
         reason=getattr(result,'reason',None)
         await self.append_phase(ctx,'completed' if reason=='complete' else 'cancelled' if reason=='cancelled' else 'failed',
-            None if reason=='complete' else 'runner_stopped')
+            None if reason=='complete' else getattr(result,'error_code',None) or ('LLM-305' if reason=='budget' else 'runner_stopped'))
         return result

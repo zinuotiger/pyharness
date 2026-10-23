@@ -54,7 +54,7 @@
     }
     async function run(d,fn){if(d.busy)return;const n=d.epoch;d.busy=true;controls(d);try{await fn(n);}catch(error){if(live(d,n))say(d,error.message||'操作未确认，请核对原提交键。');}finally{if(live(d,n)){d.busy=false;controls(d);}}}
     function selected(d,selector,outputs){return Array.from(d.el.querySelectorAll(selector+':checked'),e=>outputs[Number(e.value)]);}
-    function outputLabel(o){return (o.filename||'公开最终文本')+' · '+o.reference.size_bytes+' B · '+o.reference.sha256.slice(0,14)+'…';}
+    function outputLabel(o){return (o.filename||'公开最终文本')+' · '+o.reference.size_bytes+' B · '+o.reference.sha256.slice(0,14)+'… · '+(o.delivery_label||'交付质量待确认')+' · '+(o.integrity==='verified'?'来源一致（不代表业务正确）':'来源待核对');}
     function showOutputs(root,outputs,prefix){root.innerHTML=outputs.map((o,i)=>`<article style="border-top:1px solid var(--line);padding:12px 0"><label><input type="checkbox" ${prefix} value="${i}" checked> ${esc(outputLabel(o))}</label><p>校验：${esc(o.integrity)}</p>${o.text_preview!==null?`<blockquote style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(o.text_preview)}</blockquote>${o.preview_truncated?'<p>这里只显示节选；全文需单独导出授权。</p>':''}`:'<p>文件内容需生产者单独授予审阅导出。</p>'}</article>`).join('');}
     async function loadOutputs(d,n){const id=q(d,'[name=executionId]').value.trim()||q(d,'[name=execution]').value;if(!/^ex-[0-9a-f]{16}$/.test(id))throw Error('请选择一次生产执行。');
       const execution=await read(d,n,base(d)+'/executions/'+id),attempt=await read(d,n,base(d)+'/run-attempts/'+execution.attempt_ref.attempt_id);
@@ -65,7 +65,8 @@
       q(d,'[data-delivery-bindings]').innerHTML=definition.items.map(item=>`<label style="display:block;margin:12px 0">${esc(item.title)}${item.required?'（必交）':'（可选）'}<select multiple data-delivery-item="${esc(item.item_id)}" style="width:100%;min-height:70px">${inventory.outputs.map((o,i)=>`<option value="${i}">${esc(outputLabel(o))}</option>`).join('')}</select><small>为该交付项目选择实际产物，可按 Ctrl 多选。</small></label>`).join('');say(d,'已读取实际执行产物。逐项选择后冻结交付包。');
     }
     async function loadPackage(d,n,id=q(d,'[name=package]').value){if(!id)throw Error('请选择交付包。');d.package=await read(d,n,base(d)+'/delivery-packages/'+id);d.role=null;
-      q(d,'[data-delivery-package-detail]').innerHTML=`<h3>已冻结交付包</h3><p>包含 ${d.package.bindings.length} 项映射；独立验收状态需在验收记录中核对。</p>${evidence(d.package)}`;
+      const acceptance=({not_evaluated:'尚未评定',passed:'独立验收通过',rejected:'独立验收不通过',pending:'尚无法确认',invalidated:'原验收已失效'}[d.package.business_acceptance]||'尚未确认');
+      q(d,'[data-delivery-package-detail]').innerHTML=`<h3>${d.package.business_acceptance==='passed'?'已冻结交付包':'已冻结待复核材料'}</h3><p>包含 ${d.package.bindings.length} 项映射；独立业务验收：${esc(acceptance)}。冻结只保存所选原文，不代表内容正确或独立验收通过。</p>${evidence(d.package)}`;
       const refs=new Map();for(const b of d.package.bindings)for(const r of b.outputs)refs.set(c.canonical(r),r);
       d.packageOutputs=[...refs.values()];q(d,'[data-delivery-grant-outputs]').innerHTML=d.packageOutputs.map((o,i)=>`<label style="display:block"><input type="checkbox" data-delivery-grant-output value="${i}" checked> ${esc(o.kind)} · ${o.sha256.slice(0,14)}…</label>`).join('');
     }

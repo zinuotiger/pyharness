@@ -92,7 +92,8 @@ class ProductExecutionBoundary:
             raise
         reason = getattr(result, 'reason', None)
         phase = 'completed' if reason == 'complete' else 'cancelled' if reason == 'cancelled' else 'failed'
-        await self.append_phase(ctx,phase,None if reason=='complete' else 'runner_cancelled' if reason=='cancelled' else 'runner_stopped')
+        await self.append_phase(ctx,phase,None if reason=='complete' else 'runner_cancelled' if reason=='cancelled' else
+            getattr(result,'error_code',None) or ('LLM-305' if reason=='budget' else 'runner_stopped'))
         return result
 
     async def _run_task(self, event, ctx, invoke):

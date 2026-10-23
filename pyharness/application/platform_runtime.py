@@ -34,6 +34,17 @@ class PlatformRuntime:
         raised = False
         try:
             async def turn():
+                from pyharness.application.order_review import policy,calculate
+                order_policy=policy(self.definition.output_schema)
+                if order_policy is not None:
+                    boundary=getattr(self,'product_execution',None)
+                    try:
+                        if boundary is None:raise ValueError('订单核对需要正式任务的固定授权输入')
+                        self.order_facts=calculate(boundary.materials['bundle'],order_policy)
+                    except ValueError as exc:
+                        await ctx.session.append('platform.resource',dict(action='order_review_invalid',
+                            record=dict(status='invalid_input',reason=str(exc)[:400])),actor='system')
+                        fail('order_review_invalid_input')
                 if getattr(self,'product_execution',None) is not None and self.definition.sandbox_profile.mode!='disabled':
                     await self.sandbox(ctx)
                 await self.prepare_evidence(event, ctx)
@@ -118,6 +129,9 @@ class PlatformRuntime:
         continuation=getattr(getattr(self,'product_execution',None),'continuation_messages',None)
         if callable(continuation):messages=continuation(messages,ctx)
         result=await model_messages(self, self.evidence_messages(messages, ctx), ctx)
+        if getattr(self,'order_facts',None) is not None:
+            from pyharness.application.order_review import model_instruction
+            result=[*result,dict(role='system',content=model_instruction(self.order_facts))]
         boundary=getattr(self,'product_execution',None)
         if boundary is not None:
             from pyharness.application.execution_correction_runtime import materialize_correction
@@ -125,6 +139,19 @@ class PlatformRuntime:
             from pyharness.application.execution_checkpoints import append_model_checkpoint
             await append_model_checkpoint(boundary,ctx,result)
         return result
+
+    def review_answer(self,content,ctx,response):
+        from pyharness.application.execution_quality import response_completeness
+        complete=response_completeness(response.finish_reason)
+        quality=dict(output_completeness=complete)
+        if getattr(self,'order_facts',None) is not None and complete=='complete':
+            from pyharness.application.order_review import review
+            content,quality['calculation']=review(content,self.order_facts)
+        elif getattr(self,'order_facts',None) is not None:
+            quality['calculation']=dict(status='not_run',facts=self.order_facts,
+                reason='等待完整回答后核对',raw_response_preserved=True)
+        elif complete=='complete':content=self.validate_answer(content,ctx)
+        return content,quality
 
     def validate_answer(self, content, ctx):
         if not self.definition.strict_knowledge:
@@ -274,7 +301,7 @@ class PlatformRuntime:
         if str(ctx.task_id or '') in self.failed_children:
             from pyharness.errors import PyHError
             raise PyHError(self.failed_children[str(ctx.task_id or '')])
-        if self.definition.output_schema:
+        if self.definition.output_schema and getattr(self,'order_facts',None) is None:
             from pyharness.core.tools_registry import _compile_model
             model=_compile_model('platform.output',self.definition.output_schema)
             messages=[e.payload['content'] for e in ctx.session.events_after(0) if e.type=='agent.message']

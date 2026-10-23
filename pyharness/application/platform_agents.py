@@ -12,6 +12,9 @@ from pyharness.application.platform_templates import TEMPLATES
 
 def _validated_agent(body):
     agent = AgentDefinition.model_validate(body)
+    from pyharness.application.order_review import policy
+    if policy(agent.output_schema) is not None and (agent.strict_knowledge or agent.executor!='engine'):
+        fail('order_review_requires_engine_and_non_strict_knowledge')
     if agent.output_schema:
         from pyharness.core.tools_registry import _compile_model
         _compile_model('platform.output', agent.output_schema)

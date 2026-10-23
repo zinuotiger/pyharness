@@ -34,7 +34,7 @@ def navigation_page(mode, *, blocked=False):
             if receipt:
                 effects.append('accepted')
                 if blocked:
-                    release.wait(8)
+                    release.wait(30)
                 else:
                     time.sleep(.3)
                 body = '<body>DELAYED EXACT READBACK</body>'
@@ -119,7 +119,9 @@ def test_non_navigation_dom_action_remains_bounded_and_consumed():
 
 def test_unconfirmed_delayed_navigation_retires_carrier_without_replay():
     with navigation_page('click', blocked=True) as (origin, effects, release):
-        carrier = browser(origin, timeout=3)
+        # Leave enough time to reach the real action under coverage/load, while
+        # the controlled receipt stays blocked beyond the navigation deadline.
+        carrier = browser(origin, timeout=10)
         try:
             observed = carrier.call('open', {'url': origin})
             result = carrier.call('act', exact_action(observed, 'click'))

@@ -138,9 +138,17 @@
         const result=await request(d,n,base(d)+'/executions/'+control.execution_ref.execution_id);
         if(result.project_id!==d.project.project_id||!same(pick(result,'execution_id'),control.execution_ref)||!same(result.attempt_ref,control.attempt_ref))throw Error('执行收据范围不符');
         drawHealth(d,result);
-        q(d,'[data-ex-summary]').textContent=`执行状态：${result.status} · ${result.execution_reason||''}\n`+
+        const quality=result.output_completeness||'unknown',calc=result.calculation_status||'not_configured';
+        const resultState=({complete:'回答完整',incomplete:'输出不完整',unknown:'完整性待确认'}[quality]||'完整性待确认');
+        const calcState=({passed:'计算与回答核对通过',failed:'计算与回答核对不通过',invalid_input:'资料无法计算',not_run:'已程序核算，等待完整回答后核对',not_configured:'尚无计算核对记录'}[calc]||'计算核对待确认');
+        const budget=result.budget_diagnostics;
+        q(d,'[data-ex-summary]').textContent=`执行状态：${({completed:'执行已结束',failed:'执行失败',running:'执行中',queued:'排队中',cancelled:'已取消'}[result.status]||result.status)} · ${result.execution_reason||''}\n${resultState} · ${calcState}\n`+
+          (result.finish_reason==='length'?'模型达到输出上限，回答尚未完成；调整额度后明确重新执行，不会自动续写。\n':'')+
+          (result.effective_output_limit?'本次有效输出上限：'+result.effective_output_limit+' tokens；连接单次配置上限：'+result.configured_output_limit+' tokens（另受任务/父级剩余额度及费用限制）。\n':'')+
+          (budget?'预算不足（LLM-305）：'+({input:'输入',output:'输出',cost:'费用估算'}[budget.dimension]||'预算')+'；限制来源：'+(budget.account==='task'?'当前任务':'父级任务')+'；上限 '+budget.limit+'，已用 '+budget.used+'，已预留 '+budget.reserved+'，本次所需预留 '+budget.requested+'，差额 '+budget.shortfall+'。'+(budget.basis==='conservative_utf8_bytes'?'本次输入预留按UTF-8字节保守估计，并非供应商实际token用量。':'')+'本次模型请求尚未发送。可减少资料或调整该任务授权额度后重新执行。\n':'')+
+          (result.delivery_readiness==='ready_for_independent_review'?'结果可提交独立复核。\n':'结果待处理，仅可保留为待复核材料，不能作为合格交付。\n')+
           (result.unknown_effects?'存在未确认效果，需要核对。':'当前返回的效果记录未标记未知。')+'\n业务验收：'+({not_evaluated:'尚未评定',passed:'独立验收通过',rejected:'独立验收不通过',pending:'尚无法确认',invalidated:'原验收已失效，需重新核对'}[result.business_acceptance]||'尚未评定')+'。执行结束不代表交付验收通过。'+
-          (result.result_truncated?'\n结果摘要已截断。':'')+(result.children_truncated?'\n子任务展示已截断。':'');
+          (result.result_truncated?'\n界面结果摘要已裁切，完整原文仍在日志；此提示与模型输出截断分别判断。':'')+(result.children_truncated?'\n子任务展示已截断。':'');
         q(d,'[data-ex-result]').textContent=JSON.stringify(result,null,2);
         q(d,'[data-ex-answer]').textContent=result.result_summary||'尚无结果摘要。';
         for(const item of result.artifacts||[]) {
@@ -212,7 +220,7 @@
           const value=await request(d,n,base(d)+'/execution-previews',{method:'POST',body:JSON.stringify(body)});
           if(value.project_id!==d.project.project_id||!same(value.attempt_ref,body.attempt_ref)||!same(value.agent_ref,body.agent_ref)
             ||!c.hash(value.confirmation_digest)||value.status!=='confirmation_required'||!['disabled','host_unrestricted','container','remote'].includes(value.boundary))throw Error('预览收据不完整');
-          d.preview=value;q(d,'[data-ex-preview]').textContent='执行边界：'+({disabled:'工具沙箱未启用',host_unrestricted:'宿主执行：不提供操作系统、网络或内存隔离，代码可能访问宿主资源',container:'容器执行',remote:'远程执行'}[value.boundary])+'\n确认摘要：'+value.confirmation_digest;
+          d.preview=value;q(d,'[data-ex-preview]').textContent='执行边界：'+({disabled:'工具沙箱未启用',host_unrestricted:'宿主执行：不提供操作系统、网络或内存隔离，代码可能访问宿主资源',container:'容器执行',remote:'远程执行'}[value.boundary])+'\n确认摘要：'+value.confirmation_digest+'\n预算：待完整请求装配后，在发送前按实际内容检查；当前预览不代表预算足够。';
           say(d,'预览完成，尚未开始执行。');
         }else if(action==='start') {
           if(!d.preview||recover(d,'start')||d.control?.execution_ref)throw Error('先完成新预览或核对原键');

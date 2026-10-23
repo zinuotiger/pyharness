@@ -10,7 +10,8 @@ from pyharness.errors import raise_code
 def _outputs(platform,log,task,execution,*,selected=None):
     from pyharness.application.workspace_store import canonical,digest_of
     events=list(log.events_after(0));life=own_lifecycle(events,log.sid)
-    if not life or life[-1].payload['phase']!='completed':
+    review_draft=any(e.type=='agent.message' and e.payload.get('quality') for e in events)
+    if not life or (life[-1].payload['phase']!='completed' and not (life[-1].payload['phase']=='failed' and review_draft)):
         raise_code('EVT-101',reason='delivery_execution_not_completed')
     effects=[e for e in events if e.type=='execution.effect']
     ended={e.payload['started_seq'] for e in effects if e.payload['phase']!='started'}
@@ -54,6 +55,11 @@ def _outputs(platform,log,task,execution,*,selected=None):
         text=event.payload['content']
         found.append(dict(reference=reference.model_dump(),filename=None,integrity='verified',
             preview_capability='text',text_preview=text[:16000],preview_truncated=len(text)>16000))
+    from pyharness.application.execution_quality import quality_projection
+    quality=quality_projection(events)
+    for item in found:
+        item['quality']=quality
+        item['delivery_label']='可提交独立复核' if quality['delivery_readiness']=='ready_for_independent_review' else '待复核材料，不能作为合格交付'
     return found
 
 

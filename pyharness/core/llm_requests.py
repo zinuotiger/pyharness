@@ -48,7 +48,9 @@ class ModelRequests:
         remaining = runtime.definition.budget.output_tokens - counters.task_total().out_tokens
         if remaining <= 0:
             from pyharness.core.scope import BudgetExhausted
-            raise BudgetExhausted('Platform output token budget exhausted')
+            from pyharness.core.budget_diagnostics import budget_detail
+            raise BudgetExhausted('Platform output token budget exhausted',diagnostics=budget_detail('output',
+                limit=runtime.definition.budget.output_tokens,used=counters.task_total().out_tokens,requested=1))
         return min(configured, remaining)
 
     @staticmethod
@@ -100,8 +102,8 @@ class ModelRequests:
                "tools": tools_clean or None,    # 无工具整字段省略在传输层(wire 规则)
                "temperature": cfg_llm.temperature,  # 0-1.5(越窗已在配置层 CFG-601 拒)
                "max_tokens": output_limit}
-        request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
-                                                                 tools), actor="llm", task_id=getattr(ctx, "task_id", None))
+        request_event = await ctx.session.append("llm.request", dict(_request_payload(self.model, self._deg,
+            tools),effective_output_limit=output_limit,configured_output_limit=cfg_llm.max_tokens), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
         observation = {}
         async def invoke_transport():
@@ -150,8 +152,8 @@ class ModelRequests:
                "tools": tools_clean or None,
                "temperature": cfg_llm.temperature, "max_tokens": output_limit,
                "stream": True, "stream_options": {"include_usage": True}}
-        request_event = await ctx.session.append("llm.request", _request_payload(self.model, self._deg,
-                                                                 tools), actor="llm", task_id=getattr(ctx, "task_id", None))
+        request_event = await ctx.session.append("llm.request", dict(_request_payload(self.model, self._deg,
+            tools),effective_output_limit=output_limit,configured_output_limit=cfg_llm.max_tokens), actor="llm", task_id=getattr(ctx, "task_id", None))
         from pyharness.core.llm_diagnostics import observed_wait
         observation = {}
         progress = {}

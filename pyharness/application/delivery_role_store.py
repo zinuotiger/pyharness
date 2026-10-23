@@ -50,6 +50,12 @@ class DeliveryRoleStore(DeliveryRoles):
             if kind in ('handoff_ack','delivery_acceptance') and actor!=h['recipient_id']:
                 raise_code('GRD-403',reason='handoff_recipient_required')
             self._handoff_current(resources,handoff,actor,authorize,service)
+            if kind=='delivery_acceptance' and all(d.verdict=='pass' for d in command.decisions):
+                from pyharness.application.execution_quality import require_package_quality
+                _,_,package=self._handoff_record(resources,project,command.handoff_ref.model_dump())
+                from pyharness.application.delivery_support import selected_outputs
+                execution=resources[package['delivery_package']['selection']['execution_ref']['execution_id']]
+                require_package_quality(service,execution,selected=selected_outputs(package['delivery_package']))
             if kind=='delivery_export' and command.acceptance_ref:
                 accepted=self._delivery_exact(resources,project,'delivery_acceptance',command.acceptance_ref.model_dump())
                 if self._acceptance_current(resources,accepted,actor,authorize,service)!='passed':

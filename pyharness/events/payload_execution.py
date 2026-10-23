@@ -1,7 +1,7 @@
 """Payload execution: complete migrated implementation."""
 from __future__ import annotations
 from typing import Optional, Literal
-from pydantic import Field, model_validator
+from pydantic import Field, model_validator, model_serializer
 
 from pyharness.events.payload_base import _PayloadBase
 
@@ -11,8 +11,17 @@ class LlmRequestPayload(_PayloadBase):
     degraded_from: Optional[str] = None
     prompt_tokens: Optional[int] = Field(default=None, ge=0)
     n_tools: Optional[int] = Field(default=None, ge=0)
+    effective_output_limit: Optional[int] = Field(default=None, ge=1)
+    configured_output_limit: Optional[int] = Field(default=None, ge=1)
     role: Optional[str] = None
     attempt: Optional[int] = Field(default=None, ge=1)
+
+    @model_serializer(mode='wrap')
+    def preserve_historical_payload(self,handler):
+        value=handler(self)
+        for key in ('effective_output_limit','configured_output_limit'):
+            if key not in self.model_fields_set:value.pop(key,None)
+        return value
 
 class LlmResponsePayload(_PayloadBase):
     """llm.response:content 与 tool_calls 至少其一(空 content=工具调用轮)。"""
@@ -65,6 +74,13 @@ class AgentMessagePayload(_PayloadBase):
     """agent.message:最终展示文本,content 非空(空响应不写)。"""
     content: str = Field(min_length=1)
     model: Optional[str] = None
+    quality: Optional[dict] = None
+
+    @model_serializer(mode='wrap')
+    def preserve_historical_payload(self,handler):
+        value=handler(self)
+        if 'quality' not in self.model_fields_set:value.pop('quality',None)
+        return value
 
 class LlmChunkPayload(_PayloadBase):
     """llm.chunk:瞬时事件(仅总线,禁 append 入日志);delta 流式增量碎片。"""

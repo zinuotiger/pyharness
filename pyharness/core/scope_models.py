@@ -119,6 +119,11 @@ class BudgetExhausted(Exception):
     budget.paused,本异常只作循环控制信号。
     """
 
+    def __init__(self, message='Budget exhausted', *, diagnostics=None):
+        super().__init__(message)
+        from pyharness.core.budget_diagnostics import public_budget
+        self.diagnostics = public_budget(diagnostics)
+
 # Preserve historical import and pickle identities through the compatibility facade.
 BudgetLimits.__module__ = 'pyharness.core.scope'
 ScopePolicy.__module__ = 'pyharness.core.scope'

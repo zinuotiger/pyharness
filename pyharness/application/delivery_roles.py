@@ -131,4 +131,9 @@ class DeliveryRoles:
         superseded=any(r.get('delivery_package',{}).get('selection',{}).get('execution_ref')==package['delivery_package']['selection']['execution_ref']
             and r['source_seq']>package['source_seq'] for r in resources.values())
         if later or superseded:raise_code('EVT-101',reason='delivery_acceptance_superseded')
-        return self._acceptance_verdict(value)
+        verdict=self._acceptance_verdict(value)
+        if verdict=='passed':
+            from pyharness.application.execution_quality import require_package_quality
+            execution=resources[package['delivery_package']['selection']['execution_ref']['execution_id']]
+            require_package_quality(service,execution,selected=selected_outputs(package['delivery_package']))
+        return verdict

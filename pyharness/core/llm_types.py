@@ -117,6 +117,7 @@ class UsageCounters:
     def reserve_output(self, requested, *, input_tokens=0, input_rate=0.0, output_rate=0.0):
         """Atomic on the runtime loop: reserve before awaiting any transport."""
         from pyharness.core.scope import BudgetExhausted
+        from pyharness.core.budget_diagnostics import budget_detail
         accounts = list(self.ancestors())
         available = int(requested)
         for account in accounts:
@@ -124,17 +125,31 @@ class UsageCounters:
             if limits is None:
                 continue
             used = account.task_total()
-            if (used.in_tokens >= limits.max_in_tokens or used.cost_est >= limits.max_cost_yuan
-                    or used.in_tokens + account._reserved_in + input_tokens > limits.max_in_tokens):
-                raise BudgetExhausted('Task or parent budget exhausted')
+            owner='task' if account is self else 'parent'
+            if used.in_tokens >= limits.max_in_tokens or used.in_tokens + account._reserved_in + input_tokens > limits.max_in_tokens:
+                raise BudgetExhausted('Input allowance exhausted', diagnostics=budget_detail('input',
+                    limit=limits.max_in_tokens,used=used.in_tokens,reserved=account._reserved_in,
+                    requested=input_tokens,account=owner,basis='conservative_utf8_bytes'))
+            if used.cost_est >= limits.max_cost_yuan:
+                raise BudgetExhausted('Cost allowance exhausted',diagnostics=budget_detail('cost',
+                    limit=limits.max_cost_yuan,used=used.cost_est,reserved=account._reserved_cost,
+                    requested=input_tokens*input_rate+output_rate,account=owner,basis='estimated_yuan'))
             available = min(available, limits.max_out_tokens-used.out_tokens-account._reserved_out)
             cost_left = limits.max_cost_yuan-used.cost_est-account._reserved_cost-input_tokens*input_rate
             if cost_left < 0:
-                raise BudgetExhausted('No unreserved task or parent cost allowance')
+                raise BudgetExhausted('No unreserved task or parent cost allowance',diagnostics=budget_detail('cost',
+                    limit=limits.max_cost_yuan,used=used.cost_est,reserved=account._reserved_cost,
+                    requested=input_tokens*input_rate+output_rate,account=owner,basis='estimated_yuan'))
             if output_rate > 0:
                 available = min(available, int(max(0,cost_left)/output_rate))
-        if available <= 0:
-            raise BudgetExhausted('No unreserved task or parent output allowance')
+            if available <= 0:
+                dimension='cost' if output_rate>0 and cost_left<output_rate else 'output'
+                raise BudgetExhausted('No unreserved task or parent output allowance',diagnostics=budget_detail(dimension,
+                    limit=limits.max_cost_yuan if dimension=='cost' else limits.max_out_tokens,
+                    used=used.cost_est if dimension=='cost' else used.out_tokens,
+                    reserved=account._reserved_cost if dimension=='cost' else account._reserved_out,
+                    requested=input_tokens*input_rate+output_rate if dimension=='cost' else 1,
+                    account=owner,basis='estimated_yuan' if dimension=='cost' else 'tokens'))
         for account in accounts:
             account._reserved_out += available
             account._reserved_in += input_tokens

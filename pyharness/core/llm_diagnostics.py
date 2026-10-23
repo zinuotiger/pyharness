@@ -97,6 +97,10 @@ def response_metadata(response):
 def public_diagnostics(value=None, **defaults):
     """Revalidate even persisted/legacy metadata at public boundaries."""
     d = {**defaults, **(value if isinstance(value, dict) else {})}
+    if d.get('code')=='LLM-305':
+        from pyharness.core.budget_diagnostics import public_budget
+        budget=public_budget(d)
+        if budget is not None:return budget
     category = d.get('category') if d.get('category') in CATEGORIES else 'unknown'
     status = d.get('http_status')
     attempt = d.get('attempt', 'unknown')

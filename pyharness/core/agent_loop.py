@@ -219,7 +219,11 @@ class AgentLoop:
         except asyncio.CancelledError:                # F025:不吞;外层(close/cancel)收尾
             run.cancelled = True
             raise
-        except BudgetExhausted:                       # 预算硬闸:无"再给一次机会"
+        except BudgetExhausted as exc:                # 预算硬闸:无"再给一次机会"
+            run.error_code='LLM-305'
+            run.error_diagnostics=exc.diagnostics
+            await ctx.session.append('system.error',dict(code='LLM-305',hint='预算不足；本次模型请求尚未发送',
+                ctx=dict(role='main_agent',fatal=True,diagnostics=exc.diagnostics)),actor='system',task_id=getattr(ctx,'task_id',None),sync=True)
             return await self._finish(ctx, run, "budget")
         except MaxTurnsExceeded:                      # 轮数闸(防御路径)
             return await self._finish(ctx, run, "max_turns")
@@ -284,13 +288,20 @@ class AgentLoop:
         # llm 层落 request/usage 事件;chat_fn 选择不改变事件路径
         if not resp.tool_calls:                       # 纯文本 → 自然终态
             content = resp.content or ""
+            quality=None
             if runtime is not None:
-                content = runtime.validate_answer(content, ctx)
+                review=getattr(runtime,'review_answer',None)
+                if callable(review):content,quality=review(content,ctx,resp)
+                else:content = runtime.validate_answer(content, ctx)
             if not content:                           # llm 双空响应:模型域未预期
                 raise_code("LLM-399", hint="llm.chat 返回空 content 且无 tool_calls")
             await ctx.session.append(
-                "agent.message", {"content": content}, actor="agent",
+                "agent.message", {"content": content, **({'quality':quality} if quality is not None else {})}, actor="agent",
                 trace={"parent_seq": resp.seq} if getattr(resp, "seq", None) else None)
+            if quality is not None and (quality.get('output_completeness')=='incomplete' or
+                    quality.get('calculation',{}).get('status')=='failed'):
+                run.error_code='LLM-304'
+                return 'error'
             return "complete"                         # finished 由外壳 close(reason) 落
         # 工具轮:校验/guard/审批/Provider 全在 tools.execute 内;单步失败→事件化
         # 回喂(tool.error/guard.rejected),不中断本轮(见 run_step)
@@ -394,6 +405,11 @@ class AgentLoop:
         ——finished 唯一归属 agent.close(EVT-104);headless 由外壳在 run 返回后
         close(reason)。"""
         run.reason = reason
+        if reason=='budget' and run.error_code is None:
+            from pyharness.core.budget_diagnostics import exhausted_detail
+            run.error_code='LLM-305';run.error_diagnostics=exhausted_detail(ctx.scope)
+            await ctx.session.append('system.error',dict(code='LLM-305',hint='预算不足；本次模型请求尚未发送',
+                ctx=dict(role='main_agent',fatal=True,diagnostics=run.error_diagnostics)),actor='system',task_id=getattr(ctx,'task_id',None),sync=True)
         self._last_reason = reason
         last_seq = ctx.session.stats()["seq"]         # 日志当前最大 seq(派生事实)
         log.info("run finished run_id=%s reason=%s turns=%d last_seq=%s",

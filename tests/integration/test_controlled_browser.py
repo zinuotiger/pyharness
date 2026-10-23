@@ -67,13 +67,8 @@ def action(observation,index=0,**extra):
 
 
 def identities(pid):
-    rows=process_rows();parents={pid};selected=[]
-    while True:
-        added=[row for row in rows if row['ParentProcessId'] in parents and row['ProcessId'] not in parents]
-        if not added:return selected
-        parents.update(row['ProcessId'] for row in added)
-        selected.extend((row['ProcessId'],row['CreationDate']) for row in added
-            if row['Name'].lower() in {'python.exe','node.exe','chrome.exe','chrome_crashpad_handler.exe','msedge.exe','msedge_crashpad_handler.exe'})
+    from tests.windows_process_snapshot import descendant_identities
+    return descendant_identities(process_rows(),pid)
 
 
 def process_rows():
@@ -150,11 +145,23 @@ def test_real_browser_network_requests_cannot_escape_origin_or_open_websocket(lo
         c.close();other.shutdown();other.server_close();thread.join(3)
 
 
-def test_timeout_retires_carrier_and_owned_tree(local_page):
-    origin,_=local_page;c=carrier(origin,1)
+@pytest.mark.parametrize('delay_response',[False,True])
+def test_timeout_retires_carrier_and_owned_tree(local_page,monkeypatch,delay_response):
+    origin,events=local_page;c=carrier(origin,1)
+    if delay_response:
+        put=c.output.put_nowait
+        def delayed(value):
+            if isinstance(value,dict):time.sleep(4)
+            put(value)
+        monkeypatch.setattr(c.output,'put_nowait',delayed)
     try:
-        result=c.call('open',{'url':origin+'/slow'})
-        assert result['fatal'] and result['error']=='browser_carrier_unconfirmed'
+        try:result=c.call('open',{'url':origin+'/slow'})
+        except ValueError as exc:
+            assert str(exc)=='browser_carrier_unconfirmed'
+        else:
+            assert not delay_response
+            assert result['fatal'] and result['error']=='browser_carrier_unconfirmed'
+        assert events==['GET /slow']
         assert c.closed and c.owner.poll() is not None
         with pytest.raises(ValueError,match='closed'):c.call('observe',{})
     finally:c.close()

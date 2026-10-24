@@ -1,3 +1,5 @@
+> **本次文档整理范围（仅静态核对）**：参考提交8f99f4f0390c82abc1ddf02e4c78b90a871fe07a；[词表源码](pyharness/events/vocab.py)第110、204、315行分别对应22项强同步集、90项核心事件登记及execution.context。这不是运行测试或产品全量验收。下文全部原测试数字、阶段验收声明、限制与步骤保留；已注明日期/阶段的内容按其原范围阅读，日期或阶段不明确的声明本次未独立重验，不补编时间。§1、§2、§4中的“当前”“未提交”以及S12实施中、S13尚未完成等措辞均属原记录口径，不用于判断本批状态。现行使用与限制导航见[统一版本说明](docs/user-guide/unified-delivery.md)，实际交付仍须核对准确源码提交及对应新证据。
+
 > **统一版本更新（2026-10-21）**：运行、验证和恢复入口见[统一版本说明](docs/user-guide/unified-delivery.md)。第8–18步已逐阶段验收；S18统一版本全量4,429项（4,399通过、30原条件跳过、0失败），覆盖率88.12%，16核心最低84.95%。最终交付须核对对应源码和新提交CI，历史测试数不能替代。下文旧日期阶段状态保留为历史记录。真实Docker与受控浏览器已有阶段证据；付费模型质量、生产渠道账户、物理IME/DPI不由合成模型或自动化输入证明。
 
 > 统一候选运行时规模：`EVENT_TYPES` **90**、payload 模型 **90**、`SYNC_TYPES` **22**、`TRANSIENT_TYPES` **3**、信封字段 **10**。原89类型保持，S12新增execution.context（显式sync的prepared公开投影，不是执行权）；executor.event与workspace.resource_committed两侧能力同时保留；下方阶段记录保留各自历史日期。
@@ -339,7 +341,7 @@ F2 之后又做了 **M4 独立验收**（含独立 agent 对抗性复核）与 *
 | **治理层（读侧）** | 决策因果还原 · 被拒清单（含 `executed` 证据位）· 一致性对账 · **凭证逐条重算核验 + prev_hash 链**；全部经 `ApplicationService` → HTTP/原生两壳可达 | `governance/{audit,receipt}.py` · `application/service.py` |
 | **证据面** | 任务段结束按冻结规则归档 `evidence.archived`（仅存引用）；按 `task_id` 聚合查询；索引可由日志完全重建 | `engine.archive_task_evidence` · `governance/evidence.py` |
 | **LLM 出网闸** | 单一汇点 `_chat_any` → `_egress_guard`；会话预算对所有五类出口生效 | `core/llm.py` |
-| **事件真源** | append-only JSONL。`EVENT_TYPES` **82** · `SYNC_TYPES` **15** · `TRANSIENT_TYPES` **3** · payload 模型 **82** · **信封字段 10**（Platform V1 新增三个资源事件；写入时显式强同步） | `events/vocab.py` · `events/envelope.py` |
+| **事件真源** | append-only JSONL。`EVENT_TYPES` **82** · `SYNC_TYPES` **15** · `TRANSIENT_TYPES` **3** · payload 模型 **82** · **信封字段 10**（Platform V1 新增三个资源事件；写入时显式强同步） | `events/vocab.py` · `events/envelope.py` 原表82/15等数字按原文保留，其历史准确性本次未独立复核，不作为现行计数断言。 |
 | **不变量测试面** | INV-01 ~ INV-05 编号化用例（**运行时事实来源**）+ 上下文传播/租户/唯一拒绝出口契约 + **F055 会话根单点派生/隔离/子会话可达** + **声明配置可达防线（AST 级）** + **资源生命周期（后台进程树随会话终止）** | `tests/invariants/`（**193 用例 / 15 文件**） |
 | **编排** | jobs · schedule · subagent · workflow（顺序步骤，符合 ADR-017）· MCP（配置门控） | `core/{jobs,schedule,subagent,workflow,mcp}.py` |
 | **持久化与恢复** | JSONL 真源 + `repair`（F060）+ FTS 派生索引（可整体重建）；**间隔落盘定时器**（有上界崩溃窗口） | `persistence.py` · `repair.py` · `engine.py` |

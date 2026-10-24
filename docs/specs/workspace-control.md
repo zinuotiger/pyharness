@@ -1,14 +1,16 @@
 # 工作空间控制协议 — 首个项目元数据切片
 
+> **本次阅读范围（仅文档静态核对）**：以下首切片契约与后续切片记录保留其原始数字、限制、功能步骤及阶段状态，不是现行全部能力或验收结论；未注明日期的状态本次未独立重验，不补编日期。参考提交8f99f4f0390c82abc1ddf02e4c78b90a871fe07a的[词表源码](../../pyharness/events/vocab.py)第110、204、315行静态对应90类事件/22类强同步，并包含execution.context。当前严格资源分派以[载荷源码](../../pyharness/events/payload_workspace.py)为准；正式任务与输入接缝见[产品任务协议](product-tasks.md)，交付核验与限制导航见[统一版本说明](../user-guide/unified-delivery.md)。本次未运行产品或测试。
+
 > 当前状态更新（2026-10-21）：本规格对应能力已在S08–S18相应阶段及S18统一版本中验收。下文旧阶段状态为实现历史，当前边界与交付核验见[统一版本说明](../user-guide/unified-delivery.md)。S19最终交付须以新源码冻结和新CI为准。
 
 
-实现状态：历史增量如下；S04已新增正式产品任务与确切输入绑定/只读运行前置，当前协议见product-tasks.md。其余领域、任务执行/写回及五方向整体尚未完成。
+历史实现状态（原阶段记录，本次未独立重验）：历史增量如下；S04已新增正式产品任务与确切输入绑定/只读运行前置，当前协议见product-tasks.md。其余领域、任务执行/写回及五方向整体尚未完成。
 
 ## 契约
 ProjectRevision：schema_version=1、project_id匹配p-[0-9a-f]{16}、revision正整数、name非空白且≤100、description≤2000、archived布尔。禁止额外字段和运行时修改，不包含任意宿主路径/客户端tenant/actor。
 
-workspace.resource_committed载荷：schema_version=1、resource_kind=project/source_grant/source_snapshot（各有严格子模型）、resource_id、revision、parent_revision、blob_ref、digest、command_id、request_digest、actor_ref。blob_ref=digest均为64位小写hex，revision=parent_revision+1，命令键为1–128安全字符。source_snapshot身份为ss-16hex且仅r1/p0。事件强同步。当前生产词表83类型/强同步16类型，唯一权威仍events/vocab.py，历史文档中的旧计数不作为当前断言。
+首切片历史契约（不是当前全部资源种类清单）：workspace.resource_committed载荷：schema_version=1、resource_kind=project/source_grant/source_snapshot（各有严格子模型）、resource_id、revision、parent_revision、blob_ref、digest、command_id、request_digest、actor_ref。blob_ref=digest均为64位小写hex，revision=parent_revision+1，命令键为1–128安全字符。source_snapshot身份为ss-16hex且仅r1/p0。事件强同步。原首切片记录的生产词表为83类型/强同步16类型（历史数字保留，其当时准确性本次未独立复核）；现行参考提交静态登记为90类型/强同步22类型，以events/vocab.py为准。
 
 ## 端点
 GET /api/v1/projects：受权项目列表与精确total，上限200项目。POST同路径：严格body包含project_id、expected_revision、name、可选description/archived；Idempotency-Key必填；相同主体同key同body返回历史结果，不同body409；CAS旧版本409。创建只写元数据，不扫描或授权目录，不提交任务。归档是新revision，不删除历史。
@@ -28,7 +30,7 @@ GET /api/v1/workspace/audit：无查询参数时保留旧版全量events/total�
 ## 持久化和故障
 ADR-038规定SessionLog唯一提交事实。blob先于事件，孤儿不是已创建资源；强同步后必须准确读回事件。日志身份/seq不连续、坏行/残行、blob缺失或hash变化拒绝，不自动repair/delete。append失败后owner fail closed直到重开。不保证跨远端exactly-once，本切片没有外部效果。
 
-## 界面
+## 界面（首切片历史记录，原“尚未交付”不代表现行状态）
 Web左侧“项目空间”或/#projects；保存/编辑/归档/取消归档/版本摘要/控制seq。页面“控制审计”查看全部控制事实，每项目“项目审计”过滤该ID；只读dialog提供上一页/下一页/刷新水位，展示seq/type/resource/revision/digest、精确总数与固定水位；加载/空/权限/失败/过期状态不造成功。ESC或关闭返回触发按钮，关闭/换页失效旧异步响应。所有用户文本esc或textContent输出；未知提交保留同key同body核对重试，不用新键自动重发。旧入口保留。只读目录授权见下节；快照/资料/任务关联/原生项目页尚未交付，页面明确提示。
 
 ## 已有验证

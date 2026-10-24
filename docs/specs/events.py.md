@@ -1,15 +1,17 @@
 # specs/events.py.md — 编码规格
 
-S08增量：`ExecutionCheckpointPayload` / `execution.checkpoint`、`execution.correction_applied`及实际状态伴随事实`execution.state_checkpoint`强同步注册，当前89类型/22强同步（保留全部旧86/19）。逻辑检查点绑定本人日志前缀与实际消息摘要，状态伴随事实绑定精确checkpoint与私有blob；只观察、不授予工具重放，见[ADR-027](../decisions/ADR-027-execution-checkpoints.md)。
+> **现行静态参考与历史范围**：参考提交8f99f4f0390c82abc1ddf02e4c78b90a871fe07a的[词表源码](../../pyharness/events/vocab.py)第110、204、315行静态登记为90类核心事件、22类强同步，并包含execution.context；后者为[ADR-031](../decisions/ADR-031-public-run-observation.md)的有界公开上下文观察，不是执行授权。下文S08的89/22、旧86/19及57、74/72等数字保留在原阶段/基线语境，不作为现行总量；原阶段验收或测试声明本次未独立重验。现行交付与限制导航见[统一版本说明](../user-guide/unified-delivery.md)。本次未运行产品或测试。
 
-产品控制增量：`WorkspaceResourceCommittedPayload` / `workspace.resource_committed` 已注册且强同步；最初资源约束见 [workspace-control.md](workspace-control.md)，当前全部严格resource_kind及对应ID分派以`events/payload_workspace.py`为准。上下文、Git/非Git输入、文档/引用/交付、RunAttempt、执行授权和取消沿同一控制事实扩展。SourceSnapshot等不可变提交只允许revision=1/parent_revision=0；task_definition保留schema1不可执行TaskContextReference，并支持schema2正式ProductTask，二者保存都不自动执行。事件只含摘要引用，不含清单正文、路径或创建者私有定义。当前完整词表89类型、强同步22类型（S07执行/私有委派见ADR-026，S08检查点见ADR-027），新增资源种类不增加事件名。
+S08增量：`ExecutionCheckpointPayload` / `execution.checkpoint`、`execution.correction_applied`及实际状态伴随事实`execution.state_checkpoint`强同步注册，S08阶段89类型/22强同步（保留全部旧86/19）。逻辑检查点绑定本人日志前缀与实际消息摘要，状态伴随事实绑定精确checkpoint与私有blob；只观察、不授予工具重放，见[ADR-027](../decisions/ADR-027-execution-checkpoints.md)。
+
+产品控制增量：`WorkspaceResourceCommittedPayload` / `workspace.resource_committed` 已注册且强同步；最初资源约束见 [workspace-control.md](workspace-control.md)，当前全部严格resource_kind及对应ID分派以`events/payload_workspace.py`为准。上下文、Git/非Git输入、文档/引用/交付、RunAttempt、执行授权和取消沿同一控制事实扩展。SourceSnapshot等不可变提交只允许revision=1/parent_revision=0；task_definition保留schema1不可执行TaskContextReference，并支持schema2正式ProductTask，二者保存都不自动执行。事件只含摘要引用，不含清单正文、路径或创建者私有定义。S08阶段完整词表89类型、强同步22类型；本次参考提交的静态登记为90类型/22强同步（含execution.context）（S07执行/私有委派见ADR-026，S08检查点见ADR-027），新增资源种类不增加事件名。
 
 > 目标代码:pyharness/events/(envelope.py 信封模型、vocab.py 词表注册、payload.py 各事件负载模型),即 PRD-Core §3 事件协议的实现载体,供 pyharness/core/session.py(F009)唯一写入口调用。AI 编码 Agent 只读本文件即可实现事件校验全链。权威源:PRD-Core.md §3.1-§3.8(信封/词表/seq/违规表)、§8.2;EVENT-SCHEMA.md(字段级权威展开);ERR.md §2.2(EVT-1xx);DIS-SEAM.md §4.4(全流程与保证)。全中文,仅 Python,禁 TS。
 
 ## 模块职责
 一句话:会话事件唯一的 pydantic 模型层——Envelope 信封强校验 + 57 个事件负载词表注册 + 五步校验链(任一失败拒写,不进内存/总线/日志),被 session.append 作为唯一写入口闸门。
 
-> **注(2026-09-14)**:"**57** 个事件负载"为**基线引用**(PARAMETER-ANCHOR 基线 57),**保留不改**;后续版本已演进至现行 **`EVENT_TYPES = 74`**(72 payload 模型),见 `docs/EVENT-SCHEMA.md` §3 与 `docs/baseline/`。本文件余下"57"同属基线语境。
+> **注(2026-09-14)**:"**57** 个事件负载"为**基线引用**(PARAMETER-ANCHOR 基线 57),**保留不改**;该历史注记所述后续版本为 **`EVENT_TYPES = 74`**(72 payload 模型),见 `docs/EVENT-SCHEMA.md` §3 与 `docs/baseline/`。本文件余下"57"同属基线语境。
 
 ## 依赖
 | import | 用途 |
